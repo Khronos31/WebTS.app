@@ -1,0 +1,32 @@
+# Dependencies and build output
+node_modules/
+build/
+dist/
+coverage/
+.cache/
+
+# Local-only hardware inputs and captures
+local/
+.local/
+captures/
+fixtures/captures/
+isdbt_rio.inp
+*.bin
+*.fw
+*.rom
+*.dump
+*.pcap
+*.pcapng
+*.m2ts
+*.mts
+
+# Local configuration and credentials
+.env
+.env.*
+!.env.example
+
+# Editors and operating systems
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
