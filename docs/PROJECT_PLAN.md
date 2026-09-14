@@ -81,7 +81,7 @@ demux -> video/audio decoder -> renderer/audio output
 
 - UIは機種固有USB endpointや制御コマンドを知らない。
 - `TunerAdapter` は open、firmware、tune、start、stop、close、状態通知を非同期契約として持つ。
-- PX-S1UD と PX-Q3U4 の列挙、再列挙、切断、終了処理は別アダプタへ閉じ込める。
+- PX-S1UD と PX-Q3U4 の列挙、識別子変化の有無、切断、終了処理は別アダプタへ閉じ込める。
 - PX-Q3U4のカード通信は同じデバイス所有者を経由し、別WorkerからUSB handleを共有しない。
 
 ### 7.3 ストリーム
@@ -112,7 +112,7 @@ COOP/COEP等のレスポンスヘッダをリポジトリ内で管理できる�
 - 利用者操作からPX-S1UDとPX-Q3U4を個別に選択できる。
 - descriptor取得、open、configuration選択、interface claim/release、closeを確認する。
 - 切断と再接続を状態遷移として記録する。
-- PX-S1UDのファームウェア前後の再列挙と権限挙動を記録する。
+- PX-S1UDのfirmware/mode適用前後で再列挙やUSB識別子変化が起きるかを観測し、権限挙動とともに記録する。
 - 対象OS、ブラウザの正確なバージョン、必要なドライバbindingを互換表へ記録する。
 
 ### M1: 生TSの持続取得
@@ -148,7 +148,14 @@ COOP/COEP等のレスポンスヘッダをリポジトリ内で管理できる�
 
 ## 9. 未決事項
 
-1. 最初に実機検証するOSとChromium系ブラウザ。
-2. PX-S1UDでフルセグを復号する際の`CardProvider`。
-3. decoder候補とライセンス。M1完了前には固定しない。
-4. SharedArrayBufferが必要か。実測前には固定しない。
+1. PX-S1UDでフルセグを復号する際の`CardProvider`。
+2. decoder候補とライセンス。M1完了前には固定しない。
+3. SharedArrayBufferが必要か。実測前には固定しない。
+
+## 10. 実機検証順序
+
+1. Windows 11 + Google Chrome
+2. Android + Google Chrome
+
+最初の詳細な受け入れ条件は
+[M0: Windows 11 + Chrome WebUSB probe](M0_WINDOWS_CHROME.md)に記録する。

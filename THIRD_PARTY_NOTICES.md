@@ -12,6 +12,9 @@
 | stz2012/libarib25 | 未固定 | Apache-2.0 | reference-only | Native behavior comparison |
 | tsukumijima/libaribb25 | 未固定 | Apache-2.0 | reference-only | Native behavior comparison |
 | kazuki0824/recisdb-rs | 未固定 | GPL-3.0 and Apache-2.0 components | reference-only | Native behavior comparison |
+| TypeScript | 7.0.2 | Apache-2.0 | adopted, build-only | Type checking and compilation |
+| Vite | 8.3.0 | MIT | adopted, build-only | Development server and static build |
+| Vitest | 5.0.0 | MIT | adopted, test-only | Unit tests |
 
 ## Runtime license policy
 
@@ -20,6 +23,9 @@
 - 第三者コードは取得元、commit/tag、checksum、ライセンス、変更patchを固定する。
 - 配布artifactと同時に、再現に必要な正確な対応ソースとライセンス通知を提供する。
 - ビルドツールと配布ランタイムを区別し、生成物へ取り込まれるruntime helperは個別に監査する。
+- npmの正確な直接・推移依存は`package-lock.json`へ固定する。現時点の推移依存には
+  MIT、ISC、BSD-3-Clause、Apache-2.0、MPL-2.0のbuild/test用packageが含まれる。
+  公開artifactへコードが取り込まれる場合は、そのartifact側の通知と互換性を別途確認する。
 
 ## Firmware and captured data
 
