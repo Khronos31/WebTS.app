@@ -155,21 +155,29 @@ try {
     // this repository, and so it can be offered upstream unchanged.
     const patchFile = join(patchRoot, `${source.name}.diff`);
     if (modifiedCount > 0) {
+      // Produce a diff that `git apply` accepts, with paths relative to the
+      // source root under the usual a/ and b/ prefixes. The build reverses it
+      // to reconstruct the pristine upstream tree without needing network.
+      const stage = join(workRoot, `${source.name}-diff`);
       const chunks = [];
       for (const file of files.filter((f) => f.modified)) {
         const parts = file.path.split('/');
+        for (const [side, from] of [['a', work], ['b', destRoot]]) {
+          const to = join(stage, side, ...parts);
+          mkdirSync(dirname(to), { recursive: true });
+          writeFileSync(to, readFileSync(join(from, ...parts)));
+        }
         const diff = spawnSync('git', [
-          'diff', '--no-index', '--no-color', '--src-prefix=upstream/', '--dst-prefix=vendored/',
-          join(work, ...parts), join(destRoot, ...parts),
-        ], { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
+          'diff', '--no-index', '--no-color', '--src-prefix=', '--dst-prefix=',
+          `a/${file.path}`, `b/${file.path}`,
+        ], { cwd: stage, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
         if (diff.status !== 1) {
           throw new Error(`${source.name}: expected a diff for ${file.path}, git exited ${diff.status}`);
         }
-        chunks.push(`diff for ${file.path}
-${diff.stdout}`);
+        chunks.push(diff.stdout);
       }
       mkdirSync(patchRoot, { recursive: true });
-      writeFileSync(patchFile, chunks.join('\n'));
+      writeFileSync(patchFile, chunks.join(''));
       process.stdout.write(`${source.name}: wrote ${relative(repoRoot, patchFile)}
 `);
     } else if (existsSync(patchFile)) {

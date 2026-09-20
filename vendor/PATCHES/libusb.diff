@@ -1,8 +1,7 @@
-diff for libusb/io.c
-diff --git "upstream/C:\\Users\\YUNOMI~1\\AppData\\Local\\Temp\\webts-vendor-0GY2CE\\libusb\\libusb\\io.c" "vendored/C:\\Users\\yunomin61\\Documents\\GitHub\\WebTS.app\\vendor\\upstream\\libusb\\libusb\\io.c"
+diff --git a/libusb/io.c b/libusb/io.c
 index 3dfc6c6..e739b61 100644
---- "upstream/C:\\Users\\YUNOMI~1\\AppData\\Local\\Temp\\webts-vendor-0GY2CE\\libusb\\libusb\\io.c"
-+++ "vendored/C:\\Users\\yunomin61\\Documents\\GitHub\\WebTS.app\\vendor\\upstream\\libusb\\libusb\\io.c"
+--- a/libusb/io.c
++++ b/libusb/io.c
 @@ -21,6 +21,14 @@
   * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
   */
@@ -38,12 +37,10 @@ index 3dfc6c6..e739b61 100644
  
  		usbi_mutex_lock(&to_cancel->lock);
  		usbi_backend.clear_transfer_priv(to_cancel);
-
-diff for libusb/os/emscripten_webusb.cpp
-diff --git "upstream/C:\\Users\\YUNOMI~1\\AppData\\Local\\Temp\\webts-vendor-0GY2CE\\libusb\\libusb\\os\\emscripten_webusb.cpp" "vendored/C:\\Users\\yunomin61\\Documents\\GitHub\\WebTS.app\\vendor\\upstream\\libusb\\libusb\\os\\emscripten_webusb.cpp"
+diff --git a/libusb/os/emscripten_webusb.cpp b/libusb/os/emscripten_webusb.cpp
 index 63d0b10..de83992 100644
---- "upstream/C:\\Users\\YUNOMI~1\\AppData\\Local\\Temp\\webts-vendor-0GY2CE\\libusb\\libusb\\os\\emscripten_webusb.cpp"
-+++ "vendored/C:\\Users\\yunomin61\\Documents\\GitHub\\WebTS.app\\vendor\\upstream\\libusb\\libusb\\os\\emscripten_webusb.cpp"
+--- a/libusb/os/emscripten_webusb.cpp
++++ b/libusb/os/emscripten_webusb.cpp
 @@ -20,6 +20,17 @@
   *		Ingvar Stepanyan <me@rreverser.com>
   */
@@ -260,12 +257,10 @@ index 63d0b10..de83992 100644
 +	return webts_ownership_counters.late_after_settle;
 +}
 +#endif  /* WEBTS_LIBUSB_TEST_HOOKS */
-
-diff for libusb/os/events_posix.c
-diff --git "upstream/C:\\Users\\YUNOMI~1\\AppData\\Local\\Temp\\webts-vendor-0GY2CE\\libusb\\libusb\\os\\events_posix.c" "vendored/C:\\Users\\yunomin61\\Documents\\GitHub\\WebTS.app\\vendor\\upstream\\libusb\\libusb\\os\\events_posix.c"
+diff --git a/libusb/os/events_posix.c b/libusb/os/events_posix.c
 index bf984b9..57334b7 100644
---- "upstream/C:\\Users\\YUNOMI~1\\AppData\\Local\\Temp\\webts-vendor-0GY2CE\\libusb\\libusb\\os\\events_posix.c"
-+++ "vendored/C:\\Users\\yunomin61\\Documents\\GitHub\\WebTS.app\\vendor\\upstream\\libusb\\libusb\\os\\events_posix.c"
+--- a/libusb/os/events_posix.c
++++ b/libusb/os/events_posix.c
 @@ -18,6 +18,14 @@
   * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
   */

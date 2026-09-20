@@ -74,7 +74,7 @@ for (const source of lock.sources) {
       modified += 1;
       // A modified file must be reviewable: it needs a recorded diff and a
       // change notice, because the upstream licences require stating changes.
-      if (!patch.includes(`diff for ${file.path}`)) {
+      if (!patch.includes(`diff --git a/${file.path} b/${file.path}`)) {
         fail(`${source.name}: ${file.path} is modified but absent from vendor/PATCHES/${source.name}.diff`);
       }
       if (!readFileSync(full, 'utf8').includes('WebTS.app project')) {

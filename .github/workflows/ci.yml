@@ -37,3 +37,27 @@ jobs:
             echo "::error::build path must not depend on PowerShell"
             exit 1
           fi
+
+  # The transfer-ownership fix is only meaningful if the unmodified upstream
+  # still fails. This builds both variants from the same vendored tree — stock
+  # is reconstructed by reverse-applying vendor/PATCHES/libusb.diff — and runs
+  # every scenario in its own bounded child against a fake navigator.usb.
+  # No real USB is involved.
+  libusb-regression:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+
+      - uses: mymindstorm/setup-emsdk@v14
+        with:
+          version: 6.0.9
+          actions-cache-folder: emsdk-cache
+
+      - run: npm ci
+
+      - run: npm run regression:libusb

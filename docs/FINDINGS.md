@@ -47,6 +47,15 @@ source-bound harness で、1 scenario = 1 隔離プロセス / Dedicated Worker 
 している場合、stock は Node でも Chrome でも実際に `abort()` した。これは従来「未証明」と
 していた use-after-free を、合成入力で再現できる形にしたものである。
 
+この表は再現できる。`npm run regression:libusb` が、同梱ツリーから両方の variant を
+組み立てて全シナリオを実行する。stock 側は `vendor/PATCHES/libusb.diff` を逆適用して
+再構成し、**再構成した木が固定上流のバイト列と一致すること**を確認してから使うため、
+ネットワークも上流の再取得も要らない。CI の `libusb-regression` ジョブが同じものを回す。
+
+Node 側は pthread ビルドである。無改変の `events_posix.c` が `Atomics.waitAsync` を
+HEAP32 に対して呼ぶため、共有メモリでないと baseline がそもそも起動しない。ブラウザ
+Worker 向けは no-pthread ビルドで、そちらの事情は次章。
+
 ### 修正には core の変更も要る
 
 backend だけを直しても「cancel → event処理前に disconnect」で二重完了が残る。
