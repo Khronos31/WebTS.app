@@ -20,6 +20,17 @@
  *		Ingvar Stepanyan <me@rreverser.com>
  */
 
+
+/*
+ * Modified 2026-09-21 by the WebTS.app project.
+ * Changed: transfer private data now holds shared state plus an optional
+ * PromiseResult instead of a bare PromiseResult, so the pending WebUSB
+ * promise callback no longer captures a raw usbi_transfer pointer;
+ * em_cancel_transfer() delivers one bounded logical completion; and the
+ * transfer private data is destroyed and the shared state detached before
+ * the libusb user callback, which is allowed to free the transfer.
+ * Rationale and measurements: docs/FINDINGS.md section 1.
+ */
 #include <emscripten/version.h>
 
 static_assert((__EMSCRIPTEN_major__ * 100 * 100 + __EMSCRIPTEN_minor__ * 100 +
@@ -30,6 +41,8 @@ static_assert((__EMSCRIPTEN_major__ * 100 * 100 + __EMSCRIPTEN_minor__ * 100 +
 #include <emscripten.h>
 #include <emscripten/val.h>
 
+#include <memory>
+#include <optional>
 #include <type_traits>
 #include <utility>
 
@@ -385,12 +398,52 @@ public:
 		: WebUsbDevicePtr(handle->dev) {}
 };
 
-struct WebUsbTransferPtr : ValPtr<PromiseResult> {
+/* --- WebTS.app test-only ownership patch (not upstream) -------------------
+ * State shared between the backend transfer private data and the pending
+ * WebUSB promise callback. The promise callback holds only this shared owner,
+ * never a raw usbi_transfer*, so a libusb user callback that frees the
+ * transfer cannot be followed by a late promise touching freed memory.
+ */
+struct TransferSharedState {
+	usbi_transfer* itransfer = nullptr;
+	bool settled = false;
+	bool detached = false;
+	bool cancel_requested = false;
+};
+
+struct WebtsOwnershipCounters {
+	unsigned priv_constructed = 0;
+	unsigned priv_destroyed = 0;
+	unsigned logical_signals = 0;
+	unsigned late_after_detach = 0;
+	unsigned late_after_settle = 0;
+};
+
+WebtsOwnershipCounters webts_ownership_counters;
+
+struct TransferPriv {
+	std::shared_ptr<TransferSharedState> shared;
+	std::optional<PromiseResult> result;
+};
+
+struct WebUsbTransferPtr : ValPtr<TransferPriv> {
 public:
 
 	WebUsbTransferPtr(usbi_transfer* itransfer)
 		: ValPtr(usbi_get_transfer_priv(itransfer)) {}
 };
+
+/* Render a later promise callback inert. This must happen before libusb's
+ * user callback runs, because that callback is allowed to free the transfer.
+ */
+void webts_detach_shared(const std::shared_ptr<TransferSharedState>& shared) {
+	if (!shared) {
+		return;
+	}
+	shared->detached = true;
+	shared->itransfer = nullptr;
+}
+/* --- end WebTS.app test-only ownership patch ---------------------------- */
 
 enum class OpenClose : bool {
 	Open = true,
@@ -797,21 +850,64 @@ int em_submit_transfer(usbi_transfer* itransfer) {
 		}
 		// Not a coroutine because we don't want to block on this promise, just
 		// schedule an asynchronous callback.
+		/* WebTS.app test-only ownership patch: construct the transfer private
+		 * data up front and give the promise callback only a shared owner. */
+		auto shared = std::make_shared<TransferSharedState>();
+		shared->itransfer = itransfer;
+		WebUsbTransferPtr(itransfer).emplace();
+		WebUsbTransferPtr(itransfer)->shared = shared;
+		webts_ownership_counters.priv_constructed++;
 		promiseThen(CaughtPromise(std::move(transfer_promise)),
-					[itransfer](auto&& result) {
-						WebUsbTransferPtr(itransfer).emplace(std::move(result));
-						usbi_signal_transfer_completion(itransfer);
+					[shared](auto&& result) {
+						if (shared->detached) {
+							webts_ownership_counters.late_after_detach++;
+							return;
+						}
+						if (shared->settled) {
+							webts_ownership_counters.late_after_settle++;
+							return;
+						}
+						shared->settled = true;
+						auto* target = shared->itransfer;
+						WebUsbTransferPtr(target)->result.emplace(
+							std::move(result));
+						webts_ownership_counters.logical_signals++;
+						usbi_signal_transfer_completion(target);
 					});
 		return LIBUSB_SUCCESS;
 	});
 }
 
 void em_clear_transfer_priv(usbi_transfer* itransfer) {
-	WebUsbTransferPtr(itransfer).free();
+	/* WebTS.app test-only ownership patch: detach before destroying, because
+	 * core's disconnect path invokes the user callback right after this. */
+	runOnMain([itransfer] {
+		auto ptr = WebUsbTransferPtr(itransfer);
+		webts_detach_shared(ptr->shared);
+		ptr.free();
+		webts_ownership_counters.priv_destroyed++;
+	});
 }
 
 int em_cancel_transfer(usbi_transfer* itransfer) {
-	return LIBUSB_SUCCESS;
+	/* WebTS.app test-only ownership patch: a pending WebUSB promise cannot be
+	 * aborted, so deliver a bounded logical cancellation exactly once and let
+	 * the shared state discard the promise result when it arrives later. */
+	return runOnMain([itransfer]() -> int {
+		auto ptr = WebUsbTransferPtr(itransfer);
+		auto shared = ptr->shared;
+		if (!shared) {
+			return LIBUSB_ERROR_NOT_FOUND;
+		}
+		shared->cancel_requested = true;
+		if (shared->settled) {
+			return LIBUSB_SUCCESS;
+		}
+		shared->settled = true;
+		webts_ownership_counters.logical_signals++;
+		usbi_signal_transfer_completion(itransfer);
+		return LIBUSB_SUCCESS;
+	});
 }
 
 int em_handle_transfer_completion(usbi_transfer* itransfer) {
@@ -822,9 +918,26 @@ int em_handle_transfer_completion(usbi_transfer* itransfer) {
 		// not called automatically for completed transfers and we must free it
 		// to avoid leaks.
 
-		auto result = WebUsbTransferPtr(itransfer).take();
+		/* WebTS.app test-only ownership patch: take and destroy the transfer
+		 * private data, then detach the shared state, before the user callback
+		 * (which is allowed to free this transfer) can run. */
+		auto priv = WebUsbTransferPtr(itransfer).take();
+		webts_ownership_counters.priv_destroyed++;
+		const bool cancelling =
+			(itransfer->state_flags & USBI_TRANSFER_CANCELLING) ||
+			(priv.shared && priv.shared->cancel_requested);
+		webts_detach_shared(priv.shared);
 
-		if (itransfer->state_flags & USBI_TRANSFER_CANCELLING) {
+		if (!priv.result.has_value()) {
+			/* A logical cancellation was signalled before the WebUSB promise
+			 * settled, so there is no transfer result to interpret. */
+			return cancelling ? LIBUSB_TRANSFER_CANCELLED
+							  : LIBUSB_TRANSFER_ERROR;
+		}
+
+		auto& result = *priv.result;
+
+		if (cancelling) {
 			return LIBUSB_TRANSFER_CANCELLED;
 		}
 
@@ -890,7 +1003,33 @@ extern "C" const usbi_os_backend usbi_backend = {
 	.clear_transfer_priv = em_clear_transfer_priv,
 	.handle_transfer_completion = em_handle_transfer_completion,
 	.device_priv_size = sizeof(CachedDevice),
-	.transfer_priv_size = sizeof(PromiseResult),
+	.transfer_priv_size = sizeof(TransferPriv),
 };
 
 #pragma clang diagnostic pop
+
+#ifdef WEBTS_LIBUSB_TEST_HOOKS
+/* --- WebTS.app test-only ownership patch observation hooks ----------------
+ * Fixed counters for the isolated regression harness only. No payload, device
+ * identifier, serial, or raw error is exposed through these.
+ */
+extern "C" unsigned webts_libusb_em_priv_constructed_count(void) {
+	return webts_ownership_counters.priv_constructed;
+}
+
+extern "C" unsigned webts_libusb_em_priv_destroyed_count(void) {
+	return webts_ownership_counters.priv_destroyed;
+}
+
+extern "C" unsigned webts_libusb_em_logical_signal_count(void) {
+	return webts_ownership_counters.logical_signals;
+}
+
+extern "C" unsigned webts_libusb_em_late_after_detach_count(void) {
+	return webts_ownership_counters.late_after_detach;
+}
+
+extern "C" unsigned webts_libusb_em_late_after_settle_count(void) {
+	return webts_ownership_counters.late_after_settle;
+}
+#endif  /* WEBTS_LIBUSB_TEST_HOOKS */

@@ -21,6 +21,14 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
  */
 
+
+/*
+ * Modified 2026-09-21 by the WebTS.app project.
+ * Changed: usbi_handle_disconnect() now reclaims a completion the backend
+ * has already queued before running its own NO_DEVICE completion, so a
+ * transfer completes exactly once across the two paths.
+ * Rationale and measurements: docs/FINDINGS.md section 1.
+ */
 #include "libusbi.h"
 
 /**
@@ -2860,6 +2868,19 @@ void usbi_handle_disconnect(struct libusb_context *ctx, struct libusb_device_han
 		usbi_dbg(ctx, "cancelling transfer %p from disconnect",
 			 (void *) transfer_to_cancel);
 #endif
+		/* WebTS.app test-only ownership patch (not upstream): the backend may
+		 * already have queued a logical completion for this transfer, for example
+		 * a cancellation it cannot physically abort. Take that queued completion
+		 * back before completing here, so the transfer is completed exactly once
+		 * and the event loop never dereferences it after the user callback may
+		 * have freed it. list_del() nulls the entry, so this is idempotent. */
+		usbi_mutex_lock(&ctx->event_data_lock);
+		if (to_cancel->completed_list.next != NULL) {
+			list_del(&to_cancel->completed_list);
+			if (list_empty(&ctx->completed_transfers))
+				ctx->event_flags &= ~USBI_EVENT_TRANSFER_COMPLETED;
+		}
+		usbi_mutex_unlock(&ctx->event_data_lock);
 
 		usbi_mutex_lock(&to_cancel->lock);
 		usbi_backend.clear_transfer_priv(to_cancel);

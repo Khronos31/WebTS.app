@@ -16,7 +16,7 @@
       "license": "LGPL-2.1-or-later",
       "root": "vendor/upstream/libusb",
       "fileCount": 20,
-      "modifiedCount": 0,
+      "modifiedCount": 3,
       "files": [
         {
           "path": "AUTHORS",
@@ -61,7 +61,8 @@
         {
           "path": "libusb/io.c",
           "upstreamSha256": "c83a9e14b9ff8b9566e42d23d1e90c919e223fd1e04721c5ca1a3aff13239a3d",
-          "vendoredSha256": "c83a9e14b9ff8b9566e42d23d1e90c919e223fd1e04721c5ca1a3aff13239a3d"
+          "vendoredSha256": "3795e1c1f4b381739f9e8151c4fd76d458bb8863193823ad5e9c078225d5e4fc",
+          "modified": true
         },
         {
           "path": "libusb/libusb.h",
@@ -76,12 +77,14 @@
         {
           "path": "libusb/os/emscripten_webusb.cpp",
           "upstreamSha256": "dd8f91bbc3e1c75974c27a27fa2c162c285e3e3f5ef1a3c64018564656e758dd",
-          "vendoredSha256": "dd8f91bbc3e1c75974c27a27fa2c162c285e3e3f5ef1a3c64018564656e758dd"
+          "vendoredSha256": "57e95fa5806c04e390930f7dadce710bf8b480c585a41f04f62655836b1ca02a",
+          "modified": true
         },
         {
           "path": "libusb/os/events_posix.c",
           "upstreamSha256": "aabddcc6ca86faba726ca87862eef9fc5d3b3168faef99c5be22827ac5b66ec0",
-          "vendoredSha256": "aabddcc6ca86faba726ca87862eef9fc5d3b3168faef99c5be22827ac5b66ec0"
+          "vendoredSha256": "83d6da19e9bdd8ab93a3138ebc4bdfcddf656737fef7a4c70050dec522bdca5a",
+          "modified": true
         },
         {
           "path": "libusb/os/events_posix.h",
