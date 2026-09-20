@@ -32,6 +32,39 @@ Windows 11版Google Chromeで、PX-S1UDとPX-Q3U4をチューナー制御より�
 5. PX-S1UDについて、firmware/mode適用前後で再列挙やVID:PID変化が起きるかを観測し、
    Chrome権限の挙動とともに記録できる。
 
+## Windows 11実機検証状況
+
+### PX-Q3U4
+
+Windows 11 Pro Insider Preview build 26220とWinUSB binding（provider: libwdi、
+version 6.1.7600.16385）の組合せで、次を確認した。
+
+- chooserに区別可能なPX-Q3U4が2件表示された。
+- 両候補でConfiguration #1、Interface #0、Alternate #0と同一のendpoint構成を取得した。
+- 両候補でselect、open、vendor-specific Interface #0のclaim、release、closeが成功した。
+- claim中の物理切断で`OPENED -> DISCONNECTED`となり、再接続後の新しいsessionも成功した。
+- 終了時に全interfaceをreleaseし、全deviceをcloseした。
+
+chooser上の識別値は保存していないため、2つのchooser行をWindows上の2つのdevice instanceへ
+事後に一意対応付けすることはできない。Chromeの正確なversionも未取得であり、M0全体の
+version記録要件は未完了とする。descriptor詳細は[互換表](COMPATIBILITY.md)に記録する。
+
+### PX-S1UD
+
+Windows 11 Pro Insider Preview build 26220とGoogle Chromeで、以下を確認した。
+
+- `3275:0080`を利用者操作で選択し、active Configuration #1、Interface #0、
+  Alternate #0と2本のbulk endpointを表示できた。明示的なconfiguration選択は不要だった。
+- vendor-specific Interface #0のclaim、release、closeが成功した。
+- claim中の物理切断で`OPENED -> DISCONNECTED`を検出した。
+- 再接続後は新しいsessionでselect、open、claim、release、closeが成功した。
+- 終了時に全interfaceをreleaseし、deviceをcloseした。
+
+Windowsのsigned-driver情報ではprovider `libwdi`、version `6.1.7600.16385`だった。
+binding方式、Chromeの正確なversion、firmware/mode適用前後の
+再列挙・VID:PID変化・権限挙動は未確認である。firmware/mode適用は今回の
+M0プローブで実施していない。descriptor詳細は[互換表](COMPATIBILITY.md)に記録する。
+
 ## Non-goals
 
 - firmware upload、選局、TS受信、B25、映像・音声再生
