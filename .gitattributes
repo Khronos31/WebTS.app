@@ -4,3 +4,9 @@
 *.jpg binary
 *.jpeg binary
 *.webp binary
+
+# Vendored upstream sources are byte-pinned by vendor/SOURCE_LOCK.json, whose
+# SHA-256 values are taken over the exact bytes on disk. Never normalize line
+# endings here: doing so makes scripts/check-vendor-sources.ps1 fail on a fresh
+# checkout. Diffs stay enabled, so source review is unaffected.
+vendor/** -text
