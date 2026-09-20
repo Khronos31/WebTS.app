@@ -23,7 +23,9 @@ jobs:
 
       - run: npm ci
 
-      - name: Typecheck, test and build
+      # npm run check starts with the vendor hash verification, so a tampered
+      # or out-of-date vendor tree fails before anything is built.
+      - name: Verify vendor, typecheck, test and build
         run: npm run check
 
       # The build must run on Linux CI. This guard covers package.json and

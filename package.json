@@ -14,7 +14,8 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "vendor:check": "node scripts/check-vendor-sources.mjs",
-    "check": "npm run typecheck && npm run test && npm run build"
+    "check": "npm run vendor:check && npm run typecheck && npm run test && npm run build",
+    "vendor:sync": "node scripts/vendor-sync.mjs"
   },
   "devDependencies": {
     "typescript": "7.0.2",

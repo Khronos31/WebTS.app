@@ -1,0 +1,104 @@
+{
+  "schema": 2,
+  "comment": [
+    "Pinned upstream sources. scripts/vendor-sync.mjs fetches each commit and",
+    "copies the selected files into vendor/upstream/<name>/, preserving upstream",
+    "paths so the lock and the patches can be checked against upstream directly.",
+    "Everything is fetched with core.autocrlf=false, so the recorded hashes are",
+    "over the upstream bytes and reproduce on any platform.",
+    "No firmware, executable binary, captured TS or card data is vendored."
+  ],
+  "sources": [
+    {
+      "name": "libusb",
+      "origin": "https://github.com/libusb/libusb.git",
+      "ref": "v1.0.30",
+      "commit": "87a55632db62c9bdc58cd31d3ccfa673f1bb017f",
+      "license": "LGPL-2.1-or-later",
+      "purpose": "Official Emscripten/WebUSB backend and the core it needs.",
+      "selectionNote": [
+        "Only the files the Emscripten build links. The other os/ backends",
+        "(linux, darwin, windows, haiku, sunos, netbsd, openbsd) are not",
+        "vendored. libusb-1.0.def is Windows DLL export plumbing and is not",
+        "needed either. config.h is generated at build time, not vendored."
+      ],
+      "include": [
+        "libusb/core.c",
+        "libusb/descriptor.c",
+        "libusb/hotplug.c",
+        "libusb/io.c",
+        "libusb/strerror.c",
+        "libusb/sync.c",
+        "libusb/libusb.h",
+        "libusb/libusbi.h",
+        "libusb/version.h",
+        "libusb/version_nano.h",
+        "libusb/os/emscripten_webusb.cpp",
+        "libusb/os/events_posix.c",
+        "libusb/os/events_posix.h",
+        "libusb/os/threads_posix.c",
+        "libusb/os/threads_posix.h",
+        "COPYING",
+        "AUTHORS",
+        "README",
+        "ChangeLog",
+        "NEWS"
+      ]
+    },
+    {
+      "name": "px4-userland",
+      "origin": "https://github.com/Khronos31/px4-userland.git",
+      "ref": null,
+      "commit": "10a373dbda0603b2d8180bb2508e2d88dd70eb2d",
+      "license": "GPL-2.0-only",
+      "purpose": "PX-Q3U4 core: IT930x bridge, identity grouping, tagged TS demux, stream data plane, internal card backend.",
+      "selectionNote": [
+        "The whole userland library is vendored rather than a subset, because",
+        "partially vendoring a C++ project with cross-includes is fragile.",
+        "pcsc_ifd.cpp and pcsc_ifd_adapter.cpp are present but are NOT compiled",
+        "into the browser build: the host PC/SC interface has no place in a",
+        "WebUSB client. Firmware is not part of this repository."
+      ],
+      "include": [
+        "userland/src/**",
+        "userland/include/**",
+        "LICENSE",
+        "VERSION",
+        "PROVENANCE.md",
+        "THIRD_PARTY_NOTICES.md"
+      ]
+    },
+    {
+      "name": "libaribb25",
+      "origin": "https://github.com/shirow-github/libaribb25.git",
+      "ref": "v0.2.10",
+      "commit": "b978fe5caf6bfe162e944ad4d323b7c0205276e3",
+      "license": "ISC",
+      "purpose": "TS section parser, MULTI2 and the arib_std_b25 facade for M2.",
+      "selectionNote": [
+        "b_cas_card.c is the PC/SC card implementation and is deliberately NOT",
+        "vendored; the card path goes through the Q3U4 internal reader instead.",
+        "Its interface and error headers are kept so the facade still links.",
+        "td.c is the standalone CLI and is not needed."
+      ],
+      "include": [
+        "src/arib_std_b25.c",
+        "src/arib_std_b25.h",
+        "src/arib_std_b25_error_code.h",
+        "src/aribb25api.h",
+        "src/b_cas_card.h",
+        "src/b_cas_card_error_code.h",
+        "src/multi2.c",
+        "src/multi2.h",
+        "src/multi2_error_code.h",
+        "src/portable.h",
+        "src/ts_common_types.h",
+        "src/ts_section_parser.c",
+        "src/ts_section_parser.h",
+        "src/ts_section_parser_error_code.h",
+        "LICENCE",
+        "README.md"
+      ]
+    }
+  ]
+}
