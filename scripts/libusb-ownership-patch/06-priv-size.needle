@@ -1,0 +1,1 @@
+	.transfer_priv_size = sizeof(PromiseResult),

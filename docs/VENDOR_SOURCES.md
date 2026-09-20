@@ -787,3 +787,25 @@ an additive overlay or public libusb API. No vendor patch or production/UI
 connection was added; the source-bound harness is limited to the documented
 one-task-turn observation and intentionally terminates its isolated child
 without freeing the still-pending transfer.
+
+### Test-only transfer ownership patch (build copies only)
+
+固定snapshotを変更しないまま、`os/emscripten_webusb.cpp`と`io.c`のtest-only patchを
+needle/replacement対として`scripts/libusb-ownership-patch/`と
+`scripts/libusb-ownership-patch-io/`へ固定した。`scripts/build-libusb-webusb-ownership-source.ps1`
+は各hunkが固定sourceに**ちょうど1回**一致することを検証してから`build/`配下の無視される
+copyを生成し、patch後の不変条件（`ValPtr<PromiseResult>`が消えていること、
+`TransferSharedState`と観測hookがあること等）も検査する。一致しなければ生成が失敗するため、
+vendor更新時にpatchが黙って腐ることはない。
+
+patchの内容と検査結果は[`docs/M1_FOUNDATION.md`](M1_FOUNDATION.md)の
+「Source-bound transfer ownership patch」に記録する。要点は、backendのpromise callbackが
+生の`usbi_transfer*`ではなくshared stateを持つこと、`em_cancel_transfer()`が有界な論理
+完了を1回だけ発行すること、transfer privateの破棄とdetachがuser callbackより前に完了すること、
+`usbi_handle_disconnect()`がbackendの発行済み完了をcompleted listから回収することである。
+
+これらは`build/`配下のbuild copyにだけ適用され、`vendor/`のsnapshot、
+`vendor/SOURCE_LOCK.json`、production build、M1 UI、実機経路には適用しない。
+`scripts/check-vendor-sources.ps1`は引き続き4 rootのhashを検証して成功する。
+WebUSBの物理abort、実Chromium/Windowsの保留転送挙動、Sianoのbounded stop/join、
+pthread buildの競合は依然として未証明である。

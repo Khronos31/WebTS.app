@@ -875,3 +875,121 @@ edges are not exposed by the backend's public API, so a backend-only patch or
 an additive overlay cannot prove late-callback safety. No patch file or
 production-build change was left; the regression harness above remains the
 honest boundary and is not a stop/join or physical-abort solution.
+
+### Source-bound transfer ownership patch (test-only, 2026-09-20)
+
+上の「Test-only backend patch assessment (not adopted)」が必要条件として挙げた
+submit時shared state、user callback前のexactly-once detach、core flying/completed list
+順序、複数handleのclose/refcountを、**隔離build copyへのtest-only patchとして一度に
+実装し、stockを失敗基準にしたsource-bound regressionで検査した**。vendor snapshotは
+変更しておらず、`scripts/check-vendor-sources.ps1`は引き続き成功する。production build、
+M1 UI、Siano/PX4の実機経路、実USBには一切接続していない。
+
+#### patchの内容
+
+patch本文は`scripts/libusb-ownership-patch/`（backend）と
+`scripts/libusb-ownership-patch-io/`（core）にneedle/replacement対として固定し、
+`scripts/build-libusb-webusb-ownership-source.ps1`が固定sourceに対して各hunkが
+**ちょうど1回**一致することを検証してから`build/`配下の無視されるcopyを生成する。
+一致しなければ生成自体が失敗する。
+
+`os/emscripten_webusb.cpp`への変更は3点である。
+
+1. transfer privateを`PromiseResult`から`TransferPriv`へ変える。`TransferPriv`は
+   submit時に構築され、`std::shared_ptr<TransferSharedState>`と
+   `std::optional<PromiseResult>`を持つ。WebUSB promiseのcallbackは生の
+   `usbi_transfer*`ではなくこのshared stateだけをcaptureする。
+2. `em_cancel_transfer()`が、settle済みでなければ`usbi_signal_transfer_completion()`を
+   一度だけ発行する。保留promiseを物理中断できないままでも、論理callbackが有界に1回届く。
+   後から到着したpromise resultはshared stateの`detached`/`settled`で捨てられる。
+3. `em_handle_transfer_completion()`と`em_clear_transfer_priv()`が、transfer privateを
+   破棄してshared stateをdetachしてから**user callbackへ制御を渡す**。user callbackが
+   transferをfreeしても、late promiseはそのメモリに触れない。
+
+`io.c`への変更は1点で、`usbi_handle_disconnect()`がbackendの発行済み完了を
+completed listから回収してから自分の`NO_DEVICE`完了を実行する。`list_del()`が
+entryをNULL化するため冪等である。この1点がないと、cancel直後・event処理前の
+disconnectで同じtransferが2回完了する（下のscenario 9）。
+
+#### 検査scenarioと結果
+
+`scripts/libusb-webusb-ownership-regression.cpp`を、固定公式objectに対して
+**pristine版とpatch版の2回linkし**、1 scenarioにつき1つの隔離childまたはWorkerで実行する。
+USB表面はmodule内に設置するfake `navigator.usb`だけで、descriptorとbulk `transferIn`の
+promiseしか持たない。期待を満たさない場合はfree/close/exitを行わず、childまたはWorkerの
+終了に後始末を委ねる。
+
+| # | scenario | stock（失敗基準） | patched |
+| ---: | --- | --- | --- |
+| 0 | cancel後、promise未解決のまま | `DIVERGED` callbacks 0 | `OK` callbacks 1 / `CANCELLED` |
+| 1 | cancel後のlate resolve | `DIVERGED` callbacks 0 | `OK` callbacks 1、late detach 1 |
+| 2 | cancel後のlate reject | `DIVERGED` callbacks 0 | `OK` callbacks 1、late detach 1 |
+| 3 | user callback内free → late resolve | `DIVERGED` callbacks 0 | `OK` callbacks 1、freed、late detach 1 |
+| 4 | 二重cancel | `DIVERGED` callbacks 0 | `OK` callbacks 1、2回目`NOT_FOUND` |
+| 5 | pending中のdisconnect | `DIVERGED` **callbacks 2** | `OK` callbacks 1 / `NO_DEVICE` |
+| 6 | 2 handle同時cancel＋一方close | `DIVERGED` callbacks 0 | `OK` 各1 callback、priv 2/2、close成功 |
+| 7 | 通常完了（回帰ガード） | `OK` callbacks 1 / `COMPLETED` / 32 bytes | `OK` 同値 |
+| 8 | disconnect＋callback内free → late resolve | Nodeは`abort()`、Chromeは`abort()`後に固定`TIMEOUT` | `OK` callbacks 1、freed、late detach 1 |
+| 9 | cancel→event処理前のdisconnect | `DIVERGED` **callbacks 2** | `OK` callbacks 1 / `NO_DEVICE` |
+
+scenario 7は両方で成功しなければならない回帰ガードであり、これが通ることで
+「patchが通常完了を壊していない」ことと「harness自体が成立している」ことを示す。
+scenario 0〜6・8・9はstockが成功してはならない。driver scriptはこの両方向を検証し、
+patched childがstderrへ出力した場合も失敗にする。
+
+scenario 5と9でstockが**2回**callbackを配ることが、この段階で新たに測定できた具体的な欠陥である。
+late promiseが既に完了済みの`itransfer`を再びcompleted listへ載せるためで、
+scenario 8のようにuser callbackがtransferをfreeしていると、stockではその2回目が
+解放済みメモリへの参照になり、実際にNode/Chromeの隔離childが`abort()`した。
+これは従来「未証明」としていたUAF経路を、合成入力で再現できる形にしたものである。
+
+#### 実行方法と実測
+
+- Node: `pwsh -NoProfile -File scripts/run-libusb-webusb-ownership-regression.ps1`。
+  固定公式objectをその場でcompileし、2 variant×10 scenarioを1つずつ20秒上限の
+  隔離childで実行して、上表どおり`diagnostic: OK`・`failures: []`を返した
+  （2026-09-20実測）。
+- Chrome: `pwsh -NoProfile -File scripts/build-libusb-webusb-ownership-worker.ps1`で
+  Worker moduleを生成し、dev専用の`http://localhost:5173/libusb-ownership-fixture.html`で
+  2 variant×10 scenarioを実行した。**全20件がNodeと同一の固定値**となった
+  （2026-09-20実測）。stock scenario 8だけはWorkerが`abort()`し、
+  Asyncify中の例外がawaitへ届かないため、wrapperが15秒の固定`TIMEOUT`（stage 5）として
+  打ち切った。これはstockが安全でないことの記録であり、成功ではない。
+
+Worker moduleは`ENVIRONMENT=web,worker`・no-pthread objectで、既存の
+zero-timeout fast-path copyの`events_posix.c`を併用する。固定upstreamの
+`em_libusb_wait`がChromeのWorker runtime threadでzero timeoutでも復帰しないため、
+この実験差分なしではChrome側でevent APIが返らない。したがってChromeの結果は
+**ownership patchとevents fast-path実験の2つの差分の上**で得たものであり、
+公式snapshotそのままの挙動ではない。
+
+#### TypeScript境界とテスト
+
+`src/usb/libusb-ownership-worker.ts`はmodule URLとscenario番号だけを受け取り、
+固定20 wordのreportを返す。`src/usb/libusb-ownership-worker-diagnostic.ts`は
+15秒timeout、Worker terminate、進捗stageの無視、要求と異なるscenarioを名乗るreportの拒否、
+非整数fieldの拒否、失敗時の固定診断を担当する。`physicalAbortProven`と`realUsbUsed`は
+常に`false`で、payload、serial、raw exception、raw stdout/stderrはABIとUIへ出さない。
+`test/libusb-ownership-worker-diagnostic.test.ts`がこれらの境界を検査する。
+fixtureページはRollup inputに含めず、production distへは出力されない（確認済み）。
+
+#### まだ証明していないこと
+
+- WebUSBの**物理**abort。`transferIn`のpromiseは依然として解決されないまま残り、
+  patchが保証するのは論理callbackの有界性とtransfer寿命の安全性だけである。
+  `physicalAbortProven`は常に`false`のまま出力する。
+- 実Chromium/Windowsで実デバイスの保留転送・切断・timeoutがどう振る舞うか。
+  本regressionのUSB表面はすべてfakeである。
+- Sianoの`stop_streaming()`が有界に完了すること。論理callbackが1回届くことは
+  upstreamのactive transfer数減算とevent thread joinの前提を満たす方向だが、
+  upstreamと接続した検証はまだ行っていない。
+- pthread build（`_REENTRANT`）での競合。patchのshared state更新は`runOnMain()`で
+  main threadへ寄せてあるが、本regressionはすべて単一threadで実行しており、
+  proxy経路とlock順序の同時実行検査は未実施である。
+- 複数handleの**close順序**の網羅。scenario 6は2 handleの同時cancelと一方のcloseまでで、
+  open/close chainのrefcountを全組み合わせで検査したものではない。
+- 固定upstreamの`events_posix.c`のままChromeでevent APIを回す方法。上記の
+  fast-path実験に依存したままである。
+
+以上が満たされるまで、このpatchをvendor snapshot、production build、M1 UI、
+Siano/PX4の`start_streaming()`・`get_version()`・実機stream経路へ採用しない。

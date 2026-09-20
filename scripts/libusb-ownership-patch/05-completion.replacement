@@ -1,0 +1,28 @@
+		/* WebTS.app test-only ownership patch: take and destroy the transfer
+		 * private data, then detach the shared state, before the user callback
+		 * (which is allowed to free this transfer) can run. */
+		auto priv = WebUsbTransferPtr(itransfer).take();
+		webts_ownership_counters.priv_destroyed++;
+		const bool cancelling =
+			(itransfer->state_flags & USBI_TRANSFER_CANCELLING) ||
+			(priv.shared && priv.shared->cancel_requested);
+		webts_detach_shared(priv.shared);
+
+		if (!priv.result.has_value()) {
+			/* A logical cancellation was signalled before the WebUSB promise
+			 * settled, so there is no transfer result to interpret. */
+			return cancelling ? LIBUSB_TRANSFER_CANCELLED
+							  : LIBUSB_TRANSFER_ERROR;
+		}
+
+		auto& result = *priv.result;
+
+		if (cancelling) {
+			return LIBUSB_TRANSFER_CANCELLED;
+		}
+
+		if (result.error) {
+			return LIBUSB_TRANSFER_ERROR;
+		}
+
+		auto& value = result.value;

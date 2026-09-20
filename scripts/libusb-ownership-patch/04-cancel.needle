@@ -1,0 +1,7 @@
+void em_clear_transfer_priv(usbi_transfer* itransfer) {
+	WebUsbTransferPtr(itransfer).free();
+}
+
+int em_cancel_transfer(usbi_transfer* itransfer) {
+	return LIBUSB_SUCCESS;
+}

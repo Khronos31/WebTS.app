@@ -1,0 +1,6 @@
+		promiseThen(CaughtPromise(std::move(transfer_promise)),
+					[itransfer](auto&& result) {
+						WebUsbTransferPtr(itransfer).emplace(std::move(result));
+						usbi_signal_transfer_completion(itransfer);
+					});
+		return LIBUSB_SUCCESS;

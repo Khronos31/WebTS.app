@@ -21,6 +21,11 @@
 - WebTS.appの結合された配布物へ入れるコードはGPL-2.0-onlyと互換でなければならない。
 - Apache-2.0コードをGPL-2.0-only成果物へリンク、トランスパイル、コピーしない。
 - 第三者コードは取得元、commit/tag、checksum、ライセンス、変更patchを固定する。
+- 現在固定しているtest-only patchは、Siano counter patch（`scripts/siano-ts-counters.patch`）と、
+  libusb transfer ownership patch（`scripts/libusb-ownership-patch/`、
+  `scripts/libusb-ownership-patch-io/`）である。いずれも`build/`配下のbuild copyにだけ適用し、
+  vendor snapshotと配布artifactには適用しない。libusbはLGPL-2.1-or-laterであり、
+  patchを配布物へ採用する場合は対応ソースと変更通知を同時に提供する。
 - 固定sourceは [`docs/VENDOR_SOURCES.md`](docs/VENDOR_SOURCES.md) と
   `vendor/SOURCE_LOCK.json` に記録し、`scripts/check-vendor-sources.ps1` で検査する。
 - 配布artifactと同時に、再現に必要な正確な対応ソースとライセンス通知を提供する。
