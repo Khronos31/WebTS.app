@@ -1,0 +1,37 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    # Linux only. Build scripts must not depend on PowerShell.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+
+      - run: npm ci
+
+      - name: Typecheck, test and build
+        run: npm run check
+
+      # The build must run on Linux CI. This guard covers package.json and
+      # scripts/; this workflow file is excluded so the pattern cannot match
+      # its own source, and is reviewed by hand instead.
+      - name: Reject PowerShell in the build path
+        run: |
+          if grep -rInE '\bpwsh\b|powershell' package.json scripts 2>/dev/null; then
+            echo "::error::build path must not depend on PowerShell"
+            exit 1
+          fi

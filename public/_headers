@@ -1,0 +1,6 @@
+# Cloudflare Pages. The official libusb WebUSB backend can be built with
+# pthreads, which needs SharedArrayBuffer, which needs cross-origin isolation.
+# These must match the Vite dev/preview headers in vite.config.ts.
+/*
+  Cross-Origin-Opener-Policy: same-origin
+  Cross-Origin-Embedder-Policy: require-corp

@@ -1,22 +1,14 @@
-/**
- * WebTS.app M0 Entry Point
- * License: GPL-2.0-only
- */
+// 0.1.0 の再実装はここから始める。現時点では起動して環境の前提が満たされているかを
+// 表示するだけで、WebUSB にもチューナーにも触れない。
+import { describeEnvironment } from './platform/environment';
 
-import './styles/app.css';
-import { UIController } from './ui/controller';
+const app = document.querySelector('#app');
+if (!(app instanceof HTMLElement)) throw new Error('app root missing');
 
-function initApp(): void {
-  const root = document.getElementById('app');
-  if (!root) {
-    throw new Error('Application root element #app not found');
-  }
-  const controller = new UIController(root);
-  controller.init();
-}
+const heading = document.createElement('h1');
+heading.textContent = 'WebTS.app';
+app.appendChild(heading);
 
-if (document.readyState === 'loading') {
-  document.addEventListener('DOMContentLoaded', initApp);
-} else {
-  initApp();
-}
+const status = document.createElement('pre');
+status.textContent = JSON.stringify(describeEnvironment(), null, 2);
+app.appendChild(status);
