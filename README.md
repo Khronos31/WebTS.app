@@ -1,45 +1,46 @@
 # WebTS.app
 
-WebTS.app は、ローカルに接続されたテレビチューナーを WebUSB でブラウザから直接制御し、
-サーバーを介さずライブ視聴するための Web アプリケーションです。
+PX-S1UD または PX-Q3U4 を利用者の端末へ直接つなぎ、WebUSB 対応ブラウザだけで ISDB の
+ライブ放送を視聴する静的 Web アプリケーション。放送 TS、カード通信、復号、映像音声処理を
+公開クラウドへ送らない。
 
-> 現在は非公開の技術検証段階です。視聴可能なアプリケーションはまだ提供していません。
+現在 **0.1.0 に向けた再実装の初期段階**にある。動作するアプリケーションはまだ無い。
 
-## 初期スコープ
+## 状態
 
-- PLEX PX-S1UD と PX-Q3U4
-- クライアントサイド完結
-- ライブ視聴のみ
-- Chromium 系ブラウザの WebUSB
+| | |
+| --- | --- |
+| 配信 | Cloudflare Pages の静的ホスティング、`webts.app`、PWA |
+| ビルド | Linux 上の CI。ビルドスクリプトを PowerShell に依存させない |
+| ライセンス | GPL-2.0-only（[LICENSE](LICENSE)） |
+| リポジトリ | private。公開は M4 のゲートを通してから |
 
-次の機能は初期スコープに含みません。
+## 方針
 
-- 録画
-- 視聴・録画予約
-- 番組表
-- 公開クラウド上のチューナー／復号サーバー
+Siano と PX4 のチューナー処理を TypeScript で書き直さず、上流 C/C++ を source-only で
+同梱して WASM 化する。libusb も公式の Emscripten/WebUSB backend を使い、独自の互換層を
+作らない。詳細は [docs/UPSTREAM.md](docs/UPSTREAM.md)。
 
-設計、検証順序、公開条件は [プロジェクト計画](docs/PROJECT_PLAN.md) を参照してください。
+ただし公式 WebUSB backend は**無改変のままでは保留中の転送を安全に止められない**ことが
+測定済みで、backend と core の双方に修正が要る。[docs/FINDINGS.md](docs/FINDINGS.md) の1章。
 
-## M0 WebUSBプローブ
+## ドキュメント
 
-最初の検証対象はWindows 11版Google Chromeです。Node.js 22.12以降または24系を使い、
-リポジトリを取得したWindows端末で次を実行します。
+| | |
+| --- | --- |
+| [docs/FINDINGS.md](docs/FINDINGS.md) | 前回実装からの検証結果。測定した事実だけ |
+| [docs/UPSTREAM.md](docs/UPSTREAM.md) | 上流コアの構造メモ |
 
-```powershell
-npm ci
-npm run dev
-```
+計画と仕様はリポジトリの外（`.local/SPEC/`）に置いている。
 
-Chromeでターミナルに表示された `http://localhost:5173/` を開きます。localhostは
-WebUSBを利用できるtrustworthy originとして扱われます。チューナーのdriver bindingは
-この段階では変更せず、まずデバイス選択とopenの結果を記録してください。
+## `archived/`
 
-M0の操作範囲と合格条件は
-[Windows 11 + Chrome WebUSB probe](docs/M0_WINDOWS_CHROME.md)を参照してください。
+再実装前の実装一式を退避してある。gitignore 済みで履歴には入らない。**0.1.0 のリリース前に
+ディレクトリごと削除する。**内容は再構成前のコミットにも残っているため、失っても git から
+復元できる。
 
-## ライセンス
+## 扱わないもの
 
-プロジェクト独自コードは `GPL-2.0-only` です。第三者コードにはそれぞれのライセンスが
-適用されます。現時点の候補と採用状態は [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)
-に記録します。
+実機の USB 操作、firmware、選局、放送 TS、B-CAS / カード情報を、serial や raw payload の
+形でログ・表示・送信しない。firmware、放送キャプチャ、カード情報、実行バイナリはコミット
+しない。

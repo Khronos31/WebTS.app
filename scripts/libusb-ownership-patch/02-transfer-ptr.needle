@@ -1,6 +1,0 @@
-struct WebUsbTransferPtr : ValPtr<PromiseResult> {
-public:
-
-	WebUsbTransferPtr(usbi_transfer* itransfer)
-		: ValPtr(usbi_get_transfer_priv(itransfer)) {}
-};

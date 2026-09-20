@@ -5,6 +5,11 @@ dist/
 coverage/
 .cache/
 
+# Pre-deletion staging for the 0.1.0 clean restart. Everything in here is
+# already in git history (see the commits before the restart), so this copy is
+# a convenience only. Delete the whole directory before the 0.1.0 release.
+archived/
+
 # Local-only hardware inputs and captures
 local/
 .local/
