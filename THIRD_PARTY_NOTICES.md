@@ -12,6 +12,7 @@
 | [libusb](https://github.com/libusb/libusb) | v1.0.30 / `87a55632db62c9bdc58cd31d3ccfa673f1bb017f` | LGPL-2.1-or-later | 公式 Emscripten/WebUSB backend と、それが必要とする core | **あり（2ファイル）** |
 | [Khronos31/px4-userland](https://github.com/Khronos31/px4-userland) | `10a373dbda0603b2d8180bb2508e2d88dd70eb2d` | GPL-2.0-only | PX-Q3U4 のコア。IT930x ブリッジ、identity grouping、tagged TS demux、stream data plane、内蔵カード | なし |
 | [shirow-github/libaribb25](https://github.com/shirow-github/libaribb25) | v0.2.10 / `b978fe5caf6bfe162e944ad4d323b7c0205276e3` | ISC | TS section parser、MULTI2、`arib_std_b25` facade | なし |
+| [libmpeg2 (mpeg2dec)](https://code.videolan.org/videolan/libmpeg2) | 0.5.1+ / `946bf4b518aacc224f845e73708f99e394744499` | GPL-2.0-or-later | MPEG-2 映像の復号。ブラウザ内蔵デコーダが対応しないため必須 | なし |
 
 PX-S1UD 向けの [Khronos31/siano-userland](https://github.com/Khronos31/siano-userland)
 （GPL-2.0-or-later）は、0.1.0 が PX-Q3U4 から始まるため**まだ同梱していない**。S1UD に
@@ -28,6 +29,14 @@ LGPL-2.1 第2条(a)に従い、改変したファイルには変更告知を入�
 | `libusb/os/emscripten_webusb.cpp` | 保留転送の所有権。promise callback が生の `usbi_transfer*` を持たないようにし、`em_cancel_transfer()` が有界な論理完了を1回だけ発行し、transfer private の破棄と detach を user callback より前に行う |
 | `libusb/io.c` | `usbi_handle_disconnect()` が backend の発行済み完了を回収してから `NO_DEVICE` 完了を走らせる |
 
+### libmpeg2 の選定範囲
+
+純Cのみを同梱している。手書きの MMX/SSE、AltiVec、Alpha、VIS、ARM は同梱しておらず、
+したがって選択もされない。`libmpeg2/convert/` も同梱しない（出力は planar I420 のまま
+`VideoFrame` へ渡す）。上流が autotools で生成する `config.h` の代わりに
+`native/libmpeg2-config.h` を使う。GPL-2.0-or-later は GPL-2.0-only の成果物へ
+v2 として取り込める。
+
 理由と実測は [`docs/FINDINGS.md`](docs/FINDINGS.md) の1章に記録している。
 `events_posix.c` にも一時的に改変を当てていたが、共有メモリ付きでビルドすれば上流のまま
 動くことが分かったため取り下げた（同2章）。
@@ -40,7 +49,6 @@ LGPL-2.1 第2条(a)に従い、改変したファイルには変更告知を入�
 | kazuki0824/recisdb-rs | GPL-3.0 と Apache-2.0 の混在 | ネイティブ動作の比較対象 |
 | mirakc / EPGStation / KonomiTV | 各自 | TS 処理とブラウザ再生の挙動の参照 |
 | daig0rian/epcltvapp | MIT | 0.1.0 の UI 目標。画面構成と操作モデルの参照 |
-| libmpeg2 (mpeg2dec) | GPL-2.0-or-later | MPEG-2 デコーダの候補。ベンチ実施済み、未同梱 |
 
 ## ビルド・テスト専用
 

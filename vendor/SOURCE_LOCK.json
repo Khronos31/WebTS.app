@@ -625,6 +625,93 @@
           "vendoredSha256": "71769fe9d3f30dc90d6bd481ad0a984430dae952668e83c7546fe7c1fc625daf"
         }
       ]
+    },
+    {
+      "name": "libmpeg2",
+      "origin": "https://code.videolan.org/videolan/libmpeg2.git",
+      "ref": "master",
+      "commit": "946bf4b518aacc224f845e73708f99e394744499",
+      "license": "GPL-2.0-or-later",
+      "root": "vendor/upstream/libmpeg2",
+      "fileCount": 15,
+      "modifiedCount": 0,
+      "files": [
+        {
+          "path": "AUTHORS",
+          "upstreamSha256": "5f84f6cffba602c99116ff2603d6fec66ecfd6ef046b164264e61787a6853d7d",
+          "vendoredSha256": "5f84f6cffba602c99116ff2603d6fec66ecfd6ef046b164264e61787a6853d7d"
+        },
+        {
+          "path": "COPYING",
+          "upstreamSha256": "ab15fd526bd8dd18a9e77ebc139656bf4d33e97fc7238cd11bf60e2b9b8666c6",
+          "vendoredSha256": "ab15fd526bd8dd18a9e77ebc139656bf4d33e97fc7238cd11bf60e2b9b8666c6"
+        },
+        {
+          "path": "README",
+          "upstreamSha256": "1b3ddd3a345f488c01eb8f95b88d0b23827edda9526eb7ce78e561e9dca8d18e",
+          "vendoredSha256": "1b3ddd3a345f488c01eb8f95b88d0b23827edda9526eb7ce78e561e9dca8d18e"
+        },
+        {
+          "path": "include/attributes.h",
+          "upstreamSha256": "56784b3569ef7b3f80514f6e6426d6c8382acbb7a1f5dcdfd05faa4c818bc42b",
+          "vendoredSha256": "56784b3569ef7b3f80514f6e6426d6c8382acbb7a1f5dcdfd05faa4c818bc42b"
+        },
+        {
+          "path": "include/mpeg2.h",
+          "upstreamSha256": "b9d793812c0c8a9d1cb2d9dfbba92bfcd2937c051fc8ccc0e6ba99f39c614285",
+          "vendoredSha256": "b9d793812c0c8a9d1cb2d9dfbba92bfcd2937c051fc8ccc0e6ba99f39c614285"
+        },
+        {
+          "path": "libmpeg2/alloc.c",
+          "upstreamSha256": "b5d88f97eb0491127ebccb03860932241a5444f82dd3f7a972c6a4cd7f848c43",
+          "vendoredSha256": "b5d88f97eb0491127ebccb03860932241a5444f82dd3f7a972c6a4cd7f848c43"
+        },
+        {
+          "path": "libmpeg2/cpu_accel.c",
+          "upstreamSha256": "f6e9e58480f45757ed716dccb661e3f04110f6d999b90ddd3e3cae299e2d4c32",
+          "vendoredSha256": "f6e9e58480f45757ed716dccb661e3f04110f6d999b90ddd3e3cae299e2d4c32"
+        },
+        {
+          "path": "libmpeg2/cpu_state.c",
+          "upstreamSha256": "d242992193279cdc1eaaf5f4490f714ce13dc34409dfbe23d42fbce93f29cf4c",
+          "vendoredSha256": "d242992193279cdc1eaaf5f4490f714ce13dc34409dfbe23d42fbce93f29cf4c"
+        },
+        {
+          "path": "libmpeg2/decode.c",
+          "upstreamSha256": "6379853f61da04bbf7d436a743286a78a0dbf976aa246d1663d32102a170d45a",
+          "vendoredSha256": "6379853f61da04bbf7d436a743286a78a0dbf976aa246d1663d32102a170d45a"
+        },
+        {
+          "path": "libmpeg2/header.c",
+          "upstreamSha256": "b8089612c94c053be32843925873b9e0eddb2bdc9472e23efe1c1d430f19fb7d",
+          "vendoredSha256": "b8089612c94c053be32843925873b9e0eddb2bdc9472e23efe1c1d430f19fb7d"
+        },
+        {
+          "path": "libmpeg2/idct.c",
+          "upstreamSha256": "8a56478352f289d002d6ec6019c3e48e08df2177455cba16434496a754e07746",
+          "vendoredSha256": "8a56478352f289d002d6ec6019c3e48e08df2177455cba16434496a754e07746"
+        },
+        {
+          "path": "libmpeg2/motion_comp.c",
+          "upstreamSha256": "01dcdfc0063dfb3f14ef480a543977b07f05d3fcd36b50db2ad82e713a2bc15d",
+          "vendoredSha256": "01dcdfc0063dfb3f14ef480a543977b07f05d3fcd36b50db2ad82e713a2bc15d"
+        },
+        {
+          "path": "libmpeg2/mpeg2_internal.h",
+          "upstreamSha256": "6e5495e0f6bfc1306e89ac2d0db8249c9d7aa09fc23be05bbcb4866438f8ccd3",
+          "vendoredSha256": "6e5495e0f6bfc1306e89ac2d0db8249c9d7aa09fc23be05bbcb4866438f8ccd3"
+        },
+        {
+          "path": "libmpeg2/slice.c",
+          "upstreamSha256": "d56ecd7964e589f374b80de72841a069316346c96eaa987a9ce786a388106ba2",
+          "vendoredSha256": "d56ecd7964e589f374b80de72841a069316346c96eaa987a9ce786a388106ba2"
+        },
+        {
+          "path": "libmpeg2/vlc.h",
+          "upstreamSha256": "ad2476616d65c6214516064d8497103e28d456e67795464608dce8fc0e3baaec",
+          "vendoredSha256": "ad2476616d65c6214516064d8497103e28d456e67795464608dce8fc0e3baaec"
+        }
+      ]
     }
   ]
 }
