@@ -7,8 +7,16 @@
 //   - SDT actual (table_id 0x42) のみ。other (0x46) は他局の情報で、
 //     選局し直さないと信用できないので読まない。
 //   - NIT actual (table_id 0x40) のみ。
-//   - 記述子はサービス記述子 (0x48) と TS 情報記述子 (0xCD)、
-//     地上分配システム記述子 (0xFA) だけ。
+//   - 記述子はサービス記述子 (0x48) と TS 情報記述子 (0xCD) だけ。
+//
+// **地上分配システム記述子 (0xFA) からは物理チャンネルを読まない。**
+// 一度読んでいたが、記述子の先頭 2 バイト（area_code 12bit + guard_interval 2bit
+// + transmission_mode 2bit）を飛ばし忘れて周波数を 2 バイトずれた位置から
+// 読んでおり、NHK 総合が ch16、フジテレビが ch19 のように全部ずれていた。
+// 結果として死んだ周波数へ選局し、視聴が始まらなかった。
+//
+// そもそも**どの物理チャンネルを選局したかは呼び出し側が知っている**。
+// 放送側の申告を読み直す必要が無く、読めば間違える余地が増えるだけである。
 //
 // 文字列は ARIB STD-B24 の8単位符号系で入っている。JIS X 0208 と外字を含むので
 // 自前で変換せず、字幕と同じ `aribb24.js` に解かせる。
@@ -34,8 +42,6 @@ export interface NetworkEntry {
   readonly networkId: number;
   readonly transportStreamId: number;
   readonly originalNetworkId: number;
-  /** 地上分配システム記述子から得た物理チャンネル番号。無ければ null。 */
-  readonly physicalChannel: number | null;
   /** TS 情報記述子の remote_control_key_id。リモコン番号。無ければ null。 */
   readonly remoteControlKeyId: number | null;
   /** TS 情報記述子の ts_name。 */
@@ -250,7 +256,6 @@ export class ServiceInfoReader {
       const info = this.#readTransportDescriptors(descriptors);
       this.#network = {
         networkId, transportStreamId, originalNetworkId,
-        physicalChannel: info.physicalChannel,
         remoteControlKeyId: info.remoteControlKeyId,
         tsName: info.tsName,
       };
@@ -259,11 +264,10 @@ export class ServiceInfoReader {
     }
   }
 
-  /** TS 情報記述子 (0xCD) と地上分配システム記述子 (0xFA)。 */
+  /** TS 情報記述子 (0xCD)。リモコン番号と TS 名だけを取る。 */
   #readTransportDescriptors(descriptors: Uint8Array): {
-    physicalChannel: number | null; remoteControlKeyId: number | null; tsName: string;
+    remoteControlKeyId: number | null; tsName: string;
   } {
-    let physicalChannel: number | null = null;
     let remoteControlKeyId: number | null = null;
     let tsName = '';
     let offset = 0;
@@ -275,16 +279,9 @@ export class ServiceInfoReader {
         remoteControlKeyId = body[0] ?? null;
         const lengthOfTsName = ((body[1] ?? 0) >> 2) & 0x3f;
         tsName = this.#handlers.decodeText(body.subarray(2, 2 + lengthOfTsName));
-      } else if (tag === 0xfa && body.length >= 6) {
-        // 周波数は 1/7 MHz 単位。ch13 = 473.143 MHz から 6 MHz 間隔なので、
-        // そこから物理チャンネル番号へ戻す。
-        const raw = ((body[4] ?? 0) << 8) | (body[5] ?? 0);
-        const megahertz = raw / 7;
-        const channel = Math.round((megahertz - 473.143) / 6) + 13;
-        if (channel >= 13 && channel <= 62) physicalChannel = channel;
       }
       offset += 2 + length;
     }
-    return { physicalChannel, remoteControlKeyId, tsName };
+    return { remoteControlKeyId, tsName };
   }
 }

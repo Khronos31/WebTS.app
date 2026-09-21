@@ -43,6 +43,7 @@ extern "C" void webts_winscard_bind(void* service, std::uint64_t client);
 extern "C" void webts_winscard_unbind(void);
 
 #include <atomic>
+#include <chrono>
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
@@ -95,6 +96,8 @@ struct Job final {
     std::atomic<int> b25_error{0};
     std::atomic<int> elapsed_ms{0};
     std::atomic<int> reading_ms{0};
+    /** ロック待ちの経過。黙って待っていると止まって見えるので出す。 */
+    std::atomic<int> lock_wait_ms{0};
     // 入口（復号前）
     std::atomic<std::uint64_t> in_packets{0U};
     std::atomic<std::uint64_t> in_scrambled{0U};
@@ -158,13 +161,28 @@ public:
     }
 };
 
+/**
+ * ロック待ちの上限。上流の `poll_frontend_probe_lock` は 300 回固定で、
+ * 1回ごとの I2C がこの経路では遅く、信号の無い周波数だと 2 分以上黙ったまま
+ * 待つことになる。実測のロックは 0.3 秒なので、それより桁で余裕のある
+ * ところで打ち切る。コールバックが誤りを返せば上流の走査は止まる。
+ */
+constexpr int kLockBudgetMs = 10000;
+
 struct LockContext final {
     Q3U4FrontendEnclosure* enclosure;
     std::uint8_t receiver;
+    std::chrono::steady_clock::time_point started;
+    std::atomic<int>* elapsed_ms;
 };
 
 Result<bool> demod_lock(void* context) noexcept {
     auto* lock = static_cast<LockContext*>(context);
+    const auto waited = static_cast<int>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - lock->started).count());
+    lock->elapsed_ms->store(waited);
+    if (waited > kLockBudgetMs) return Result<bool>::failure(Error::TIMEOUT);
     return lock->enclosure->is_terrestrial_locked(lock->receiver);
 }
 
@@ -308,7 +326,8 @@ void* worker_main(void* argument) noexcept {
     }
 
     const auto receiver = static_cast<std::uint8_t>(job.receiver);
-    LockContext lock_context{&enclosure, receiver};
+    LockContext lock_context{&enclosure, receiver, std::chrono::steady_clock::now(),
+                             &job.lock_wait_ms};
     Error result = Error::OK;
     bool frontend_open = false;
     bool capture_started = false;
@@ -358,6 +377,7 @@ void* worker_main(void* argument) noexcept {
     if (!tuned) { result = tuned.error(); finish(); return nullptr; }
 
     job.stage.store(kStageLock);
+    lock_context.started = std::chrono::steady_clock::now();
     const ProbeLockPollResult lock =
         poll_frontend_probe_lock(demod_lock, &lock_context, delay);
     if (!lock.locked) { result = lock.error; finish(); return nullptr; }
@@ -479,7 +499,7 @@ int webts_q3u4_descramble_start(const std::uint8_t* firmware, int firmware_size,
     return 0;
 }
 
-/** 進捗と集計を読む。ブロックしない。output は 16 語。 */
+/** 進捗と集計を読む。ブロックしない。output は 16 語（17 語目は任意）。 */
 int webts_q3u4_descramble_poll(std::int32_t* output, int output_words) {
     if (output == nullptr || output_words < 16) return static_cast<int>(Error::INVALID_ARGUMENT);
     if (g_job == nullptr) { output[0] = kIdle; return 0; }
@@ -500,6 +520,7 @@ int webts_q3u4_descramble_poll(std::int32_t* output, int output_words) {
     output[13] = static_cast<std::int32_t>(job.undecrypted_packets.load());
     output[14] = job.ecm_unpurchased.load();
     output[15] = job.last_ecm_error.load();
+    if (output_words >= 17) output[16] = job.lock_wait_ms.load();
     return 0;
 }
 

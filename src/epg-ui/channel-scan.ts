@@ -291,9 +291,8 @@ export class ChannelScan {
     eit: EitReader | null,
     physical: number,
   ): void {
-    // NIT が物理チャンネルを持っていればそちらを信じる。選局した番号と
-    // 食い違うことは普通ないが、放送側の申告のほうが正しい。
-    const channel = network.physicalChannel ?? physical;
+    // 選局した物理チャンネルをそのまま使う。放送側の申告を読み直す必要は無い。
+    const channel = physical;
     const watchable = services.filter(isWatchable);
     watchable.forEach((service, position) => {
       found.push(toChannelItem(service, network, channel, position === 0));

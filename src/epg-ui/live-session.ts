@@ -21,7 +21,7 @@ import { readCachedFirmware } from '../usb/firmware';
 import { CaptionText } from './caption-text';
 
 const MODULE_URL = '/build/q3u4-descramble/q3u4-descramble.mjs';
-const POLL_WORDS = 16;
+const POLL_WORDS = 17;
 /** 1回の drain で取り出す上限。live は 2 MB/s 程度なので十分余る。 */
 const DRAIN_BYTES = 1024 * 1024;
 
@@ -318,8 +318,13 @@ export class LiveSession {
     const state = words[0] ?? 0;
     const stage = words[1] ?? 0;
     // 受信中に入るまでは、どの段にいるかを出す。映像が出れば黙る。
+    // ロック待ちは秒数も出す。黙ったままだと止まって見える。
     if (state === 1 && stage < 11 && this.#frames === 0) {
-      this.#options.onStatus?.(`${STAGE_LABEL[stage] ?? stage}…`);
+      const label = STAGE_LABEL[stage] ?? String(stage);
+      const waited = words[16] ?? 0;
+      this.#options.onStatus?.(stage === 8 && waited > 1000
+        ? `${label}… ${(waited / 1000).toFixed(0)} 秒`
+        : `${label}…`);
     }
     if (state !== 1 && !this.#ended) {
       this.#ended = true;
