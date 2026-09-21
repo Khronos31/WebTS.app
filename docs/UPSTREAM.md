@@ -76,7 +76,15 @@ vendor 時は `.gitattributes` の `vendor/** -text` を忘れないこと（FIN
   sink へ渡す前に sync byte を `0x47` へ正規化する。
 - `Q3U4StreamDataPlane::attach()` は worker `std::thread` を開始し、`detach()` /
   `shutdown()` は `cancel_stream()` 後に join する。**ブラウザの main thread から join を
-  呼ばないこと。**Dedicated Worker 内で、同期された transport を使う前提で組む。
+  呼ばないこと。**Dedicated Worker か、専用 pthread 上で使う。
+- **pump は bridge ごとに1本**（`kBridgeCount = 2`）。ドライバ用の1本と合わせて3本
+  同時に動くので、Emscripten では `PTHREAD_POOL_SIZE` をそれ以上にする。
+- **開始と停止の順序は `TunerService::attach_stream` / `detach_stream` が正**。
+  `backend.start_capture()` → `stream.attach()`、停止は `stream.detach()` →
+  `backend.stop_capture()`。逆順にしてはならない。
+- `TunerAttachment` の同一性は `same_attachment()` が client_id / lease_id /
+  attachment_id / receiver / nonce の全一致で判定する。attach と read と detach へ
+  同じ値を渡すこと。`attachment_id == 0` は拒否される。
 - `it930x_protocol.h` には command frame の encode/decode も CRC 検査 API も無い。
   scatter image の境界検査だけが上流から得られる。
 
