@@ -1,4 +1,5 @@
 import { readCachedFirmware } from '../usb/firmware';
+import { AudioPlayer } from './audio';
 import type { PlayerMessage, PlayerRequest } from './player-worker';
 
 // 見た目は作り込まない。素の要素のみ。
@@ -57,7 +58,7 @@ const explain = document.createElement('p');
 explain.textContent =
   'チューナーで受信し、内蔵カードで復号し、分離して復号して表示するまでを'
   + 'すべてブラウザ内で行います。保存も送信もしません。'
-  + '音声と字幕はまだありません。';
+  + '音声は主音声を鳴らします。字幕はまだありません。';
 app.append(explain);
 
 const form = document.createElement('form');
@@ -174,6 +175,8 @@ function kib(bytes: number): string {
 interface Session {
   readonly module: DescrambleModule;
   readonly worker: Worker;
+  readonly audio: AudioPlayer;
+  clock: number;
   readonly drainPointer: number;
   readonly pollPointer: number;
   readonly firmwarePointer: number;
@@ -192,7 +195,9 @@ function teardown(): void {
   session = null;
   clearInterval(active.retry);
   clearInterval(active.poll);
+  clearInterval(active.clock);
   active.worker.terminate();
+  void active.audio.close();
   active.module.HEAPU8.fill(0, active.firmwarePointer,
     active.firmwarePointer + active.firmwareLength);
   active.module._free(active.firmwarePointer);
@@ -256,18 +261,26 @@ form.addEventListener('submit', async (event) => {
       pollPointer: module._malloc(POLL_WORDS * 4),
       firmwarePointer,
       firmwareLength: firmware.length,
+      audio: new AudioPlayer(),
+      clock: 0,
       wantPending: false,
       retry: 0,
       poll: 0,
       ended: false,
     };
     session = active;
+    // AudioContext は利用者の操作から作る。ここは submit の中なので許される。
+    active.audio.start();
 
     let header: [string, string][] = [];
     worker.addEventListener('message', (message: MessageEvent<PlayerMessage>) => {
       const data = message.data;
       if (data.kind === 'want') {
         if (!drainTo(active)) active.wantPending = true;
+        return;
+      }
+      if (data.kind === 'audio') {
+        active.audio.push({ pts: data.pts, bytes: new Uint8Array(data.bytes) });
         return;
       }
       if (data.kind === 'failed') {
@@ -289,6 +302,7 @@ form.addEventListener('submit', async (event) => {
         const sequence = data.sequence;
         const pending = Number(module.ccall('webts_q3u4_descramble_pending', 'number', [], []));
         const dropped = Number(module.ccall('webts_q3u4_descramble_dropped', 'number', [], []));
+        const audio = active.audio.stats();
         render([
           ...header,
           ['解像度', sequence
@@ -298,7 +312,13 @@ form.addEventListener('submit', async (event) => {
           ['表示フレーム', String(data.frames)],
           ['復号に使った時間', `${(data.decodeMs / 1000).toFixed(2)} s`],
           ['刻み直し', String(data.resyncs)],
-          ['刻みの伸縮', `${(data.rateTrim * 100).toFixed(1)} %`],
+          // 音声の時計が来ている間、刻みの伸縮は使っていない。出すと誤解を招く。
+          ['映像の合わせ方', data.avSkewMs === null
+            ? `自前の刻み（伸縮 ${(data.rateTrim * 100).toFixed(1)} %）`
+            : `音声の時計（ずれ ${data.avSkewMs.toFixed(0)} ms）`],
+          ['音声フレーム', `${audio.decoded}（取りこぼし ${audio.dropped}、エラー ${audio.errors}）`],
+          ['音声の置き直し', String(audio.reanchors)],
+          ['音声バッファ', `${audio.bufferedSeconds.toFixed(2)} s`],
           ['未復号の映像 ES', kib(data.pendingEsBytes)],
           ['未取り出しの TS', kib(pending)],
           ['詰まって捨てた TS', kib(dropped)],
@@ -306,7 +326,7 @@ form.addEventListener('submit', async (event) => {
         ]);
         return;
       }
-      status.textContent = `再生を終えました。${data.frames} フレーム。`;
+      if (data.kind === 'done') status.textContent = `再生を終えました。${data.frames} フレーム。`;
       teardown();
     });
 
@@ -324,6 +344,14 @@ form.addEventListener('submit', async (event) => {
       return;
     }
     stop.disabled = false;
+
+    // 鳴っている位置を Worker へ伝える。映像はこれに合わせる。
+    active.clock = self.setInterval(() => {
+      const pts = active.audio.clockPts();
+      if (pts === null) return;
+      const clock: PlayerRequest = { kind: 'clock', pts };
+      worker.postMessage(clock);
+    }, 100);
 
     // Worker の要求に応えられなかったぶんを拾い直す。
     active.retry = self.setInterval(() => {

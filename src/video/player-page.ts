@@ -1,3 +1,4 @@
+import { AudioPlayer } from './audio';
 import type { PlayerMessage, PlayerRequest } from './player-worker';
 
 // 見た目は作り込まない。素の要素のみ。
@@ -15,7 +16,8 @@ app.append(heading);
 const explain = document.createElement('p');
 explain.textContent =
   '復号済みの TS を渡すと、分離・MPEG-2 復号・描画をすべてブラウザ内で行います。'
-  + 'ファイルは読み込むだけで、どこへも送信しません。音声と字幕はまだありません。';
+  + 'ファイルは読み込むだけで、どこへも送信しません。'
+  + '音声は主音声を鳴らします。字幕はまだありません。';
 app.append(explain);
 
 const form = document.createElement('form');
@@ -86,6 +88,8 @@ function freshCanvas(): OffscreenCanvas {
 }
 
 let worker: Worker | null = null;
+let audio: AudioPlayer | null = null;
+let clockTimer = 0;
 
 /** Worker が消費したぶんだけ送る。溜め込ませない。 */
 const SLICE = 1024 * 1024;
@@ -112,6 +116,11 @@ form.addEventListener('submit', async (event) => {
     }
 
     worker?.terminate();
+    void audio?.close();
+    audio = new AudioPlayer();
+    // AudioContext は利用者の操作から作る。ここは submit の中なので許される。
+    audio.start();
+    const active_audio = audio;
     const canvas = freshCanvas();
     const active = new Worker(new URL('./player-worker.ts', import.meta.url), { type: 'module' });
     worker = active;
@@ -133,6 +142,10 @@ form.addEventListener('submit', async (event) => {
         send({ kind: 'chunk', bytes: slice.buffer }, [slice.buffer]);
         return;
       }
+      if (data.kind === 'audio') {
+        active_audio.push({ pts: data.pts, bytes: new Uint8Array(data.bytes) });
+        return;
+      }
       if (data.kind === 'failed') {
         status.textContent = `失敗: ${data.message}`;
         play.disabled = false;
@@ -151,14 +164,21 @@ form.addEventListener('submit', async (event) => {
         return;
       }
       if (data.kind === 'progress') {
-        render([...header, ...progressRows(data)]);
+        render([...header, ...progressRows(data), ...audioRows(active_audio)]);
         return;
       }
-      status.textContent = `終了しました。${data.frames} フレーム。`;
+      if (data.kind === 'done') status.textContent = `終了しました。${data.frames} フレーム。`;
+      clearInterval(clockTimer);
+      void active_audio.close();
       play.disabled = false;
     });
 
     send({ kind: 'init', canvas }, [canvas]);
+    clearInterval(clockTimer);
+    clockTimer = self.setInterval(() => {
+      const pts = active_audio.clockPts();
+      if (pts !== null) send({ kind: 'clock', pts });
+    }, 100);
   } catch (error) {
     status.textContent = `失敗: ${error instanceof Error ? error.message : String(error)}`;
     play.disabled = false;
@@ -177,8 +197,20 @@ export function progressRows(
     ['表示フレーム', String(data.frames)],
     ['復号に使った時間', `${(data.decodeMs / 1000).toFixed(2)} s`],
     ['刻み直し', String(data.resyncs)],
-    ['刻みの伸縮', `${(data.rateTrim * 100).toFixed(1)} %`],
+    // 音声の時計が来ている間、刻みの伸縮は使っていない。出すと誤解を招く。
+    ['映像の合わせ方', data.avSkewMs === null
+      ? `自前の刻み（伸縮 ${(data.rateTrim * 100).toFixed(1)} %）`
+      : `音声の時計（ずれ ${data.avSkewMs.toFixed(0)} ms）`],
     ['未復号の映像 ES', `${(data.pendingEsBytes / 1024).toFixed(0)} KiB`],
     ['分離カウンタ', JSON.stringify(data.counters)],
+  ];
+}
+
+function audioRows(player: AudioPlayer): [string, string][] {
+  const stats = player.stats();
+  return [
+    ['音声フレーム', `${stats.decoded}（取りこぼし ${stats.dropped}、エラー ${stats.errors}）`],
+    ['音声の置き直し', String(stats.reanchors)],
+    ['音声バッファ', `${stats.bufferedSeconds.toFixed(2)} s`],
   ];
 }

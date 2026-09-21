@@ -52,7 +52,7 @@ run(emcc, [
   '-s', 'ENVIRONMENT=web,worker,node', '-s', 'ALLOW_MEMORY_GROWTH=1',
   '-s', 'EXPORTED_RUNTIME_METHODS=["ccall","HEAPU8","HEAP32"]',
   '-s', 'EXPORTED_FUNCTIONS=["_webts_mpeg2_open","_webts_mpeg2_close",' +
-    '"_webts_mpeg2_feed","_webts_mpeg2_step","_webts_mpeg2_frame",' +
+    '"_webts_mpeg2_feed","_webts_mpeg2_tag","_webts_mpeg2_step","_webts_mpeg2_frame",' +
     '"_webts_mpeg2_frame_words","_webts_mpeg2_sequence",' +
     '"_webts_mpeg2_sequence_words","_webts_mpeg2_frames","_malloc","_free"]',
   '-o', module, ...objects,

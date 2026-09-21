@@ -37,7 +37,7 @@ enum {
 /* Output sizes, in 32-bit words. */
 enum {
     WEBTS_MPEG2_SEQUENCE_WORDS = 12,
-    WEBTS_MPEG2_FRAME_WORDS = 5,
+    WEBTS_MPEG2_FRAME_WORDS = 7,
 };
 
 struct WebtsMpeg2Decoder {
@@ -46,6 +46,13 @@ struct WebtsMpeg2Decoder {
     /* A chunk handed over by feed() that step() has not yet passed on. */
     uint8_t* pending;
     int pending_size;
+    /* A tag to attach to whatever picture the pending chunk carries.
+     * libmpeg2 decides from bytes_since_tag whether it belongs to the
+     * picture being parsed or the one before, so it has to be applied
+     * immediately after mpeg2_buffer and not at any other time. */
+    uint32_t pending_tag;
+    uint32_t pending_tag2;
+    int has_pending_tag;
     /* Counted so a caller can tell a stall from a stream that simply ends. */
     uint32_t frames;
 };
@@ -86,6 +93,21 @@ void webts_mpeg2_feed(struct WebtsMpeg2Decoder* decoder, uint8_t* data, int size
 }
 
 /*
+ * Attach a tag to the picture the next chunk carries. Call between feed()
+ * and step(). The tag comes back on the frame that picture is displayed as,
+ * which is how a presentation timestamp survives reordering: coding order
+ * and display order differ whenever there are B pictures, so carrying the
+ * timestamp alongside the chunk would attach it to the wrong frame.
+ */
+void webts_mpeg2_tag(struct WebtsMpeg2Decoder* decoder, uint32_t tag, uint32_t tag2)
+{
+    if (decoder == NULL) return;
+    decoder->pending_tag = tag;
+    decoder->pending_tag2 = tag2;
+    decoder->has_pending_tag = 1;
+}
+
+/*
  * Advance until something worth reporting happens. Call repeatedly; on
  * NEED_DATA, feed() another chunk first.
  */
@@ -99,6 +121,11 @@ int webts_mpeg2_step(struct WebtsMpeg2Decoder* decoder)
             if (decoder->pending == NULL) return WEBTS_MPEG2_NEED_DATA;
             mpeg2_buffer(decoder->handle, decoder->pending,
                          decoder->pending + decoder->pending_size);
+            if (decoder->has_pending_tag) {
+                mpeg2_tag_picture(decoder->handle, decoder->pending_tag,
+                                  decoder->pending_tag2);
+                decoder->has_pending_tag = 0;
+            }
             decoder->pending = NULL;
             decoder->pending_size = 0;
             break;
@@ -189,6 +216,9 @@ int webts_mpeg2_frame(const struct WebtsMpeg2Decoder* decoder, int32_t* output, 
      * type live here; deinterlacing and presentation need them. */
     output[3] = picture != NULL ? (int32_t)picture->flags : 0;
     output[4] = picture != NULL ? (int32_t)picture->nb_fields : 0;
+    /* Valid only when PIC_FLAG_TAGS is set in the flags above. */
+    output[5] = picture != NULL ? (int32_t)picture->tag : 0;
+    output[6] = picture != NULL ? (int32_t)picture->tag2 : 0;
     return 0;
 }
 

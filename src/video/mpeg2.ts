@@ -21,6 +21,8 @@ export const STEP = Object.freeze({
 export const PICTURE_CODING_TYPE_MASK = 7;
 export const PICTURE_TOP_FIELD_FIRST = 8;
 export const PICTURE_PROGRESSIVE_FRAME = 16;
+/** これが立っているときだけ tag が意味を持つ。 */
+export const PICTURE_TAGS = 128;
 
 export interface Mpeg2Sequence {
   /** 符号化されている大きさ。マクロブロック境界まで切り上げられている。 */
@@ -48,6 +50,13 @@ export interface Mpeg2Frame {
   readonly v: Uint8Array;
   readonly flags: number;
   readonly fields: number;
+  /**
+   * feed の前に tag() で付けた値。B ピクチャがあると符号化順と表示順が
+   * 食い違うので、PTS はこれで運ぶ。flags に PICTURE_TAGS が立っていなければ
+   * 無効。
+   */
+  readonly tag: number;
+  readonly tag2: number;
 }
 
 interface DecoderModule {
@@ -120,6 +129,16 @@ export class Mpeg2Decoder {
       [this.#handle, this.#chunkPointer, chunk.length]);
   }
 
+  /**
+   * 次に渡す chunk が運ぶピクチャに印を付ける。feed と step の間に呼ぶ。
+   * 表示されたときに frame() から同じ値が返る。
+   */
+  tag(tag: number, tag2: number): void {
+    if (this.#closed) return;
+    this.#wasm.ccall('webts_mpeg2_tag', null, ['number', 'number', 'number'],
+      [this.#handle, tag >>> 0, tag2 >>> 0]);
+  }
+
   /** 何か報告できるところまで進める。戻り値は STEP のいずれか。 */
   step(): number {
     if (this.#closed) return STEP.closed;
@@ -153,6 +172,8 @@ export class Mpeg2Decoder {
       v: heap.subarray(words[2] ?? 0, (words[2] ?? 0) + chroma),
       flags: words[3] ?? 0,
       fields: words[4] ?? 0,
+      tag: (words[5] ?? 0) >>> 0,
+      tag2: (words[6] ?? 0) >>> 0,
     };
   }
 

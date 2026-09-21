@@ -20,7 +20,7 @@
 // 滞留を見るほうが仕組みが少なく、入力が途切れても壊れない。
 
 import { STREAM_TYPE, TsDemuxer, type Program } from '../ts/demux';
-import { Mpeg2Decoder, STEP, type Mpeg2Sequence } from './mpeg2';
+import { Mpeg2Decoder, PICTURE_TAGS, STEP, type Mpeg2Sequence } from './mpeg2';
 
 export interface PlayerStarted {
   readonly kind: 'started';
@@ -39,8 +39,17 @@ export interface PlayerProgress {
   readonly pendingEsBytes: number;
   /** いま適用している刻みの伸縮率。正なら速め、負なら遅め。 */
   readonly rateTrim: number;
+  /** 音声の時計に対する映像のずれ (ms)。正なら映像が先行。時計が無ければ null。 */
+  readonly avSkewMs: number | null;
   readonly sequence: Mpeg2Sequence | null;
   readonly counters: Record<string, number>;
+}
+
+/** 音声は main でしか鳴らせないので、ADTS をそのまま渡す。 */
+export interface PlayerAudio {
+  readonly kind: 'audio';
+  readonly pts: number;
+  readonly bytes: ArrayBuffer;
 }
 
 export interface PlayerWant { readonly kind: 'want' }
@@ -48,12 +57,14 @@ export interface PlayerDone { readonly kind: 'done'; readonly frames: number }
 export interface PlayerFailed { readonly kind: 'failed'; readonly message: string }
 
 export type PlayerMessage =
-  PlayerStarted | PlayerProgress | PlayerWant | PlayerDone | PlayerFailed;
+  PlayerStarted | PlayerProgress | PlayerAudio | PlayerWant | PlayerDone | PlayerFailed;
 
 export type PlayerRequest =
   | { readonly kind: 'init'; readonly canvas: OffscreenCanvas }
   /** backlogBytes は送り手側にまだ残っている TS。live の遅延の一部である。 */
   | { readonly kind: 'chunk'; readonly bytes: ArrayBuffer; readonly backlogBytes?: number }
+  /** 音声の時計。これが来ている間は映像はこれに追随する。 */
+  | { readonly kind: 'clock'; readonly pts: number }
   | { readonly kind: 'end' };
 
 const post = (message: PlayerMessage): void => { self.postMessage(message); };
@@ -81,13 +92,19 @@ const MAX_RATE_TRIM = 0.05;
 class Player {
   readonly #canvas: OffscreenCanvas;
   readonly #context: OffscreenCanvasRenderingContext2D;
-  readonly #es: Uint8Array[] = [];
+  readonly #es: { bytes: Uint8Array; pts: number | null }[] = [];
   #esBytes = 0;
   #ended = false;
   #wantOutstanding = false;
   #wake: (() => void) | null = null;
   #videoPid: number | null = null;
+  #audioPid: number | null = null;
   #demuxer: TsDemuxer;
+
+  /** main から届く音声の時計。届いた時刻とともに覚えて、間を補間する。 */
+  #clockPts: number | null = null;
+  #clockAt = 0;
+  #avSkewMs: number | null = null;
 
   #upstreamBacklog = 0;
   #frames = 0;
@@ -108,11 +125,26 @@ class Player {
       onPrograms: (programs) => this.#choose(programs),
       onPes: (packet) => {
         if (packet.data.length === 0) return;
-        this.#es.push(packet.data);
+        if (packet.pid === this.#audioPid) {
+          // 音声は復号せずそのまま main へ渡す。Web Audio は Worker に無い。
+          const copy = packet.data.slice();
+          const message: PlayerAudio = {
+            kind: 'audio', pts: packet.pts ?? 0, bytes: copy.buffer,
+          };
+          if (packet.pts !== null) self.postMessage(message, [copy.buffer]);
+          return;
+        }
+        this.#es.push({ bytes: packet.data, pts: packet.pts });
         this.#esBytes += packet.data.length;
         this.#wake?.();
       },
     });
+  }
+
+  /** main が鳴らしている位置。これが来ている間は映像がこれに追随する。 */
+  clock(pts: number): void {
+    this.#clockPts = pts;
+    this.#clockAt = performance.now();
   }
 
   push(bytes: Uint8Array, backlogBytes: number): void {
@@ -145,7 +177,11 @@ class Player {
         (stream) => stream.streamType === STREAM_TYPE.mpeg2Video);
       if (video === undefined) continue;
       this.#videoPid = video.pid;
-      this.#demuxer.select([video.pid]);
+      const audio = program.streams.find(
+        (stream) => stream.streamType === STREAM_TYPE.adtsAac);
+      this.#audioPid = audio?.pid ?? null;
+      this.#demuxer.select(
+        audio === undefined ? [video.pid] : [video.pid, audio.pid]);
       post({
         kind: 'started',
         programNumber: program.programNumber,
@@ -182,8 +218,13 @@ class Player {
         // needData
         const chunk = this.#es.shift();
         if (chunk !== undefined) {
-          this.#esBytes -= chunk.length;
-          decoder.feed(chunk);
+          this.#esBytes -= chunk.bytes.length;
+          decoder.feed(chunk.bytes);
+          // PTS はピクチャの印として運ぶ。B ピクチャがあると符号化順と
+          // 表示順が食い違うので、chunk と一緒には持てない。
+          if (chunk.pts !== null) {
+            decoder.tag(chunk.pts >>> 0, Math.floor(chunk.pts / 2 ** 32));
+          }
           this.#maybeWant();
           continue;
         }
@@ -230,11 +271,8 @@ class Player {
     planes.set(frame.u.subarray(0, chromaSize), lumaSize);
     planes.set(frame.v.subarray(0, chromaSize), lumaSize + chromaSize);
 
-    if (this.#nextDue === 0) this.#resync();
-    const wait = this.#nextDue - performance.now();
+    const wait = this.#schedule(frame);
     if (wait > 1 && this.#esBytes < HIGH_WATER_BYTES) await sleep(wait);
-    else if (wait < -RESYNC_MS) this.#resync();
-    this.#nextDue += this.#periodMs * (1 - this.#rateTrim());
 
     const picture = new VideoFrame(planes, {
       format: 'I420',
@@ -265,10 +303,51 @@ class Player {
         resyncs: this.#resyncs,
         pendingEsBytes: this.#esBytes,
         rateTrim: this.#trim,
+        avSkewMs: this.#avSkewMs,
         sequence: this.#sequence,
         counters: { ...this.#demuxer.counters },
       });
     }
+  }
+
+  /**
+   * このフレームを出すまで何 ms 待つかを決める。
+   *
+   * 音声の時計が来ていればそれに合わせる。音声を落とすのはすぐ気付かれるが
+   * 映像のずれは気付かれにくいので、合わせるのは映像の側である。時計が
+   * 無ければ（音声の無い番組、まだ鳴り始めていない間）自分で刻み、
+   * 滞留を見て伸縮させる。
+   */
+  #schedule(frame: { flags: number; tag: number; tag2: number }): number {
+    const clock = this.#interpolatedClock();
+    const pts = (frame.flags & PICTURE_TAGS) !== 0
+      ? frame.tag2 * 2 ** 32 + frame.tag
+      : null;
+
+    if (clock !== null && pts !== null) {
+      const skewMs = ((pts - clock) / 90_000) * 1000;
+      this.#avSkewMs = skewMs;
+      // 大きく外れていれば合わせようがない。すぐ出して次に賭ける。
+      if (skewMs < -RESYNC_MS || skewMs > RESYNC_MS * 4) {
+        this.#resyncs += 1;
+        this.#nextDue = 0;
+        return 0;
+      }
+      return skewMs;
+    }
+
+    this.#avSkewMs = null;
+    if (this.#nextDue === 0) this.#resync();
+    const wait = this.#nextDue - performance.now();
+    if (wait < -RESYNC_MS) this.#resync();
+    this.#nextDue += this.#periodMs * (1 - this.#rateTrim());
+    return wait;
+  }
+
+  /** 時計は 100 ms おきにしか来ないので、間は経過時間で補う。 */
+  #interpolatedClock(): number | null {
+    if (this.#clockPts === null) return null;
+    return this.#clockPts + ((performance.now() - this.#clockAt) / 1000) * 90_000;
   }
 
   /**
@@ -304,6 +383,7 @@ self.addEventListener('message', (event: MessageEvent<PlayerRequest>) => {
       player?.push(new Uint8Array(request.bytes), request.backlogBytes ?? 0);
       return;
     }
+    if (request.kind === 'clock') { player?.clock(request.pts); return; }
     player?.end();
   } catch (error) {
     post({ kind: 'failed', message: error instanceof Error ? error.message : String(error) });
