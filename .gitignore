@@ -24,6 +24,10 @@ isdbt_rio.inp
 *.pcapng
 *.m2ts
 *.mts
+*.mp4
+
+# UI のモック用動画。実 live 経路へ繋ぐまでの仮置きで、成果物には載せない。
+public/mock-stream.mp4
 
 # Local configuration and credentials
 .env
