@@ -436,10 +436,9 @@ export class SettingsView {
 
       const scan = new ChannelScan();
       this.scan = scan;
-      // ロックの成否は進捗の切り替わりでしか分からないので、直前のチャンネルの
-      // 結果は「見つかった件数が増えたか」で判断して記録する。
+      // 進捗はチャンネルを読み終えた時点で1回来る。ロックの成否は
+      // ドライバが記録したものをそのまま出す。推測しない。
       let previousFound = 0;
-      let previousChannel: number | null = null;
 
       void scan.run({
         onProgress: (progress) => {
@@ -448,14 +447,11 @@ export class SettingsView {
           scanPctText.textContent = `${pct}%`;
           scanChannelText.textContent =
             `物理チャンネル ch${progress.channel} を同期・搬送波ロック中...`;
-          if (previousChannel !== null) {
-            const gained = progress.found - previousFound;
-            appendLog(gained > 0
-              ? `✔ ch${previousChannel} ロック成功 検出: ${gained} サービス`
-              : `- ch${previousChannel}: 信号なし`);
-          }
-          previousChannel = progress.channel;
+          const gained = progress.found - previousFound;
           previousFound = progress.found;
+          appendLog(progress.locked === true
+            ? `✔ ch${progress.channel} ロック成功 検出: ${gained} サービス`
+            : `- ch${progress.channel}: 信号なし`);
         },
       }).then(async (result) => {
         await saveChannels(result.channels, result.programs);

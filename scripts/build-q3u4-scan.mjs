@@ -64,7 +64,8 @@ run(emxx, [
   '-s', 'ENVIRONMENT=web,worker', '-s', 'ALLOW_MEMORY_GROWTH=1',
   '-s', 'EXPORTED_RUNTIME_METHODS=["ccall","HEAPU8","HEAP32"]',
   '-s', 'EXPORTED_FUNCTIONS=["_webts_q3u4_scan_start","_webts_q3u4_scan_poll",' +
-    '"_webts_q3u4_scan_drain","_webts_q3u4_scan_advance","_webts_q3u4_scan_stop",' +
+    '"_webts_q3u4_scan_drain","_webts_q3u4_scan_advance","_webts_q3u4_scan_acknowledge",'+
+    '"_webts_q3u4_scan_stop",' +
     '"_webts_q3u4_scan_join","_webts_q3u4_scan_error_name","_malloc","_free"]',
   '-o', module, ...objects,
 ]);

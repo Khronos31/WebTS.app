@@ -13,6 +13,12 @@
 // 「もう十分」と言うまで待つ。必要な section が揃った時点で次へ行けるので、
 // 固定時間を待つより速く、取りこぼしも少ない。
 //
+// **次のチャンネルへ進む前に、JS がそのチャンネルを見たという応答を待つ。**
+// 待たずに進むと、JS 側のタイマーがブラウザに絞られたときにチャンネルの
+// 切り替わりを取りこぼす。実測では 100 ms のポーリングが絞られ、50局の走査で
+// ch16/17/19 を含む多くのチャンネルを JS が一度も見ずに終わった
+// （docs/FINDINGS.md 18章と同じ、メインスレッドのタイマーが絞られる問題）。
+//
 // 流した TS はここでは保存しない。JS へ渡したぶんは捨てる。
 
 #include "frontend_probe_support.h"
@@ -43,6 +49,8 @@ constexpr std::size_t kReadBytes = Q3U4StreamDataPlane::kPacketSize * 1024U;
 constexpr int kMaxChannels = 64;
 /** 1チャンネルあたりの上限。これを過ぎたら諦めて次へ行く。 */
 constexpr int kChannelTimeoutMs = 8000;
+/** JS の応答を待つ上限。応答が来なくても走査は止めない。 */
+constexpr int kAcknowledgeTimeoutMs = 30000;
 /** 読み手が遅れたときの上限。超えたら古いほうから捨てる。 */
 constexpr std::size_t kStreamLimit = 8U * 1024U * 1024U;
 
@@ -75,6 +83,10 @@ struct Job final {
     std::atomic<bool> stop_requested{false};
     /** JS が「このチャンネルはもう十分」と言ったら立つ。 */
     std::atomic<bool> advance{false};
+    /** JS が見終えたチャンネルの添字。ここまでは進んでよい。 */
+    std::atomic<int> acknowledged{-1};
+    /** JS の応答待ちかどうか。JS はこれを見て応答を返す。 */
+    std::atomic<int> waiting{0};
     /** 各チャンネルのロック結果。-1 未処理、0 ロックせず、1 ロック。 */
     std::atomic<int> locked[kMaxChannels];
 
@@ -130,6 +142,21 @@ void retain(Job& job, const std::uint8_t* data, std::size_t size) noexcept {
         job.consumed = 0U;
     }
     job.pending.store(job.output.size() - job.consumed);
+}
+
+/**
+ * JS がこのチャンネルを見終えるまで待つ。応答が来なくても上限で打ち切り、
+ * 走査そのものは止めない。
+ */
+void await_acknowledge(Job& job, int index) noexcept {
+    job.waiting.store(1);
+    const auto deadline =
+        std::chrono::steady_clock::now() + std::chrono::milliseconds(kAcknowledgeTimeoutMs);
+    while (job.acknowledged.load() < index && !job.stop_requested.load()
+           && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    job.waiting.store(0);
 }
 
 /** 前のチャンネルのぶんを残したまま次へ行かない。取り違えの元になる。 */
@@ -217,7 +244,7 @@ void* worker_main(void* argument) noexcept {
         const ProbeLockPollResult lock = poll_frontend_probe_lock(demod_lock, &frontend, delay);
         job.locked[i].store(lock.locked ? 1 : 0);
         job.elapsed_ms.store(elapsed());
-        if (!lock.locked) continue;
+        if (!lock.locked) { await_acknowledge(job, static_cast<int>(i)); continue; }
 
         const auto capture = frontend.start_terrestrial_capture();
         if (!capture) { result = capture.error(); break; }
@@ -244,6 +271,7 @@ void* worker_main(void* argument) noexcept {
         plane->release_final(attachment);
         const auto stopped = frontend.stop_terrestrial_capture();
         if (!stopped && result == Error::OK) result = stopped.error();
+        await_acknowledge(job, static_cast<int>(i));
     }
 
     job.stage.store(kStageCleanup);
@@ -312,9 +340,18 @@ int webts_q3u4_scan_drain(std::uint8_t* output, int capacity) {
     return static_cast<int>(take);
 }
 
-/** このチャンネルはもう十分。次へ進ませる。 */
+/** このチャンネルはもう十分。受信を打ち切る。 */
 void webts_q3u4_scan_advance(void) {
     if (g_job != nullptr) g_job->advance.store(true);
+}
+
+/** このチャンネルは見終えた。次のチャンネルへ進んでよい。 */
+void webts_q3u4_scan_acknowledge(int index) {
+    if (g_job == nullptr) return;
+    int previous = g_job->acknowledged.load();
+    while (previous < index && !g_job->acknowledged.compare_exchange_weak(previous, index)) {
+        // compare_exchange_weak が previous を更新する。
+    }
 }
 
 void webts_q3u4_scan_stop(void) {
@@ -324,9 +361,9 @@ void webts_q3u4_scan_stop(void) {
     }
 }
 
-/** 進捗を読む。ブロックしない。output は 6 語 + チャンネル数。 */
+/** 進捗を読む。ブロックしない。output は 7 語 + チャンネル数。 */
 int webts_q3u4_scan_poll(std::int32_t* output, int output_words) {
-    if (output == nullptr || output_words < 6) return static_cast<int>(Error::INVALID_ARGUMENT);
+    if (output == nullptr || output_words < 7) return static_cast<int>(Error::INVALID_ARGUMENT);
     if (g_job == nullptr) { output[0] = kIdle; return 0; }
     output[0] = g_job->state.load();
     output[1] = g_job->stage.load();
@@ -334,9 +371,10 @@ int webts_q3u4_scan_poll(std::int32_t* output, int output_words) {
     output[3] = g_job->index.load();
     output[4] = g_job->elapsed_ms.load();
     output[5] = static_cast<std::int32_t>(g_job->pending.load());
-    const int channels = output_words - 6;
+    output[6] = g_job->waiting.load();
+    const int channels = output_words - 7;
     for (int i = 0; i < channels && i < kMaxChannels; ++i) {
-        output[6 + i] = g_job->locked[i].load();
+        output[7 + i] = g_job->locked[i].load();
     }
     return 0;
 }

@@ -5,6 +5,11 @@
 //
 // **セッションは C 側で開いたまま巡回する。**選局のたびに開き直す形は実機で
 // 事故を起こしている（docs/FINDINGS.md 12章）。
+//
+// **チャンネルを見終えたら C へ応答を返す。**返すまで C は次へ進まない。
+// ここを「ポーリングで切り替わりを見る」だけにすると、ブラウザにタイマーを
+// 絞られたときにチャンネルを丸ごと取りこぼす。実測で 50局の走査のうち
+// ch16/17/19 を含む多くを一度も見ずに終えたことがある（18章と同じ問題）。
 
 import { ServiceInfoReader, type NetworkEntry, type ServiceEntry } from '../ts/service-info';
 import { EitReader, type EventEntry } from '../ts/eit';
@@ -14,7 +19,7 @@ import type { ChannelItem, ProgramItem } from './types';
 
 const MODULE_URL = '/build/q3u4-scan/q3u4-scan.mjs';
 const DRAIN_BYTES = 512 * 1024;
-const POLL_BASE_WORDS = 6;
+const POLL_BASE_WORDS = 7;
 
 const CHANNEL_BASE_KHZ = 473_143;
 const CHANNEL_STEP_KHZ = 6_000;
@@ -171,6 +176,7 @@ export class ChannelScan {
       let eit: EitReader | null = null;
       let services: ServiceEntry[] = [];
       let network: NetworkEntry | null = null;
+      let acknowledged = -1;
 
       for (;;) {
         if (this.#stopped) {
@@ -181,12 +187,10 @@ export class ChannelScan {
         const words = module.HEAP32.subarray(pollPointer / 4, pollPointer / 4 + pollWords);
         const state = words[0] ?? 0;
         const current = words[3] ?? 0;
+        const waiting = (words[6] ?? 0) === 1;
+        const lockedAt = (at: number): number => words[POLL_BASE_WORDS + at] ?? -1;
 
         if (current !== index) {
-          // 前のチャンネルの結果を確定させてから次へ。
-          if (reader !== null && network !== null) {
-            this.#collect(found, programs, services, network, eit, channels[index] ?? 0);
-          }
           index = current;
           services = [];
           network = null;
@@ -196,14 +200,6 @@ export class ChannelScan {
             onNetwork: (entry) => { network = entry; },
           });
           eit = new EitReader({ decodeText: decodeAribText });
-          options.onProgress?.({
-            channel: channels[index] ?? 0,
-            index,
-            total: channels.length,
-            locked: null,
-            found: found.length,
-            message: `ch${channels[index] ?? '?'} を確認しています…`,
-          });
         }
 
         // 溜まっているぶんを読む。
@@ -221,9 +217,30 @@ export class ChannelScan {
         // 打ち切られる。番組情報が無いチャンネルでも止まらない。
         const wantServices = services.filter(isWatchable).length;
         const haveEvents = eit?.serviceCount ?? 0;
-        if (reader !== null && reader.complete && (wantServices === 0
-          || haveEvents >= wantServices)) {
-          module.ccall('webts_q3u4_scan_advance', null, [], []);
+        const satisfied = reader !== null && reader.complete
+          && (wantServices === 0 || haveEvents >= wantServices);
+        if (satisfied) module.ccall('webts_q3u4_scan_advance', null, [], []);
+
+        // C が応答待ちに入っていれば、このチャンネルは読み切っている。
+        // 結果を確定させて応答を返す。返すまで C は次へ進まない。
+        if (waiting && acknowledged < index) {
+          if (network !== null) {
+            this.#collect(found, programs, services, network, eit, channels[index] ?? 0);
+          }
+          const locked = lockedAt(index) === 1;
+          options.onProgress?.({
+            channel: channels[index] ?? 0,
+            index,
+            total: channels.length,
+            locked,
+            found: found.length,
+            message: locked
+              ? `ch${channels[index] ?? '?'} ロック成功`
+              : `ch${channels[index] ?? '?'} 信号なし`,
+          });
+          acknowledged = index;
+          module.ccall('webts_q3u4_scan_acknowledge', null, ['number'], [index]);
+          network = null;
         }
 
         if (state !== 1) {
@@ -251,7 +268,7 @@ export class ChannelScan {
         reader?.push(bytes);
         eit?.push(bytes);
       }
-      if (network !== null) {
+      if (network !== null && acknowledged < index) {
         this.#collect(found, programs, services, network, eit, channels[index] ?? 0);
       }
 
