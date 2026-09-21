@@ -88,7 +88,9 @@ run(emxx, [
   '-s', 'EXPORTED_FUNCTIONS=["_webts_q3u4_descramble_start","_webts_q3u4_descramble_poll",' +
     '"_webts_q3u4_descramble_join","_webts_q3u4_descramble_error_name",'+
     '"_webts_q3u4_descramble_output","_webts_q3u4_descramble_output_size",'+
-    '"_webts_q3u4_descramble_discard","_malloc","_free"]',
+    '"_webts_q3u4_descramble_discard","_webts_q3u4_descramble_stop",'+
+    '"_webts_q3u4_descramble_drain","_webts_q3u4_descramble_pending",'+
+    '"_webts_q3u4_descramble_dropped","_malloc","_free"]',
   '-o', module, ...objects,
 ]);
 

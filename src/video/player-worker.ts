@@ -1,14 +1,23 @@
-// 映像を出す Worker。TS を受け取り、分離して復号し、canvas へ描く。
+// 映像を出す Worker。TS の断片を受け取り、分離して復号し、canvas へ描く。
 //
 // 描画まで Worker で完結させる。OffscreenCanvas を渡してもらえば VideoFrame を
-// スレッド間で渡す必要がなく、main thread は UI だけを見ていられる。
+// スレッド間で渡す必要がなく、main thread は UI と（live では）チューナーの
+// 取り出しだけを見ていればよい。
 //
-// 復号は実時間の9倍出る（docs/FINDINGS.md 7章・16章）ので、律速は復号ではなく
-// 表示の間隔である。PTS ではなく sequence の frame_period で刻む: 地デジの
-// 映像 PES は 1 PES = 1 フレームだが、フレーム周期は sequence が持っており、
-// そちらのほうが素直で、PTS の飛びに影響されない。
+// **流し込み式である。**ファイル再生でも live でも入口は同じで、違うのは
+// 誰が chunk を送ってくるかだけ。live では ES を溜め続けるわけにいかないので、
+// 溜めるのをやめて「消費したら次をくれ」と言う形にした。自分で時計を刻むより
+// 消費に同期するほうが、タイマーが絞られても流れが止まらない。
 //
-// これは開発用のプレイヤーで、製品の再生系ではない。音声も字幕もまだ無い。
+// 復号は実時間の6倍以上出る（docs/FINDINGS.md 17章）ので、律速は復号ではなく
+// 表示の間隔である。刻みは sequence の frame_period から取る。ずれが大きく
+// なったら刻み直す: live では受信の途切れや起動直後のばらつきで必ずずれる。
+//
+// **刻みは滞留量で微調整する。**放送の時計とこちらの時計は独立なので、
+// frame_period をそのまま刻むと必ずどちらかへずれていく。実測では60秒で
+// 1.2 MiB ぶん（約0.6秒）滞留が増えた。滞留を見て±5%まで刻みを伸縮させれば、
+// 目に見えない範囲で吸収できる。PCR から時計を復元するのが本筋だが、
+// 滞留を見るほうが仕組みが少なく、入力が途切れても壊れない。
 
 import { STREAM_TYPE, TsDemuxer, type Program } from '../ts/demux';
 import { Mpeg2Decoder, STEP, type Mpeg2Sequence } from './mpeg2';
@@ -19,36 +28,33 @@ export interface PlayerStarted {
   readonly videoPid: number;
   readonly audioPids: readonly number[];
   readonly captionPids: readonly number[];
-  readonly esBytes: number;
-  readonly demuxMs: number;
-  readonly counters: Record<string, number>;
 }
 
 export interface PlayerProgress {
   readonly kind: 'progress';
   readonly frames: number;
   readonly decodeMs: number;
-  readonly lateMs: number;
+  readonly resyncs: number;
+  /** まだ復号していない映像 ES。live ではこれが遅延の一部。 */
+  readonly pendingEsBytes: number;
+  /** いま適用している刻みの伸縮率。正なら速め、負なら遅め。 */
+  readonly rateTrim: number;
   readonly sequence: Mpeg2Sequence | null;
+  readonly counters: Record<string, number>;
 }
 
-export interface PlayerDone {
-  readonly kind: 'done';
-  readonly frames: number;
-  readonly decodeMs: number;
-}
+export interface PlayerWant { readonly kind: 'want' }
+export interface PlayerDone { readonly kind: 'done'; readonly frames: number }
+export interface PlayerFailed { readonly kind: 'failed'; readonly message: string }
 
-export interface PlayerFailed {
-  readonly kind: 'failed';
-  readonly message: string;
-}
+export type PlayerMessage =
+  PlayerStarted | PlayerProgress | PlayerWant | PlayerDone | PlayerFailed;
 
-export type PlayerMessage = PlayerStarted | PlayerProgress | PlayerDone | PlayerFailed;
-
-interface StartRequest {
-  readonly canvas: OffscreenCanvas;
-  readonly ts: ArrayBuffer;
-}
+export type PlayerRequest =
+  | { readonly kind: 'init'; readonly canvas: OffscreenCanvas }
+  /** backlogBytes は送り手側にまだ残っている TS。live の遅延の一部である。 */
+  | { readonly kind: 'chunk'; readonly bytes: ArrayBuffer; readonly backlogBytes?: number }
+  | { readonly kind: 'end' };
 
 const post = (message: PlayerMessage): void => { self.postMessage(message); };
 
@@ -56,149 +62,250 @@ function sleep(milliseconds: number): Promise<void> {
   return new Promise((resolve) => { setTimeout(resolve, milliseconds); });
 }
 
-async function run(request: StartRequest): Promise<void> {
-  const bytes = new Uint8Array(request.ts);
+/** ずれがこれを超えたら刻み直す。受信が途切れれば必ず超える。 */
+const RESYNC_MS = 500;
+/**
+ * 補充を頼む水位。消費のたびに頼んではいけない: 1回の要求で返ってくるのは
+ * TS の塊（MiB 単位）で、1回に消費するのは PES ひとつ（数十 KiB）なので、
+ * 消費と要求を 1:1 にすると供給が2桁過剰になり、溜まった ES を早送りで
+ * 吐き出す羽目になる。水位で頼めば、要求の粒度と消費の粒度が揃わなくてよい。
+ */
+const LOW_WATER_BYTES = 1024 * 1024;
+/** 供給が表示を追い越している。遅れているので待たずに追いつく。 */
+const HIGH_WATER_BYTES = 3 * 1024 * 1024;
+/** 刻みの伸縮でここへ寄せる。低水位と同じにしておけばファイル再生では効かない。 */
+const TARGET_BACKLOG_BYTES = LOW_WATER_BYTES;
+/** 伸縮の上限。これ以上動かすと目に見える。 */
+const MAX_RATE_TRIM = 0.05;
 
-  // PMT が来るまで何を選ぶか決まらないので、まず構成を得る。
-  let programs: readonly Program[] = [];
-  const discovery = new TsDemuxer({ onPrograms: (list) => { programs = list; } });
-  discovery.push(bytes.subarray(0, Math.min(bytes.length, 4_000_000)));
-  // 最初に映像を持つ番組を選ぶ。ワンセグ (H.264) は今は扱わない。
-  const program = programs.find((candidate) => candidate.streams.some(
-    (stream) => stream.streamType === STREAM_TYPE.mpeg2Video));
-  if (program === undefined) throw new Error('MPEG-2 映像を持つ番組が見つかりません');
-  const video = program.streams.find(
-    (stream) => stream.streamType === STREAM_TYPE.mpeg2Video);
-  if (video === undefined) throw new Error('映像 PID がありません');
+class Player {
+  readonly #canvas: OffscreenCanvas;
+  readonly #context: OffscreenCanvasRenderingContext2D;
+  readonly #es: Uint8Array[] = [];
+  #esBytes = 0;
+  #ended = false;
+  #wantOutstanding = false;
+  #wake: (() => void) | null = null;
+  #videoPid: number | null = null;
+  #demuxer: TsDemuxer;
 
-  // 映像 ES を集める。29 MiB 程度なので一度に持って構わない。
-  // live ではここが流量制御の必要な場所になる。
-  const chunks: Uint8Array[] = [];
-  let esBytes = 0;
-  const demuxer = new TsDemuxer({
-    onPes: (packet) => {
-      if (packet.data.length === 0) return;
-      chunks.push(packet.data);
-      esBytes += packet.data.length;
-    },
-  });
-  demuxer.select([video.pid]);
-  const demuxStarted = performance.now();
-  demuxer.push(bytes);
-  demuxer.flush();
-  const demuxMs = performance.now() - demuxStarted;
+  #upstreamBacklog = 0;
+  #frames = 0;
+  #decodeMs = 0;
+  #resyncs = 0;
+  #nextDue = 0;
+  #periodMs = 1000 / 29.97;
+  #trim = 0;
+  #sequence: Mpeg2Sequence | null = null;
+  #sized = false;
 
-  post({
-    kind: 'started',
-    programNumber: program.programNumber,
-    videoPid: video.pid,
-    audioPids: program.streams.filter((s) => s.streamType === STREAM_TYPE.adtsAac)
-      .map((s) => s.pid),
-    captionPids: program.streams.filter((s) => s.streamType === STREAM_TYPE.privateData)
-      .map((s) => s.pid),
-    esBytes,
-    demuxMs,
-    counters: { ...demuxer.counters },
-  });
+  constructor(canvas: OffscreenCanvas) {
+    this.#canvas = canvas;
+    const context = canvas.getContext('2d');
+    if (context === null) throw new Error('2d コンテキストを取れません');
+    this.#context = context;
+    this.#demuxer = new TsDemuxer({
+      onPrograms: (programs) => this.#choose(programs),
+      onPes: (packet) => {
+        if (packet.data.length === 0) return;
+        this.#es.push(packet.data);
+        this.#esBytes += packet.data.length;
+        this.#wake?.();
+      },
+    });
+  }
 
-  const context = request.canvas.getContext('2d');
-  if (context === null) throw new Error('2d コンテキストを取れません');
+  push(bytes: Uint8Array, backlogBytes: number): void {
+    this.#wantOutstanding = false;
+    this.#upstreamBacklog = backlogBytes;
+    this.#demuxer.push(bytes);
+    this.#maybeWant();
+    this.#wake?.();
+  }
 
-  const decoder = await Mpeg2Decoder.create();
-  // libmpeg2 は「次の start code を見て」初めて直前の picture を出すので、
-  // 入力の終わりに sequence_end_code を足さないと末尾が出てこない。
-  chunks.push(Uint8Array.of(0x00, 0x00, 0x01, 0xb7));
+  /** 水位を割っていて、まだ頼んでいなければ頼む。 */
+  #maybeWant(): void {
+    if (this.#ended || this.#wantOutstanding) return;
+    if (this.#esBytes >= LOW_WATER_BYTES) return;
+    this.#wantOutstanding = true;
+    post({ kind: 'want' });
+  }
 
-  let index = 0;
-  let frames = 0;
-  let decodeMs = 0;
-  let lateMs = 0;
-  let startedAt = 0;
-  let periodMs = 1000 / 29.97;
-  let sized = false;
-  let resized: Mpeg2Sequence | null = null;
+  end(): void {
+    this.#demuxer.flush();
+    this.#ended = true;
+    this.#wake?.();
+  }
 
-  try {
-    outer: for (;;) {
+  /** 最初に MPEG-2 映像を持つ番組を選ぶ。ワンセグ (H.264) は扱わない。 */
+  #choose(programs: readonly Program[]): void {
+    if (this.#videoPid !== null) return;
+    for (const program of programs) {
+      const video = program.streams.find(
+        (stream) => stream.streamType === STREAM_TYPE.mpeg2Video);
+      if (video === undefined) continue;
+      this.#videoPid = video.pid;
+      this.#demuxer.select([video.pid]);
+      post({
+        kind: 'started',
+        programNumber: program.programNumber,
+        videoPid: video.pid,
+        audioPids: program.streams.filter((s) => s.streamType === STREAM_TYPE.adtsAac)
+          .map((s) => s.pid),
+        captionPids: program.streams.filter((s) => s.streamType === STREAM_TYPE.privateData)
+          .map((s) => s.pid),
+      });
+      return;
+    }
+  }
+
+  #waitForData(): Promise<void> {
+    return new Promise((resolve) => {
+      this.#wake = () => { this.#wake = null; resolve(); };
+    });
+  }
+
+  async run(): Promise<void> {
+    const decoder = await Mpeg2Decoder.create();
+    let flushed = false;
+    try {
       for (;;) {
-        const decodeStarted = performance.now();
+        const started = performance.now();
         const step = decoder.step();
-        decodeMs += performance.now() - decodeStarted;
-        if (step === STEP.needData) break;
-        if (step === STEP.end) break outer;
+        this.#decodeMs += performance.now() - started;
+
+        if (step === STEP.end) break;
         if (step < 0) throw new Error(`デコーダが ${step} を返しました`);
-        if (step === STEP.sequence) {
-          const sequence = decoder.sequence;
-          if (sequence !== null) {
-            resized = sequence;
-            periodMs = sequence.framePeriod / 27_000;
-            if (!sized) {
-              request.canvas.width = sequence.pictureWidth;
-              request.canvas.height = sequence.pictureHeight;
-              sized = true;
-            }
-          }
+        if (step === STEP.sequence) { this.#onSequence(decoder); continue; }
+        if (step === STEP.frame) { await this.#onFrame(decoder); continue; }
+
+        // needData
+        const chunk = this.#es.shift();
+        if (chunk !== undefined) {
+          this.#esBytes -= chunk.length;
+          decoder.feed(chunk);
+          this.#maybeWant();
           continue;
         }
-        if (step !== STEP.frame) continue;
-
-        const sequence = decoder.sequence;
-        const frame = decoder.frame();
-        if (sequence === null || frame === null) continue;
-
-        // VideoFrame は1本の連続したバッファを要求するので、3面をまとめて
-        // 1回だけ写す。ここが表示経路で唯一のコピーである。
-        const lumaSize = sequence.codedWidth * sequence.codedHeight;
-        const chromaSize = sequence.chromaWidth * sequence.chromaHeight;
-        const planes = new Uint8Array(lumaSize + chromaSize * 2);
-        planes.set(frame.y.subarray(0, lumaSize), 0);
-        planes.set(frame.u.subarray(0, chromaSize), lumaSize);
-        planes.set(frame.v.subarray(0, chromaSize), lumaSize + chromaSize);
-
-        if (startedAt === 0) startedAt = performance.now();
-        const due = startedAt + frames * periodMs;
-        const wait = due - performance.now();
-        if (wait > 1) await sleep(wait);
-        else if (wait < -periodMs) lateMs += -wait;
-
-        const picture = new VideoFrame(planes, {
-          format: 'I420',
-          codedWidth: sequence.codedWidth,
-          codedHeight: sequence.codedHeight,
-          layout: [
-            { offset: 0, stride: sequence.codedWidth },
-            { offset: lumaSize, stride: sequence.chromaWidth },
-            { offset: lumaSize + chromaSize, stride: sequence.chromaWidth },
-          ],
-          // 符号化は 1440x1088 でも見せるのは 1440x1080。
-          visibleRect: { x: 0, y: 0, width: sequence.pictureWidth, height: sequence.pictureHeight },
-          // 標本比 4:3 の 1440x1080 は 1920x1080 として見せる。
-          displayWidth: Math.round(
-            sequence.pictureWidth * (sequence.pixelWidth || 1) / (sequence.pixelHeight || 1)),
-          displayHeight: sequence.pictureHeight,
-          timestamp: Math.round(frames * periodMs * 1000),
-        });
-        context.drawImage(picture, 0, 0, request.canvas.width, request.canvas.height);
-        picture.close();
-
-        frames += 1;
-        if (frames % 30 === 0) {
-          post({ kind: 'progress', frames, decodeMs, lateMs, sequence: resized });
+        if (this.#ended) {
+          if (flushed) break;
+          // 「次の start code を見て」初めて直前の picture が出るので、
+          // 終端では sequence_end_code を流す。
+          decoder.feed(Uint8Array.of(0x00, 0x00, 0x01, 0xb7));
+          flushed = true;
+          continue;
         }
+        this.#maybeWant();
+        await this.#waitForData();
       }
-      if (index >= chunks.length) break;
-      const chunk = chunks[index];
-      index += 1;
-      if (chunk !== undefined) decoder.feed(chunk);
+    } finally {
+      decoder.close();
     }
-  } finally {
-    decoder.close();
+    post({ kind: 'done', frames: this.#frames });
   }
-  post({ kind: 'done', frames, decodeMs });
+
+  #onSequence(decoder: Mpeg2Decoder): void {
+    const sequence = decoder.sequence;
+    if (sequence === null) return;
+    this.#sequence = sequence;
+    this.#periodMs = sequence.framePeriod / 27_000;
+    if (!this.#sized) {
+      this.#canvas.width = sequence.pictureWidth;
+      this.#canvas.height = sequence.pictureHeight;
+      this.#sized = true;
+    }
+  }
+
+  async #onFrame(decoder: Mpeg2Decoder): Promise<void> {
+    const sequence = decoder.sequence;
+    const frame = decoder.frame();
+    if (sequence === null || frame === null) return;
+
+    // VideoFrame は1本の連続したバッファを要求するので、3面をまとめて
+    // 1回だけ写す。ここが表示経路で唯一のコピーである。
+    const lumaSize = sequence.codedWidth * sequence.codedHeight;
+    const chromaSize = sequence.chromaWidth * sequence.chromaHeight;
+    const planes = new Uint8Array(lumaSize + chromaSize * 2);
+    planes.set(frame.y.subarray(0, lumaSize), 0);
+    planes.set(frame.u.subarray(0, chromaSize), lumaSize);
+    planes.set(frame.v.subarray(0, chromaSize), lumaSize + chromaSize);
+
+    if (this.#nextDue === 0) this.#resync();
+    const wait = this.#nextDue - performance.now();
+    if (wait > 1 && this.#esBytes < HIGH_WATER_BYTES) await sleep(wait);
+    else if (wait < -RESYNC_MS) this.#resync();
+    this.#nextDue += this.#periodMs * (1 - this.#rateTrim());
+
+    const picture = new VideoFrame(planes, {
+      format: 'I420',
+      codedWidth: sequence.codedWidth,
+      codedHeight: sequence.codedHeight,
+      layout: [
+        { offset: 0, stride: sequence.codedWidth },
+        { offset: lumaSize, stride: sequence.chromaWidth },
+        { offset: lumaSize + chromaSize, stride: sequence.chromaWidth },
+      ],
+      // 符号化は 1440x1088 でも見せるのは 1440x1080。
+      visibleRect: { x: 0, y: 0, width: sequence.pictureWidth, height: sequence.pictureHeight },
+      // 標本比 4:3 の 1440x1080 は 1920x1080 として見せる。
+      displayWidth: Math.round(
+        sequence.pictureWidth * (sequence.pixelWidth || 1) / (sequence.pixelHeight || 1)),
+      displayHeight: sequence.pictureHeight,
+      timestamp: Math.round(this.#frames * this.#periodMs * 1000),
+    });
+    this.#context.drawImage(picture, 0, 0, this.#canvas.width, this.#canvas.height);
+    picture.close();
+
+    this.#frames += 1;
+    if (this.#frames % 30 === 0) {
+      post({
+        kind: 'progress',
+        frames: this.#frames,
+        decodeMs: this.#decodeMs,
+        resyncs: this.#resyncs,
+        pendingEsBytes: this.#esBytes,
+        rateTrim: this.#trim,
+        sequence: this.#sequence,
+        counters: { ...this.#demuxer.counters },
+      });
+    }
+  }
+
+  /**
+   * 滞留が目標より多ければ刻みを詰め、少なければ緩める。戻り値は比率で、
+   * 正なら速く、負なら遅く。±MAX_RATE_TRIM に収める。
+   */
+  #rateTrim(): number {
+    const backlog = this.#esBytes + this.#upstreamBacklog;
+    const deviation = (backlog - TARGET_BACKLOG_BYTES) / (2 * TARGET_BACKLOG_BYTES);
+    this.#trim = Math.max(-MAX_RATE_TRIM, Math.min(MAX_RATE_TRIM, deviation));
+    return this.#trim;
+  }
+
+  #resync(): void {
+    if (this.#nextDue !== 0) this.#resyncs += 1;
+    this.#nextDue = performance.now() + this.#periodMs;
+  }
 }
 
-self.addEventListener('message', (event: MessageEvent<StartRequest>) => {
-  run(event.data).catch((error: unknown) => {
+let player: Player | null = null;
+
+self.addEventListener('message', (event: MessageEvent<PlayerRequest>) => {
+  const request = event.data;
+  try {
+    if (request.kind === 'init') {
+      player = new Player(request.canvas);
+      player.run().catch((error: unknown) => {
+        post({ kind: 'failed', message: error instanceof Error ? error.message : String(error) });
+      });
+      return;
+    }
+    if (request.kind === 'chunk') {
+      player?.push(new Uint8Array(request.bytes), request.backlogBytes ?? 0);
+      return;
+    }
+    player?.end();
+  } catch (error) {
     post({ kind: 'failed', message: error instanceof Error ? error.message : String(error) });
-  });
+  }
 });

@@ -12,10 +12,16 @@
 // 復号は上流 libaribb25 の `arib_std_b25` facade が行う。PAT/PMT の追跡も
 // ECM の取り出しも MULTI2 もすべて上流であり、ここには書かない。
 //
-// 復号した TS は、利用者が明示的に求めたときだけ、利用者自身の端末へ
-// 渡すために保持する。これは利用者が自分の受信機で受信した自分の放送を
-// 自分で見るための経路であり、どこへも送信しない。既定では保持しない。
-// 鍵とカード情報はどちらの場合も持ち出さない。
+// 復号した TS の扱いは3通り。既定は何も保持しない。
+//   accumulate … 全部溜めて、終わってから利用者の端末へ渡す（保存用）。
+//   stream     … 溜めては渡し、渡したぶんは捨てる（live 視聴用）。
+// どちらも利用者が自分の受信機で受信した自分の放送を自分で見るための経路で、
+// どこへも送信しない。鍵とカード情報はいずれの場合も持ち出さない。
+//
+// stream では、ドライバ pthread が書き、JS の main thread が読む。唯一の
+// 共有状態なので mutex ひとつで守る。読み手が止まったときに無限に伸びるのは
+// 困るので上限を設け、超えたら古いほうから捨てて数える。黙って詰まるより
+// 捨てたと言うほうがよい。
 
 #include "frontend_probe_support.h"
 #include "q3u4_card_backend.h"
@@ -43,6 +49,7 @@ extern "C" void webts_winscard_unbind(void);
 #include <cstdio>
 #include <cstring>
 #include <memory>
+#include <mutex>
 #include <pthread.h>
 #include <thread>
 #include <vector>
@@ -78,9 +85,9 @@ struct Job final {
     std::vector<std::uint8_t> firmware;
     int receiver = 2;
     int frequency_khz = 0;
+    // 0 は「止めるまで」。
     int duration_ms = 5000;
-    // 復号済み TS を手元へ渡すために溜めるかどうか。既定は溜めない。
-    bool collect = false;
+    int collect = 0;
 
     std::atomic<int> state{kIdle};
     std::atomic<int> stage{kStageStart};
@@ -102,10 +109,43 @@ struct Job final {
     std::atomic<int> ecm_unpurchased{-1};
     std::atomic<int> last_ecm_error{-1};
 
-    // worker だけが書き、state が実行中でなくなってから main が読む。
+    std::atomic<bool> stop_requested{false};
+
+    // accumulate では worker だけが書き、終わってから main が読む。
+    // stream では両者が触るので mutex で守る。
+    std::mutex mutex;
     std::vector<std::uint8_t> output;
+    std::size_t consumed = 0U;
     std::atomic<std::uint64_t> output_bytes{0U};
+    std::atomic<std::uint64_t> delivered_bytes{0U};
+    std::atomic<std::uint64_t> dropped_bytes{0U};
 };
+
+enum CollectMode : int { kCollectNone = 0, kCollectAccumulate = 1, kCollectStream = 2 };
+
+// 読み手が 16 MiB ぶん（8秒程度）遅れたら、そこから先は捨てる。
+constexpr std::size_t kStreamLimit = 16U * 1024U * 1024U;
+
+/** 復号済み TS を溜める。stream では上限を超えたぶんを古いほうから捨てる。 */
+void retain(Job& job, const std::uint8_t* data, std::size_t size) noexcept {
+    if (job.collect == kCollectNone || size == 0U) return;
+    std::lock_guard<std::mutex> lock(job.mutex);
+    job.output.insert(job.output.end(), data, data + size);
+    if (job.collect == kCollectStream) {
+        const std::size_t pending = job.output.size() - job.consumed;
+        if (pending > kStreamLimit) {
+            const std::size_t excess = pending - kStreamLimit;
+            job.consumed += excess;
+            job.dropped_bytes.fetch_add(excess);
+        }
+        if (job.consumed > 0U && job.consumed >= job.output.size() / 2U) {
+            job.output.erase(job.output.begin(),
+                             job.output.begin() + static_cast<std::ptrdiff_t>(job.consumed));
+            job.consumed = 0U;
+        }
+    }
+    job.output_bytes.store(job.output.size() - job.consumed);
+}
 
 Job* g_job = nullptr;
 pthread_t g_thread{};
@@ -349,8 +389,10 @@ void* worker_main(void* argument) noexcept {
         return static_cast<int>(std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now() - reading_started).count());
     };
+    const bool bounded = job.duration_ms > 0;
     const auto deadline = reading_started + std::chrono::milliseconds(job.duration_ms);
-    while (std::chrono::steady_clock::now() < deadline) {
+    while (!job.stop_requested.load()
+           && (!bounded || std::chrono::steady_clock::now() < deadline)) {
         const auto read = plane->read(
             attachment, MutableByteView{buffer.data(), buffer.size()}, Timeout{500U});
         if (!read) { result = read.error(); break; }
@@ -367,11 +409,7 @@ void* worker_main(void* argument) noexcept {
             if (output.data != nullptr && output.size > 0) {
                 count_packets(output.data, static_cast<std::size_t>(output.size),
                               job.out_packets, job.out_scrambled, &job.out_bad_sync);
-                if (job.collect) {
-                    job.output.insert(job.output.end(), output.data,
-                                      output.data + output.size);
-                    job.output_bytes.store(job.output.size());
-                }
+                retain(job, output.data, static_cast<std::size_t>(output.size));
             }
             publish_program_info(job, b25);
         }
@@ -391,11 +429,7 @@ void* worker_main(void* argument) noexcept {
                 if (output.data == nullptr || output.size <= 0) break;
                 count_packets(output.data, static_cast<std::size_t>(output.size),
                               job.out_packets, job.out_scrambled, &job.out_bad_sync);
-                if (job.collect) {
-                    job.output.insert(job.output.end(), output.data,
-                                      output.data + output.size);
-                    job.output_bytes.store(job.output.size());
-                }
+                retain(job, output.data, static_cast<std::size_t>(output.size));
             }
         }
         publish_program_info(job, b25);
@@ -417,7 +451,8 @@ int webts_q3u4_descramble_start(const std::uint8_t* firmware, int firmware_size,
     // 地上波の global 受信機は 2, 3（dev1）と 6, 7（dev2）。
     const bool terrestrial = (receiver >= 2 && receiver < 4) || receiver >= 6;
     if (firmware == nullptr || firmware_size <= 0 || receiver < 0 || receiver > 7 ||
-        !terrestrial || frequency_khz <= 0 || duration_ms <= 0 || duration_ms > 120000) {
+        !terrestrial || frequency_khz < 0 || duration_ms < 0 || duration_ms > 14400000 ||
+        collect < 0 || collect > 2) {
         return static_cast<int>(Error::INVALID_ARGUMENT);
     }
     if (g_thread_started) { pthread_join(g_thread, nullptr); g_thread_started = false; }
@@ -427,10 +462,12 @@ int webts_q3u4_descramble_start(const std::uint8_t* firmware, int firmware_size,
     g_job->receiver = receiver;
     g_job->frequency_khz = frequency_khz;
     g_job->duration_ms = duration_ms;
-    g_job->collect = collect != 0;
-    if (g_job->collect) {
+    g_job->collect = collect;
+    if (collect == kCollectAccumulate && duration_ms > 0) {
         // 15 Mbps 前後なので、あらかじめそのぶん確保して再確保を避ける。
         g_job->output.reserve(static_cast<std::size_t>(duration_ms) * 2048U);
+    } else if (collect == kCollectStream) {
+        g_job->output.reserve(kStreamLimit);
     }
     g_job->state.store(kRunning);
     if (pthread_create(&g_thread, nullptr, worker_main, g_job) != 0) {
@@ -464,6 +501,42 @@ int webts_q3u4_descramble_poll(std::int32_t* output, int output_words) {
     output[14] = job.ecm_unpurchased.load();
     output[15] = job.last_ecm_error.load();
     return 0;
+}
+
+/** 実行中のジョブに停止を要求する。戻るのを待たない。 */
+void webts_q3u4_descramble_stop(void) {
+    if (g_job != nullptr) g_job->stop_requested.store(true);
+}
+
+/**
+ * stream で溜まったぶんを output へ写し、写したぶんを捨てる。実行中に
+ * 呼んでよい唯一の取り出し口で、戻り値は写したバイト数。
+ */
+int webts_q3u4_descramble_drain(std::uint8_t* output, int capacity) {
+    if (g_job == nullptr || output == nullptr || capacity <= 0) return 0;
+    Job& job = *g_job;
+    std::lock_guard<std::mutex> lock(job.mutex);
+    const std::size_t pending = job.output.size() - job.consumed;
+    const std::size_t take = std::min(pending, static_cast<std::size_t>(capacity));
+    if (take == 0U) return 0;
+    std::memcpy(output, job.output.data() + job.consumed, take);
+    job.consumed += take;
+    job.delivered_bytes.fetch_add(take);
+    if (job.consumed >= job.output.size()) {
+        job.output.clear();
+        job.consumed = 0U;
+    }
+    job.output_bytes.store(job.output.size() - job.consumed);
+    return static_cast<int>(take);
+}
+
+/** まだ渡していないバイト数と、詰まって捨てたバイト数。 */
+int webts_q3u4_descramble_pending(void) {
+    return g_job == nullptr ? 0 : static_cast<int>(g_job->output_bytes.load());
+}
+
+int webts_q3u4_descramble_dropped(void) {
+    return g_job == nullptr ? 0 : static_cast<int>(g_job->dropped_bytes.load());
 }
 
 /**

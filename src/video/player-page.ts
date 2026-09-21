@@ -1,4 +1,4 @@
-import type { PlayerMessage } from './player-worker';
+import type { PlayerMessage, PlayerRequest } from './player-worker';
 
 // 見た目は作り込まない。素の要素のみ。
 //
@@ -87,6 +87,9 @@ function freshCanvas(): OffscreenCanvas {
 
 let worker: Worker | null = null;
 
+/** Worker が消費したぶんだけ送る。溜め込ませない。 */
+const SLICE = 1024 * 1024;
+
 form.addEventListener('submit', async (event) => {
   event.preventDefault();
   play.disabled = true;
@@ -95,13 +98,13 @@ form.addEventListener('submit', async (event) => {
 
   try {
     const file = picker.files?.[0];
-    let bytes: ArrayBuffer;
+    let bytes: Uint8Array;
     if (file) {
-      bytes = await file.arrayBuffer();
+      bytes = new Uint8Array(await file.arrayBuffer());
     } else if (url.value.trim() !== '') {
       const response = await fetch(url.value.trim());
       if (!response.ok) throw new Error(`${url.value}: HTTP ${response.status}`);
-      bytes = await response.arrayBuffer();
+      bytes = new Uint8Array(await response.arrayBuffer());
     } else {
       status.textContent = 'ファイルを選ぶか URL を入れてください。';
       play.disabled = false;
@@ -110,11 +113,26 @@ form.addEventListener('submit', async (event) => {
 
     worker?.terminate();
     const canvas = freshCanvas();
-    worker = new Worker(new URL('./player-worker.ts', import.meta.url), { type: 'module' });
+    const active = new Worker(new URL('./player-worker.ts', import.meta.url), { type: 'module' });
+    worker = active;
 
-    let header: [string, string][] = [];
-    worker.addEventListener('message', (message: MessageEvent<PlayerMessage>) => {
+    let offset = 0;
+    let header: [string, string][] = [
+      ['入力', `${(bytes.length / 1_048_576).toFixed(2)} MiB`],
+    ];
+    const send = (request: PlayerRequest, transfer: Transferable[] = []): void => {
+      active.postMessage(request, transfer);
+    };
+
+    active.addEventListener('message', (message: MessageEvent<PlayerMessage>) => {
       const data = message.data;
+      if (data.kind === 'want') {
+        if (offset >= bytes.length) { send({ kind: 'end' }); return; }
+        const slice = bytes.slice(offset, offset + SLICE);
+        offset += slice.length;
+        send({ kind: 'chunk', bytes: slice.buffer }, [slice.buffer]);
+        return;
+      }
       if (data.kind === 'failed') {
         status.textContent = `失敗: ${data.message}`;
         play.disabled = false;
@@ -123,38 +141,44 @@ form.addEventListener('submit', async (event) => {
       if (data.kind === 'started') {
         status.textContent = '再生中…';
         header = [
+          ...header,
           ['番組', String(data.programNumber)],
           ['映像 PID', `0x${data.videoPid.toString(16).padStart(4, '0')}`],
           ['音声 PID', data.audioPids.map((pid) => `0x${pid.toString(16)}`).join(', ') || '-'],
           ['字幕 PID', data.captionPids.map((pid) => `0x${pid.toString(16)}`).join(', ') || '-'],
-          ['映像 ES', `${(data.esBytes / 1_048_576).toFixed(2)} MiB`],
-          ['分離時間', `${data.demuxMs.toFixed(0)} ms`],
-          ['分離カウンタ', JSON.stringify(data.counters)],
         ];
         render(header);
         return;
       }
       if (data.kind === 'progress') {
-        const sequence = data.sequence;
-        render([
-          ...header,
-          ['解像度', sequence
-            ? `${sequence.pictureWidth}x${sequence.pictureHeight}`
-              + ` (標本比 ${sequence.pixelWidth}:${sequence.pixelHeight})`
-            : '-'],
-          ['表示フレーム', String(data.frames)],
-          ['復号に使った時間', `${(data.decodeMs / 1000).toFixed(2)} s`],
-          ['表示が遅れた合計', `${data.lateMs.toFixed(0)} ms`],
-        ]);
+        render([...header, ...progressRows(data)]);
         return;
       }
-      status.textContent =
-        `終了しました。${data.frames} フレーム、復号 ${(data.decodeMs / 1000).toFixed(2)} 秒。`;
+      status.textContent = `終了しました。${data.frames} フレーム。`;
       play.disabled = false;
     });
-    worker.postMessage({ canvas, ts: bytes }, [canvas, bytes]);
+
+    send({ kind: 'init', canvas }, [canvas]);
   } catch (error) {
     status.textContent = `失敗: ${error instanceof Error ? error.message : String(error)}`;
     play.disabled = false;
   }
 });
+
+export function progressRows(
+  data: Extract<PlayerMessage, { kind: 'progress' }>,
+): [string, string][] {
+  const sequence = data.sequence;
+  return [
+    ['解像度', sequence
+      ? `${sequence.pictureWidth}x${sequence.pictureHeight}`
+        + ` (標本比 ${sequence.pixelWidth}:${sequence.pixelHeight})`
+      : '-'],
+    ['表示フレーム', String(data.frames)],
+    ['復号に使った時間', `${(data.decodeMs / 1000).toFixed(2)} s`],
+    ['刻み直し', String(data.resyncs)],
+    ['刻みの伸縮', `${(data.rateTrim * 100).toFixed(1)} %`],
+    ['未復号の映像 ES', `${(data.pendingEsBytes / 1024).toFixed(0)} KiB`],
+    ['分離カウンタ', JSON.stringify(data.counters)],
+  ];
+}
