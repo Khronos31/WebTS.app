@@ -457,15 +457,15 @@ export class SettingsView {
           previousChannel = progress.channel;
           previousFound = progress.found;
         },
-      }).then(async (channels) => {
-        await saveChannels(channels);
-        enabledIds = new Set(channels.map((c) => c.id));
+      }).then(async (result) => {
+        await saveChannels(result.channels, result.programs);
+        enabledIds = new Set(result.channels.map((c) => c.id));
         saveEnabledChannelIds(enabledIds);
         scanBar.style.width = '100%';
         scanPctText.textContent = '100%';
         scanChannelText.textContent = 'フルスキャン完了！';
         appendLog(
-          `[FULL-SCAN] 全帯域スキャンが完了しました。${channels.length} 局のサービスを検出しました。`);
+          `[FULL-SCAN] 全帯域スキャンが完了しました。${result.channels.length} 局のサービスを検出しました。`);
         renderTable();
         updateStatusBadge();
         this.onStateChanged();

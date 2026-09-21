@@ -7,9 +7,10 @@
 // 事故を起こしている（docs/FINDINGS.md 12章）。
 
 import { ServiceInfoReader, type NetworkEntry, type ServiceEntry } from '../ts/service-info';
+import { EitReader, type EventEntry } from '../ts/eit';
 import { decodeAribText } from '../ts/arib-text';
 import { readCachedFirmware } from '../usb/firmware';
-import type { ChannelItem } from './types';
+import type { ChannelItem, ProgramItem } from './types';
 
 const MODULE_URL = '/build/q3u4-scan/q3u4-scan.mjs';
 const DRAIN_BYTES = 512 * 1024;
@@ -55,6 +56,26 @@ export interface ScanProgress {
 export interface ScanOptions {
   readonly channels?: readonly number[] | undefined;
   readonly onProgress?: ((progress: ScanProgress) => void) | undefined;
+}
+
+export interface ScanResult {
+  readonly channels: readonly ChannelItem[];
+  readonly programs: readonly ProgramItem[];
+}
+
+/** EIT[p/f] のイベントを UI が使う形に直す。 */
+function toProgramItem(event: EventEntry): ProgramItem {
+  return {
+    id: event.networkId * 100_000_000 + event.serviceId * 100_000 + event.eventId,
+    channelId: event.networkId * 100_000 + event.serviceId,
+    startAt: event.startAt,
+    endAt: event.startAt + event.duration,
+    name: event.name,
+    description: event.description,
+    extended: Object.keys(event.extended).length > 0 ? event.extended : undefined,
+    genre: event.genre === null ? undefined : String(event.genre),
+    subGenre: event.subGenre === null ? undefined : String(event.subGenre),
+  };
 }
 
 interface ScanModule {
@@ -116,7 +137,7 @@ export class ChannelScan {
     this.#stopped = true;
   }
 
-  async run(options: ScanOptions = {}): Promise<ChannelItem[]> {
+  async run(options: ScanOptions = {}): Promise<ScanResult> {
     const channels = options.channels ?? physicalChannels();
     const firmware = await readCachedFirmware();
     if (firmware === null) {
@@ -133,6 +154,7 @@ export class ChannelScan {
     const pollPointer = module._malloc(pollWords * 4);
 
     const found: ChannelItem[] = [];
+    const programs: ProgramItem[] = [];
     try {
       // 受信機 2 は dev1 の地上波。スキャン中は1本しか使わない。
       const started = module.ccall('webts_q3u4_scan_start', 'number',
@@ -146,6 +168,7 @@ export class ChannelScan {
 
       let index = -1;
       let reader: ServiceInfoReader | null = null;
+      let eit: EitReader | null = null;
       let services: ServiceEntry[] = [];
       let network: NetworkEntry | null = null;
 
@@ -162,7 +185,7 @@ export class ChannelScan {
         if (current !== index) {
           // 前のチャンネルの結果を確定させてから次へ。
           if (reader !== null && network !== null) {
-            this.#collect(found, services, network, channels[index] ?? 0);
+            this.#collect(found, programs, services, network, eit, channels[index] ?? 0);
           }
           index = current;
           services = [];
@@ -172,6 +195,7 @@ export class ChannelScan {
             onServices: (list) => { services = [...list]; },
             onNetwork: (entry) => { network = entry; },
           });
+          eit = new EitReader({ decodeText: decodeAribText });
           options.onProgress?.({
             channel: channels[index] ?? 0,
             index,
@@ -187,11 +211,18 @@ export class ChannelScan {
           const size = module.ccall('webts_q3u4_scan_drain', 'number', ['number', 'number'],
             [drainPointer, DRAIN_BYTES]) as number;
           if (size <= 0) break;
-          reader?.push(module.HEAPU8.subarray(drainPointer, drainPointer + size));
+          const bytes = module.HEAPU8.subarray(drainPointer, drainPointer + size);
+          reader?.push(bytes);
+          eit?.push(bytes);
         }
 
-        if (reader !== null && reader.complete) {
-          // 必要なものが揃った。待たずに次へ。
+        // SDT/NIT に加えて、見つかったサービスぶんの EIT[p/f] が揃うまで待つ。
+        // p/f は数秒周期で繰り返されるので、待ち切れなければ C 側の上限で
+        // 打ち切られる。番組情報が無いチャンネルでも止まらない。
+        const wantServices = services.filter(isWatchable).length;
+        const haveEvents = eit?.serviceCount ?? 0;
+        if (reader !== null && reader.complete && (wantServices === 0
+          || haveEvents >= wantServices)) {
           module.ccall('webts_q3u4_scan_advance', null, [], []);
         }
 
@@ -216,9 +247,13 @@ export class ChannelScan {
         const size = module.ccall('webts_q3u4_scan_drain', 'number', ['number', 'number'],
           [drainPointer, DRAIN_BYTES]) as number;
         if (size <= 0) break;
-        reader?.push(module.HEAPU8.subarray(drainPointer, drainPointer + size));
+        const bytes = module.HEAPU8.subarray(drainPointer, drainPointer + size);
+        reader?.push(bytes);
+        eit?.push(bytes);
       }
-      if (network !== null) this.#collect(found, services, network, channels[index] ?? 0);
+      if (network !== null) {
+        this.#collect(found, programs, services, network, eit, channels[index] ?? 0);
+      }
 
       module.ccall('webts_q3u4_scan_join', 'number', [], []);
     } finally {
@@ -228,13 +263,15 @@ export class ChannelScan {
       module._free(drainPointer);
       module._free(pollPointer);
     }
-    return found;
+    return { channels: found, programs };
   }
 
   #collect(
     found: ChannelItem[],
+    programs: ProgramItem[],
     services: readonly ServiceEntry[],
     network: NetworkEntry,
+    eit: EitReader | null,
     physical: number,
   ): void {
     // NIT が物理チャンネルを持っていればそちらを信じる。選局した番号と
@@ -244,5 +281,9 @@ export class ChannelScan {
     watchable.forEach((service, position) => {
       found.push(toChannelItem(service, network, channel, position === 0));
     });
+    const wanted = new Set(watchable.map((service) => service.serviceId));
+    for (const event of eit?.events ?? []) {
+      if (wanted.has(event.serviceId)) programs.push(toProgramItem(event));
+    }
   }
 }

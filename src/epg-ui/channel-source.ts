@@ -2,13 +2,15 @@
 //
 // スキャン済みなら保存されたものを使う。まだなら空を返す。
 //
-// **番組情報は付けない。**スキャンで読んでいるのは SDT と NIT だけで、
-// EIT は読んでいない。実在の局名の横に作り物の番組名を並べると、どれが
-// 本物か区別が付かなくなる。番組情報を入れるのは EIT を読むようにしてからで、
-// それまでは空にしておく。
+// 番組情報はスキャン時に取った EIT[p/f] から出す。**作り物は混ぜない。**
+// 取れていないサービスは空のままにする。実在の局名の横に作り物の番組名が
+// 並ぶと、どれが本物か区別が付かなくなる。
+//
+// 取得時刻が古ければ番組は終わっている。それは陳腐化であって不具合ではないので、
+// 時刻で選び直すだけにする。
 
-import type { ChannelItem, OnAirScheduleItem } from './types';
-import { readChannels } from './channel-store';
+import type { ChannelItem, OnAirScheduleItem, ProgramItem } from './types';
+import { readChannels, readPrograms } from './channel-store';
 import { getEnabledChannelIds } from './mock-data';
 
 /**
@@ -18,8 +20,17 @@ import { getEnabledChannelIds } from './mock-data';
  */
 let cache: ChannelItem[] = [];
 
+let programCache: ProgramItem[] = [];
+
 export async function primeChannels(): Promise<void> {
   cache = (await readChannels())?.channels.slice() ?? [];
+  programCache = await readPrograms();
+}
+
+/** 同期に読みたい画面のための控え。視聴画面が DOM を組み立てる時点で要る。 */
+export function programsSync(channelId: number): ProgramItem[] {
+  return programCache.filter((program) => program.channelId === channelId)
+    .sort((left, right) => left.startAt - right.startAt);
 }
 
 function applyEnabled(channels: readonly ChannelItem[], onlyEnabled: boolean): ChannelItem[] {
@@ -45,13 +56,38 @@ export async function loadChannels(onlyEnabled = true): Promise<ChannelItem[]> {
   return applyEnabled(stored.channels, onlyEnabled);
 }
 
-export async function loadSchedules(onlyEnabled = true): Promise<OnAirScheduleItem[]> {
+export async function loadSchedules(
+  onlyEnabled = true,
+  now: number = Date.now(),
+): Promise<OnAirScheduleItem[]> {
   const channels = await loadChannels(onlyEnabled);
-  return channels.map((channel) => ({
-    channel,
-    currentProgram: null,
-    nextProgram: null,
-    digestibility: 0,
-  }));
+  const programs = await readPrograms();
+  const byChannel = new Map<number, ProgramItem[]>();
+  for (const program of programs) {
+    const list = byChannel.get(program.channelId);
+    if (list === undefined) byChannel.set(program.channelId, [program]);
+    else list.push(program);
+  }
+
+  return channels.map((channel) => {
+    const list = (byChannel.get(channel.id) ?? []).slice()
+      .sort((left, right) => left.startAt - right.startAt);
+    const current = list.find(
+      (program) => program.startAt <= now && (program.endAt > now || program.endAt === program.startAt))
+      ?? null;
+    const next = list.find((program) => program.startAt > now)
+      ?? (current === null ? list[0] ?? null : null);
+    const total = current === null ? 0 : Math.max(1, current.endAt - current.startAt);
+    const digestibility = current === null
+      ? 0
+      : Math.min(100, Math.max(0, Math.round(((now - current.startAt) / total) * 100)));
+    return { channel, currentProgram: current, nextProgram: next, digestibility };
+  });
+}
+
+export async function loadProgramsFor(channelId: number): Promise<ProgramItem[]> {
+  const programs = await readPrograms();
+  return programs.filter((program) => program.channelId === channelId)
+    .sort((left, right) => left.startAt - right.startAt);
 }
 

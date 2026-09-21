@@ -6,10 +6,11 @@
 // 形は UI が既に使っている `ChannelItem` に合わせる。モックと同じ形にして
 // おけば、差し替えても一覧側を書き換えずに済む。
 
-import type { ChannelItem } from './types';
+import type { ChannelItem, ProgramItem } from './types';
 
 const DATABASE = 'webts-channels';
 const STORE = 'channels';
+const PROGRAMS = 'programs';
 const META = 'meta';
 
 export interface ScannedChannels {
@@ -20,10 +21,11 @@ export interface ScannedChannels {
 
 function openDatabase(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
-    const request = indexedDB.open(DATABASE, 1);
+    const request = indexedDB.open(DATABASE, 2);
     request.onupgradeneeded = () => {
       const database = request.result;
       if (!database.objectStoreNames.contains(STORE)) database.createObjectStore(STORE);
+      if (!database.objectStoreNames.contains(PROGRAMS)) database.createObjectStore(PROGRAMS);
       if (!database.objectStoreNames.contains(META)) database.createObjectStore(META);
     };
     request.onsuccess = () => { resolve(request.result); };
@@ -43,9 +45,25 @@ function transact<T>(
   }));
 }
 
-export async function saveChannels(channels: readonly ChannelItem[]): Promise<void> {
+export async function saveChannels(
+  channels: readonly ChannelItem[],
+  programs: readonly ProgramItem[] = [],
+): Promise<void> {
   await transact(STORE, 'readwrite', (store) => store.put([...channels], 'list'));
+  // 「サービスごとのイベント列」として持つ。EIT[p/f] と EIT[schedule] が
+  // 同じ形で入るので、番組表を足すときに UI 側の契約を変えずに済む。
+  await transact(PROGRAMS, 'readwrite', (store) => store.put([...programs], 'list'));
   await transact(META, 'readwrite', (store) => store.put(Date.now(), 'scannedAt'));
+}
+
+export async function readPrograms(): Promise<ProgramItem[]> {
+  try {
+    const programs = await transact<ProgramItem[] | undefined>(
+      PROGRAMS, 'readonly', (store) => store.get('list'));
+    return programs ?? [];
+  } catch {
+    return [];
+  }
 }
 
 export async function readChannels(): Promise<ScannedChannels | null> {
@@ -63,5 +81,6 @@ export async function readChannels(): Promise<ScannedChannels | null> {
 
 export async function clearChannels(): Promise<void> {
   await transact(STORE, 'readwrite', (store) => store.delete('list'));
+  await transact(PROGRAMS, 'readwrite', (store) => store.delete('list'));
   await transact(META, 'readwrite', (store) => store.delete('scannedAt'));
 }

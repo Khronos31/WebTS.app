@@ -2,7 +2,7 @@
 // 16:9動画プレイヤー、リアルタイム字幕、番組メタデータ、電波モニター
 
 import type { ChannelItem, ProgramItem } from '../types';
-import { channelsSync, findChannelSync } from '../channel-source';
+import { channelsSync, findChannelSync, programsSync } from '../channel-source';
 import { VideoPlayer } from '../components/video-player';
 import { LiveSession, type LiveStats } from '../live-session';
 
@@ -275,17 +275,18 @@ export class WatchView {
 }
 
 /**
- * 番組情報の取り出し口。**いまは常に空を返す。**スキャンで読んでいるのは
- * SDT と NIT だけで、EIT は読んでいない。実在の局名の横に作り物の番組名を
- * 並べると、どれが本物か区別が付かなくなる。EIT を読むようになったら
- * ここを実装する。
+ * スキャン時に取った EIT[p/f] から、いまの番組と次の番組を選ぶ。
+ * 取れていなければ空。作り物は混ぜない。
  */
-function currentProgramFor(_channel: ChannelItem): ProgramItem | null {
-  return null;
+function currentProgramFor(channel: ChannelItem): ProgramItem | null {
+  const now = Date.now();
+  return programsSync(channel.id).find(
+    (program) => program.startAt <= now && program.endAt > now) ?? null;
 }
 
-function nextProgramFor(_channel: ChannelItem): ProgramItem | null {
-  return null;
+function nextProgramFor(channel: ChannelItem): ProgramItem | null {
+  const now = Date.now();
+  return programsSync(channel.id).find((program) => program.startAt > now) ?? null;
 }
 
 function escapeHtml(str: string): string {
