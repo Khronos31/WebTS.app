@@ -640,22 +640,72 @@ CBC 初期値、ATR のバイト列は保持も表示も送信もしていない
 ### 測定していないこと
 
 - **ECM 処理は未実施。**`proc_ecm` に相当する往復はまだ送っていない。
-- libaribb25 が要求する `B_CAS_CARD` の vtable は未実装。上流の
-  `b_cas_card.c`（PC/SC 実装）は同梱していないので、このセッションの上に
-  自前で実装する必要がある。
 - **受信と同時にカードを使う構成は試していない。**今回は選局も capture も
   していない。両方を同時に動かしたときの電源調停は未確認。
 - カード抜き差し中の挙動、`poll_presence()` は試していない。
 
 ---
 
-## 15. 未達のまま残っていること
+## 15. libaribb25 の B_CAS_CARD は内蔵リーダの上で動く
+
+上流 `b_cas_card.c` は PC/SC 向けに書かれている。当初は「PC/SC 実装だから
+同梱しない、自前で書く」としていたが、**これは判断を誤っていた。**
+
+このファイルの価値は ARIB STD-B25 Part 3 の応答解析であって PC/SC ではない。
+そして実際に使っている PC/SC の面は次の6関数と定数数個しかない。
+
+```
+SCardEstablishContext  SCardListReaders  SCardConnect
+SCardTransmit  SCardDisconnect  SCardReleaseContext
+SCARD_PCI_T1 ほか定数
+```
+
+したがって **`b_cas_card.c` は改変せず同梱し、`native/winscard/` がこの面だけを
+内蔵リーダの上に用意する**構成にした。解析を書き直すより小さく、間違いにくい。
+vendor ツリーに改変が増えないという副次的な利点もある。
+
+`SCardConnect` は `CardService::connect` を呼ぶので、カード電源の投入と UART
+初期化は上流の CardService の中で起きる。シムは電源にも T=1 にも触れない。
+
+### 測定（PX-Q3U4 内蔵リーダ、カード挿入済み、Chrome 152）
+
+| 項目 | 値 |
+|---|---|
+| 所要時間 | 821 ms |
+| `init()` 戻り値 | **0** |
+| CA system ID | **0x0005** |
+| card status | 0 |
+| システム鍵 | あり |
+| CBC 初期値 | あり |
+| カード ID | あり |
+| `get_id()` 件数 | 1 |
+| `get_pwr_on_ctrl()` 件数 | 0 |
+| 終了時の error | OK |
+
+`init()` が 0 を返すということは、上流の `connect_card()` が応答長 57 以上を
+受け取り、リターンコード 0x2100 を確認し、システム鍵・CBC 初期値・カード ID・
+CA system ID の取り出しまで通ったということである。
+
+**カードの内容は持ち出していない。**鍵、CBC 初期値、カード ID については
+「ゼロでないか」だけを見て、読み出した構造体はその場でゼロ埋めしている。
+CA system ID と card status は規格上の分類であってカード個体ではない。
+
+### 測定していないこと
+
+- **`proc_ecm` / `proc_emm` は呼んでいない。**実際の復号はこの次。
+- 受信と同時にカードを使う構成は未確認（14章と同じ）。
+- シムは1リーダ・1カード・T=1 だけを支える。`SCardStatus`、
+  `SCardGetStatusChange`、T=0、属性取得はどれも無い。汎用の PC/SC ではない。
+
+---
+
+## 16. 未達のまま残っていること
 
 - **M1 の受け入れ条件**（両機種で各30分の生TS、transfer error / overflow 0、メモリ増加上限、
   切断後の安全停止）は未達。PX-Q3U4 では15秒の受信までが取れている（13章）が、
   30分連続・メモリ上限・切断後の安全停止は未測定。PX-S1UD は未着手。
 - **M2**（B25 とカード経路）は途中。内蔵リーダとの APDU 往復は通った（14章）が、
-  `B_CAS_CARD` vtable の実装と ECM 処理、実際の復号は未着手。
+  `B_CAS_CARD` vtable も動いた（15章）が、ECM 処理と実際の復号は未着手。
 - PX-Q3U4 について、chooser の2行と同一 descriptor は観測したが、**物理2 instance への
   一意対応は証明していない。**
 - PX-S1UD の firmware / mode 適用後の再列挙と USB 識別子変化は未観測。

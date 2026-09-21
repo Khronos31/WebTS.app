@@ -541,7 +541,7 @@
       "commit": "b978fe5caf6bfe162e944ad4d323b7c0205276e3",
       "license": "ISC",
       "root": "vendor/upstream/libaribb25",
-      "fileCount": 16,
+      "fileCount": 17,
       "modifiedCount": 0,
       "files": [
         {
@@ -573,6 +573,11 @@
           "path": "src/aribb25api.h",
           "upstreamSha256": "93cdc3b5e2791adafc0d3e7c177eec06eddade2ccdd39b5f76f167fae9f9f950",
           "vendoredSha256": "93cdc3b5e2791adafc0d3e7c177eec06eddade2ccdd39b5f76f167fae9f9f950"
+        },
+        {
+          "path": "src/b_cas_card.c",
+          "upstreamSha256": "b4a90e16e841420c68a598f9efab74f063d62189fb27032abac25f346e977d6d",
+          "vendoredSha256": "b4a90e16e841420c68a598f9efab74f063d62189fb27032abac25f346e977d6d"
         },
         {
           "path": "src/b_cas_card.h",

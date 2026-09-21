@@ -11,7 +11,7 @@
 |---|---|---|---|---|
 | [libusb](https://github.com/libusb/libusb) | v1.0.30 / `87a55632db62c9bdc58cd31d3ccfa673f1bb017f` | LGPL-2.1-or-later | 公式 Emscripten/WebUSB backend と、それが必要とする core | **あり（2ファイル）** |
 | [Khronos31/px4-userland](https://github.com/Khronos31/px4-userland) | `10a373dbda0603b2d8180bb2508e2d88dd70eb2d` | GPL-2.0-only | PX-Q3U4 のコア。IT930x ブリッジ、identity grouping、tagged TS demux、stream data plane、内蔵カード | なし |
-| [shirow-github/libaribb25](https://github.com/shirow-github/libaribb25) | v0.2.10 / `b978fe5caf6bfe162e944ad4d323b7c0205276e3` | ISC | TS section parser、MULTI2、`arib_std_b25` facade | なし |
+| [shirow-github/libaribb25](https://github.com/shirow-github/libaribb25) | v0.2.10 / `b978fe5caf6bfe162e944ad4d323b7c0205276e3` | ISC | TS section parser、MULTI2、`arib_std_b25` facade、`b_cas_card` | なし |
 | [libmpeg2 (mpeg2dec)](https://code.videolan.org/videolan/libmpeg2) | 0.5.1+ / `946bf4b518aacc224f845e73708f99e394744499` | GPL-2.0-or-later | MPEG-2 映像の復号。ブラウザ内蔵デコーダが対応しないため必須 | なし |
 
 PX-S1UD 向けの [Khronos31/siano-userland](https://github.com/Khronos31/siano-userland)
@@ -28,6 +28,16 @@ LGPL-2.1 第2条(a)に従い、改変したファイルには変更告知を入�
 |---|---|
 | `libusb/os/emscripten_webusb.cpp` | 保留転送の所有権。promise callback が生の `usbi_transfer*` を持たないようにし、`em_cancel_transfer()` が有界な論理完了を1回だけ発行し、transfer private の破棄と detach を user callback より前に行う |
 | `libusb/io.c` | `usbi_handle_disconnect()` が backend の発行済み完了を回収してから `NO_DEVICE` 完了を走らせる |
+
+### libaribb25 の `b_cas_card.c` について
+
+当初「PC/SC 実装なので同梱しない」としていたが、**これは誤った判断だった。**
+このファイルの価値は ARIB STD-B25 Part 3 の応答解析であって PC/SC ではなく、
+実際に使っている PC/SC の面は6関数と定数数個しかない。**改変せずそのまま同梱し**、
+`native/winscard/` がその面だけを PX-Q3U4 内蔵リーダの上に用意する。
+解析を書き直すより小さく、間違いにくく、vendor ツリーに改変も増えない。
+`native/winscard/` は汎用の PC/SC 実装ではなく、`b_cas_card.c` が呼ぶものだけを
+支える（1リーダ・1カード・T=1 のみ）。
 
 ### libmpeg2 の選定範囲
 

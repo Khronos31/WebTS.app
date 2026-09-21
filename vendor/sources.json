@@ -76,16 +76,24 @@
       "license": "ISC",
       "purpose": "TS section parser, MULTI2 and the arib_std_b25 facade for M2.",
       "selectionNote": [
-        "b_cas_card.c is the PC/SC card implementation and is deliberately NOT",
-        "vendored; the card path goes through the Q3U4 internal reader instead.",
-        "Its interface and error headers are kept so the facade still links.",
+        "b_cas_card.c is vendored unmodified even though it is written",
+        "against PC/SC. Its value is the response parsing, which follows",
+        "ARIB STD-B25 Part 3 and is the part worth not reimplementing. The",
+        "PC/SC surface it actually uses is six functions and a handful of",
+        "constants, so native/winscard/ supplies those over the Q3U4",
+        "internal reader instead. An earlier note here said this file would",
+        "not be vendored; a shim turned out to be smaller and safer than a",
+        "reimplementation.",
         "td.c is the standalone CLI and is not needed."
       ],
       "include": [
+        "LICENCE",
+        "README.md",
         "src/arib_std_b25.c",
         "src/arib_std_b25.h",
         "src/arib_std_b25_error_code.h",
         "src/aribb25api.h",
+        "src/b_cas_card.c",
         "src/b_cas_card.h",
         "src/b_cas_card_error_code.h",
         "src/multi2.c",
@@ -95,9 +103,7 @@
         "src/ts_common_types.h",
         "src/ts_section_parser.c",
         "src/ts_section_parser.h",
-        "src/ts_section_parser_error_code.h",
-        "LICENCE",
-        "README.md"
+        "src/ts_section_parser_error_code.h"
       ]
     },
     {
