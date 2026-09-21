@@ -248,7 +248,67 @@ GPL-2.0-only の成果物と両立する。速度が足りなくなった場合�
 
 ---
 
-## 9. 未達のまま残っていること
+## 9. PX-Q3U4 の識別は実機で成立する
+
+2026-09-21、実機の PX-Q3U4 を Chrome の WebUSB 経由で、同梱した上流
+`px4::userland::group_q3u4_devices()` にそのまま通した。合成入力ではない。
+
+### 観測
+
+1台の Q3U4 は **USB 上で2デバイスとして見える**（`0x0511:0x084a`）。OS 上も
+`class=USBDevice` として2件見え、関数ドライバに占有されていない。両デバイスの記述子は
+**完全に同一**で、configuration 1個（value 1、選択済み）、interface 0 の alt0 のみ、
+class 255/0/0、bulk endpoint 4本（`0x81` / `0x02` / `0x84` / `0x85`、各 512 bytes）。
+
+記述子だけでは2台を区別できない。区別しているのは serial で、上流の
+`parse_q3u4_serial()` が要求する「15桁の数字、末尾が `1` か `2`」を実機が満たし、
+先頭14桁（base_serial）が一致、末尾（dev_id）が 1 と 2 に分かれていた。
+serial の値は読み取っているが表示・記録していない。
+
+### 上流へ通した結果
+
+| 項目 | 値 |
+| --- | --- |
+| error | `OK` |
+| groupCount / readyGroups / incompleteGroups | 1 / 1 / 0 |
+| rejectedCount | 0 |
+| group0Status | **ready** |
+| slot1 / slot2 present | true / true |
+| usableObservations | 2 |
+
+M0 で「chooser 2行と同一記述子を観測したが物理2 instance への一意対応は証明していない」
+と残っていた点は、**上流の判定基準に照らして解決した。**
+
+### WebUSB は USB speed を公開しない
+
+上流の `validate_q3u4_observation()` は speed を見て、`high` 以上でなければ
+`insufficient_speed` で弾く。これは「Q3U4 が 2.0 か」の確認ではなく「いま何で
+繋がっているか」の確認で、USB 1.1 ポートや不調なハブ経由なら bulk が 64 バイトになり
+4チューナー分の TS が流れないため、早期に明確なエラーを出すためのものである。
+
+WebUSB に negotiated speed を取る API はない。しかし**決め打ちは不要**で、bulk の
+最大パケットサイズから一意に導出できる。USB 2.0 仕様で bulk は full speed なら
+8/16/32/64、high speed なら 512、SuperSpeed なら 1024 と定められているため、
+観測値からの導出であって推定ではない。実機は 512 を報告し、`high` と導出された。
+遅いポートに挿された場合は `full` と導出され、上流が正しく弾く。
+
+`location`（bus/address/port path）も WebUSB では取れないが、埋めていない。
+`observation_less()` の最終タイブレークにしか使われず、有効な1グループ内では
+dev_id が 1 と 2 に分かれるため結果を左右する経路がない。
+
+上流の変更は不要と判断した。上流はネイティブの libusb プログラムで
+`libusb_get_device_speed()` があり、そこでの実装は正しい。
+
+### 測定していないこと
+
+**open も claim も転送も行っていない。**firmware、選局、TS 受信、B25 は未着手。
+抜き差し後の再列挙、複数台の Q3U4 が同時に接続された場合の grouping も未確認。
+確認したのは「許可済みの実機2デバイスが、上流の判定で1つの ready なグループになる」
+ことだけである。
+
+---
+
+## 10. 未達のまま残っていること
 
 - **M1 の受け入れ条件**（両機種で各30分の生TS、transfer error / overflow 0、メモリ増加上限、
   切断後の安全停止）は未達。実 firmware 送信、選局、実 TS 受信は未実施。

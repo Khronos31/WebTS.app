@@ -17,7 +17,8 @@
     "check": "npm run vendor:check && npm run typecheck && npm run test && npm run build",
     "vendor:sync": "node scripts/vendor-sync.mjs",
     "regression:libusb": "node scripts/libusb-ownership-regression.mjs",
-    "build:libusb-browser": "node scripts/build-libusb-ownership-browser.mjs"
+    "build:libusb-browser": "node scripts/build-libusb-ownership-browser.mjs",
+    "build:px4-identity": "node scripts/build-px4-identity.mjs"
   },
   "devDependencies": {
     "typescript": "7.0.2",
