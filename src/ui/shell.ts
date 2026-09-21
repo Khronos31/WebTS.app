@@ -1,14 +1,16 @@
 // アプリの外枠。ナビゲーションと行き先の切り替えだけを持つ。
 //
-// レスポンシブの骨格は agy 経由の Gemini 3.8 Flash に書かせたものを、既存の
-// 呼び出し側と噛み合うよう直して取り込んだ。直した点は下のコメントに個別に書く。
+// EPGStation の UI を参考にし、画面幅によらず常にハンバーガーボタンから
+// 左端のドロワーメニューを開く操作モデルとする。端末やウィンドウ幅によって
+// 操作の入口やメニューの配置が変わると利用者のメンタルモデルが崩れるため、
+// レスポンシブな差異は寸法や余白の調整に留める。
+//
+// ドロワーには標準の <dialog> を使う。フォーカストラップ・Escape キー対応・
+// 背後コンテンツの不活性化がブラウザ標準で得られ、アクセシビリティを
+// 独自実装で抱え込まずに済むため。
 //
 // 行き先は0.1.0では3つ。放送中（ホーム）、設定、About。番組表は0.2.0で
 // 「放送中」の下に1行増える。押して何も起きない行は今は置かない。
-//
-// 広い画面ではヘッダに横並びで常時見せ、狭い画面ではハンバーガーから
-// 端のドロワーを出す。**切り替えは CSS のメディアクエリだけで行い、
-// JavaScript で画面幅を監視しない。**
 
 export type Route = 'live' | 'settings' | 'about';
 
@@ -97,9 +99,9 @@ export function createShell(container: HTMLElement, navigate: (route: Route) => 
   headerStart.append(title);
   header.append(headerStart);
 
-  // 狭い画面ではドロワー、広い画面ではヘッダ内のただの箱として振る舞わせる。
-  // `<dialog>` を使うのは、フォーカストラップ・Escape・背景の操作抑止が
-  // 標準で手に入るため。
+  // 画面幅によらず常にモーダルドロワーとして振る舞わせる。
+  // <dialog> を使うのは、フォーカストラップ・Escape・背景の操作抑止が
+  // ブラウザ標準で手に入るため。
   const dialog = document.createElement('dialog');
   dialog.className = 'nav-dialog';
 
@@ -158,12 +160,13 @@ export function createShell(container: HTMLElement, navigate: (route: Route) => 
 
   nav.append(list);
   dialog.append(nav);
-  header.append(dialog);
 
   const main = document.createElement('main');
   main.className = 'shell-main';
 
-  shell.append(header, main);
+  // dialog は Top Layer に描画されるため DOM 順の制約は薄いが、
+  // ヘッダの一部ではなくアプリ全体の枠組みとして shell 直下に置く。
+  shell.append(header, dialog, main);
   container.append(shell);
 
   toggle.addEventListener('click', () => {
@@ -171,12 +174,12 @@ export function createShell(container: HTMLElement, navigate: (route: Route) => 
     toggle.setAttribute('aria-expanded', 'true');
   });
   close.addEventListener('click', () => { dialog.close(); });
-  // Escape で閉じられたときも状態を合わせる。
+  // Escape キー等で閉じられたときも状態を合わせる。
   dialog.addEventListener('close', () => {
     toggle.setAttribute('aria-expanded', 'false');
   });
-  // 背景を押しても閉じられるようにする。`<dialog>` 自身が backdrop の
-  // クリック先になるので、座標が中身の矩形の外かどうかで判定する。
+  // 背景（Backdrop）を押しても閉じられるようにする。<dialog> 自身が
+  // backdrop のクリック先になるので、座標がダイアログ矩形の外かどうかで判定する。
   dialog.addEventListener('click', (event) => {
     if (event.target !== dialog) return;
     const rect = dialog.getBoundingClientRect();

@@ -1,9 +1,9 @@
 /*
  * 見た目は作り込まない。OS 標準の見え方に任せる。
  *
- * ナビゲーション部分は agy 経由の Gemini 3.8 Flash が書いたものを取り込み、
- * クラス名を既存のものへ揃えた（`.nav-badge` → `.badge`。設定画面が同じ
- * ヘルパを使っているため）。
+ * EPGStation の UI を参考にし、画面幅によらず常にハンバーガーボタンから
+ * ドロワーを開く。広い画面で入口を消したり配置を変えたりしない。
+ * レスポンシブ対応はドロワーの幅、本文の余白、カラム幅の調整に留める。
  *
  * 色はできるだけシステム色キーワード（Canvas / CanvasText / ButtonFace /
  * ButtonBorder）で書く。OS のライト/ダークに勝手に追従し、こちらで配色を
@@ -34,8 +34,7 @@ body {
 .shell-header {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 1rem;
+  gap: 0.75rem;
   padding: 0.5rem 1rem;
   border-bottom: 1px solid ButtonBorder;
   background-color: Canvas;
@@ -54,6 +53,23 @@ body {
   line-height: 1.3;
 }
 
+/*
+ * 本文領域。広い画面で横に間延びしすぎないよう最大幅を設けつつ、
+ * 狭い画面では画面いっぱいに広げる。
+ */
+.shell-main {
+  flex: 1;
+  width: 100%;
+  max-width: 960px;
+  margin-inline: auto;
+  padding: 0.5rem 1rem 2rem;
+  box-sizing: border-box;
+}
+
+/*
+ * メニュー開閉ボタン。
+ * 画面幅によらず常に表示し、操作の入口を一元化する。
+ */
 .nav-toggle {
   display: inline-flex;
   align-items: center;
@@ -71,35 +87,16 @@ body {
 }
 
 /*
- * 要設定の印。中黒の文字色を変えるだけで、画像もアイコンセットも使わない。
- * 「地域設定・チャンネルスキャン」のように名前自体が中黒を含むことがあるので、
- * 地の文と続けて読めないよう間を空ける。
+ * ドロワーメニュー。
+ * <dialog> の既定の中央配置を上書きし、画面左端に縦いっぱいで出す。
+ * 画面幅によらず常にこのドロワーとして機能させる。
  */
-.badge {
-  color: #c62828;
-  color: light-dark(#c62828, #ff6b6b);
-  font-size: 1.3em;
-  line-height: 0;
-  vertical-align: middle;
-  margin-inline-start: 0.35em;
-}
-
-.badge[hidden] {
-  display: none;
-}
-
-/*
- * ドロワー。**幅によらず常にハンバーガーから開く。**広い画面でナビを
- * ヘッダへ直に並べてしまうとハンバーガーが消え、操作の入口が幅で変わる。
- * レスポンシブにするのはドロワーの寸法であって、入口の有無ではない。
- */
-
-/* `<dialog>` の既定の中央配置を上書きし、左端に縦いっぱいで出す。 */
 .nav-dialog {
   margin: 0;
   inset: 0 auto 0 0;
-  width: min(80vw, 320px);
+  width: min(80vw, 300px);
   height: 100dvh;
+  max-width: 80vw;
   max-height: 100dvh;
   padding: 1rem;
   box-sizing: border-box;
@@ -147,7 +144,7 @@ body {
   border-radius: 4px;
 }
 
-/* 縦並び。指で押せる高さにする。 */
+/* ドロワー内は常に縦並び。タップ・クリックしやすい高さを確保する。 */
 .nav-list {
   display: flex;
   flex-direction: column;
@@ -185,16 +182,42 @@ body {
 }
 
 /*
- * 中身の幅。広い画面で本文が端まで伸びると読みにくいので上限を置く。
- * ここがレスポンシブで効かせる箇所であり、ナビゲーションの入口ではない。
+ * 要設定の印。中黒の文字色を変えるだけで、画像もアイコンセットも使わない。
+ * 「地域設定・チャンネルスキャン」のように名前自体が中黒を含むことがあるので、
+ * 地の文と続けて読めないよう間を空ける。
  */
-.shell-main {
-  flex: 1;
-  padding: 0.5rem 1rem 2rem;
-  width: 100%;
-  max-width: 48rem;
-  margin-inline: auto;
-  box-sizing: border-box;
+.badge {
+  color: #c62828;
+  color: light-dark(#c62828, #ff6b6b);
+  font-size: 1.3em;
+  line-height: 0;
+  vertical-align: middle;
+  margin-inline-start: 0.35em;
+}
+
+.badge[hidden] {
+  display: none;
+}
+
+/*
+ * レスポンシブ調整。
+ * 操作の入口（ハンバーガーボタン）やドロワーという振る舞いは一切変えず、
+ * 広い画面での寸法や余白のみを調整する。
+ */
+@media (min-width: 641px) {
+  .nav-dialog {
+    /* PC 画面では画面比率 (vw) ではなく固定幅にして安定させる */
+    width: 280px;
+    max-width: 280px;
+  }
+
+  .shell-header {
+    padding: 0.75rem 1.5rem;
+  }
+
+  .shell-main {
+    padding: 1rem 1.5rem 3rem;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {
