@@ -590,12 +590,72 @@ IT930x ごとに bridge pump の `std::thread` を1本ずつ起こす。`PTHREAD
 
 ---
 
-## 14. 未達のまま残っていること
+## 14. 内蔵カードリーダは実機で成立する
+
+`native/q3u4-card-probe.cpp` と `src/usb/q3u4-card-page.ts` で、PX-Q3U4 の内蔵
+カードリーダに実際のカードを入れた状態で、電源投入・UART 初期化・リセット・
+ATR 取得・T=1 セッション確立・APDU 往復まで通した。復号はまだ行っていない。
+
+**カード電源の権限を持つのは `Q3U4FrontendEnclosure` であり、単一受信機の
+`Q3U4Frontend` ではない。**後者には `acquire_card()` が無い。これまでの選局・
+TS 受信は `Q3U4Frontend` で組んでいたが、カードを併用する本番構成では
+enclosure 側に寄せる必要がある。
+
+組み立て（上流 `CardService` が要求する形）:
+
+```
+Q3U4FrontendEnclosure(bridge1, bridge2, dev1_power, dev2_power, delay)
+Q3U4CardBackend(dev1, enclosure)
+It930xCardHardware(dev1) + SystemCardTime → CardSession
+NativeCardProtocolSession → CardService
+service.connect(client, ShareMode::exclusive)  // 電源投入と UART 初期化はこの中
+service.transmit(...) → service.disconnect(...) → service.shutdown()
+```
+
+### 測定（PX-Q3U4 内蔵リーダ、カード挿入済み、Chrome 152）
+
+| 項目 | 値 |
+|---|---|
+| 所要時間（列挙からカード切断まで） | 824 ms |
+| カード検出 | はい |
+| ATR 長 | 13 バイト |
+| ボーレート | 19200 |
+| IFSC | 124 |
+| EDC | LRC |
+| ブロックタイムアウト | 1600 ms |
+| T=1 セッション確立 | はい |
+| 応答長 | 61 バイト |
+| SW1SW2 | **0x9000** |
+| 終了時の error | OK |
+
+送ったのは ARIB STD-B25 Part 3 の初期設定条件コマンド（CLA=0x90 INS=0x30）1本だけで、
+カードが正常応答することの確認にとどまる。
+
+**カードの応答内容は読み出していない。**C 側は応答バッファをスコープを出る前に
+ゼロ埋めし、外へ渡すのは SW1SW2 と長さだけである。カード ID、システム鍵、
+CBC 初期値、ATR のバイト列は保持も表示も送信もしていない。ATR について出して
+いるのは長さとプロトコル引数（ボーレート・IFSC・EDC・タイムアウト）だけで、
+これらはカード個体ではなく通信条件である。
+
+### 測定していないこと
+
+- **ECM 処理は未実施。**`proc_ecm` に相当する往復はまだ送っていない。
+- libaribb25 が要求する `B_CAS_CARD` の vtable は未実装。上流の
+  `b_cas_card.c`（PC/SC 実装）は同梱していないので、このセッションの上に
+  自前で実装する必要がある。
+- **受信と同時にカードを使う構成は試していない。**今回は選局も capture も
+  していない。両方を同時に動かしたときの電源調停は未確認。
+- カード抜き差し中の挙動、`poll_presence()` は試していない。
+
+---
+
+## 15. 未達のまま残っていること
 
 - **M1 の受け入れ条件**（両機種で各30分の生TS、transfer error / overflow 0、メモリ増加上限、
   切断後の安全停止）は未達。PX-Q3U4 では15秒の受信までが取れている（13章）が、
   30分連続・メモリ上限・切断後の安全停止は未測定。PX-S1UD は未着手。
-- **M2**（B25 とカード経路）は未着手。facade の生成・設定・解放が通っただけで、復号は未検証。
+- **M2**（B25 とカード経路）は途中。内蔵リーダとの APDU 往復は通った（14章）が、
+  `B_CAS_CARD` vtable の実装と ECM 処理、実際の復号は未着手。
 - PX-Q3U4 について、chooser の2行と同一 descriptor は観測したが、**物理2 instance への
   一意対応は証明していない。**
 - PX-S1UD の firmware / mode 適用後の再列挙と USB 識別子変化は未観測。
