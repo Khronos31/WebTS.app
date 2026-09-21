@@ -90,6 +90,13 @@ function sleep(milliseconds: number): Promise<void> {
   return new Promise((resolve) => { setTimeout(resolve, milliseconds); });
 }
 
+/** 標本比を掛けた、実際に見せるべき寸法。 */
+function displaySize(sequence: Mpeg2Sequence): { width: number; height: number } {
+  const width = Math.round(
+    sequence.pictureWidth * (sequence.pixelWidth || 1) / (sequence.pixelHeight || 1));
+  return { width: width > 0 ? width : sequence.pictureWidth, height: sequence.pictureHeight };
+}
+
 /** ずれがこれを超えたら刻み直す。受信が途切れれば必ず超える。 */
 const RESYNC_MS = 500;
 /**
@@ -281,8 +288,12 @@ class Player {
     this.#sequence = sequence;
     this.#periodMs = sequence.framePeriod / 27_000;
     if (!this.#sized) {
-      this.#canvas.width = sequence.pictureWidth;
-      this.#canvas.height = sequence.pictureHeight;
+      // **標本比を掛けた寸法で作る。**地デジは 1440x1080 を標本比 4:3 で
+      // 送っており、符号化寸法のまま canvas を作ると 4:3 の絵になる。
+      // `object-fit: contain` の箱が 16:9 でも、中身が 4:3 のままでは
+      // 横が詰まって表示される。
+      this.#canvas.width = displaySize(sequence).width;
+      this.#canvas.height = displaySize(sequence).height;
       this.#sized = true;
     }
   }
@@ -316,9 +327,8 @@ class Player {
       // 符号化は 1440x1088 でも見せるのは 1440x1080。
       visibleRect: { x: 0, y: 0, width: sequence.pictureWidth, height: sequence.pictureHeight },
       // 標本比 4:3 の 1440x1080 は 1920x1080 として見せる。
-      displayWidth: Math.round(
-        sequence.pictureWidth * (sequence.pixelWidth || 1) / (sequence.pixelHeight || 1)),
-      displayHeight: sequence.pictureHeight,
+      displayWidth: displaySize(sequence).width,
+      displayHeight: displaySize(sequence).height,
       timestamp: Math.round(this.#frames * this.#periodMs * 1000),
     });
     this.#context.drawImage(picture, 0, 0, this.#canvas.width, this.#canvas.height);
