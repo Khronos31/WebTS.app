@@ -36,24 +36,64 @@ export interface AudioStats {
   readonly bufferedSeconds: number;
 }
 
+const ADTS_RATES = [
+  96_000, 88_200, 64_000, 48_000, 44_100, 32_000, 24_000, 22_050,
+  16_000, 12_000, 11_025, 8_000, 7_350,
+];
+
+/** AAC の1フレームは 1024 標本。 */
+const SAMPLES_PER_FRAME = 1024;
+
+export interface AdtsFrame {
+  readonly sampleRate: number;
+  readonly channels: number;
+  /** `mp4a.40.x`。ADTS の profile から決める。 */
+  readonly codec: string;
+  /** このフレームに入っている raw data block の数。ふつう 1。 */
+  readonly blocks: number;
+  readonly bytes: Uint8Array;
+}
+
 /**
- * ADTS ヘッダから WebCodecs の設定を読む。ADTS のままでも
- * `mp4a.40.2` として受けるので、要るのは標本化周波数とチャンネル数だけ。
+ * ADTS ヘッダを1つ読む。フレーム全体が揃っていなければ null。
+ *
+ * **PES のペイロードを丸ごと1チャンクとして渡してはいけない。**PES の切れ目と
+ * ADTS フレームの境界は一致せず、1つの PES に複数フレームが入ることも、
+ * 途中で切れることもある。境界を無視して渡すと、局によってデコーダが
+ * `EncodingError` を出して止まる（実測: NHK では 1 PES = 1 フレームで通るが、
+ * TOKYO MX では最初の1フレームで死んだ）。
  */
-export function readAdtsHeader(
-  bytes: Uint8Array,
-): { sampleRate: number; channels: number } | null {
-  if (bytes.length < 7) return null;
-  if (bytes[0] !== 0xff || ((bytes[1] ?? 0) & 0xf0) !== 0xf0) return null;
-  const RATES = [
-    96_000, 88_200, 64_000, 48_000, 44_100, 32_000, 24_000, 22_050,
-    16_000, 12_000, 11_025, 8_000, 7_350,
-  ];
-  const rateIndex = ((bytes[2] ?? 0) >> 2) & 0x0f;
-  const channels = (((bytes[2] ?? 0) & 0x01) << 2) | (((bytes[3] ?? 0) >> 6) & 0x03);
-  const sampleRate = RATES[rateIndex];
+export function readAdtsFrame(bytes: Uint8Array, offset: number): AdtsFrame | null {
+  if (offset + 7 > bytes.length) return null;
+  if (bytes[offset] !== 0xff || ((bytes[offset + 1] ?? 0) & 0xf0) !== 0xf0) return null;
+  const protectionAbsent = ((bytes[offset + 1] ?? 0) & 0x01) === 1;
+  const profile = ((bytes[offset + 2] ?? 0) >> 6) & 0x03;
+  const rateIndex = ((bytes[offset + 2] ?? 0) >> 2) & 0x0f;
+  const channels = (((bytes[offset + 2] ?? 0) & 0x01) << 2)
+    | (((bytes[offset + 3] ?? 0) >> 6) & 0x03);
+  const frameLength = (((bytes[offset + 3] ?? 0) & 0x03) << 11)
+    | ((bytes[offset + 4] ?? 0) << 3)
+    | (((bytes[offset + 5] ?? 0) >> 5) & 0x07);
+  const sampleRate = ADTS_RATES[rateIndex];
   if (sampleRate === undefined || channels === 0) return null;
-  return { sampleRate, channels };
+  if (frameLength < (protectionAbsent ? 7 : 9)) return null;
+  if (offset + frameLength > bytes.length) return null;
+  const blocks = (((bytes[offset + 6] ?? 0) & 0x03) + 1);
+  return {
+    sampleRate,
+    channels,
+    // profile は 0=Main, 1=LC, 2=SSR, 3=LTP。object type はこれに 1 を足したもの。
+    codec: `mp4a.40.${profile + 1}`,
+    blocks,
+    bytes: bytes.subarray(offset, offset + frameLength),
+  };
+}
+
+function concat(left: Uint8Array, right: Uint8Array): Uint8Array {
+  const merged = new Uint8Array(left.length + right.length);
+  merged.set(left);
+  merged.set(right, left.length);
+  return merged;
 }
 
 export class AudioPlayer {
@@ -78,6 +118,14 @@ export class AudioPlayer {
   #reanchors = 0;
   #errors = 0;
   #closed = false;
+  /** 直前の設定。変わったときだけ configure し直す。 */
+  #codec = '';
+  #sampleRate = 0;
+  #channels = 0;
+  /** PES を跨いで切れた ADTS フレームの前半。 */
+  #pending = new Uint8Array(0);
+  /** 次のフレームに与える PTS。PES の PTS はフレーム単位ではないため。 */
+  #nextPts: number | null = null;
 
   /**
    * AudioContext を用意する。利用者の操作の中から呼ぶこと。
@@ -98,34 +146,93 @@ export class AudioPlayer {
     this.#context = context;
     this.#decoder = new AudioDecoder({
       output: (data) => this.#play(data),
-      error: () => { this.#errors += 1; },
+      error: () => { this.#recover(); },
     });
   }
 
-  /** Worker から来た ADTS フレームを1つ受ける。 */
+  /**
+   * 音声 PES のペイロードを受ける。中の ADTS フレームを切り出し、1つずつ
+   * 渡す。フレームが PES を跨いで切れていれば次まで持ち越す。
+   */
   push(frame: AudioFrame): void {
     if (this.#closed || this.#decoder === null) return;
-    if (!this.#configured) {
-      const header = readAdtsHeader(frame.bytes);
-      if (header === null) return;
-      this.#decoder.configure({
-        // ADTS をそのまま渡すので description は要らない。
-        codec: 'mp4a.40.2',
-        sampleRate: header.sampleRate,
-        numberOfChannels: header.channels,
-      });
-      this.#configured = true;
+
+    const data = this.#pending.length === 0 ? frame.bytes : concat(this.#pending, frame.bytes);
+    this.#pending = new Uint8Array(0);
+
+    // PES の先頭から同期語を探す。境界がずれていても拾い直せる。
+    let offset = 0;
+    while (offset + 2 <= data.length
+      && !(data[offset] === 0xff && ((data[offset + 1] ?? 0) & 0xf0) === 0xf0)) {
+      offset += 1;
     }
+
+    let pts = this.#nextPts ?? frame.pts;
+    // PES の PTS は先頭フレームのもの。飛んでいたら合わせ直す。
+    if (this.#nextPts === null || Math.abs(frame.pts - pts) > 90_000) pts = frame.pts;
+
+    while (offset < data.length) {
+      const adts = readAdtsFrame(data, offset);
+      if (adts === null) {
+        // 途中で切れている。次の PES と繋いでから読み直す。
+        this.#pending = data.slice(offset);
+        break;
+      }
+      this.#configure(adts);
+      try {
+        this.#decoder.decode(new EncodedAudioChunk({
+          type: 'key',
+          // WebCodecs はマイクロ秒。PTS は 90kHz。
+          timestamp: Math.round((pts / 90_000) * 1_000_000),
+          data: adts.bytes,
+        }));
+      } catch {
+        this.#errors += 1;
+      }
+      const samples = SAMPLES_PER_FRAME * adts.blocks;
+      pts += (samples / adts.sampleRate) * 90_000;
+      offset += adts.bytes.length;
+    }
+    this.#nextPts = pts;
+  }
+
+  /** 設定が変わったときだけ configure する。毎回呼ぶと復号が途切れる。 */
+  #configure(frame: AdtsFrame): void {
+    if (this.#decoder === null) return;
+    if (this.#codec === frame.codec && this.#sampleRate === frame.sampleRate
+      && this.#channels === frame.channels) {
+      return;
+    }
+    this.#codec = frame.codec;
+    this.#sampleRate = frame.sampleRate;
+    this.#channels = frame.channels;
     try {
-      this.#decoder.decode(new EncodedAudioChunk({
-        type: 'key',
-        // WebCodecs はマイクロ秒。PTS は 90kHz。
-        timestamp: Math.round((frame.pts / 90_000) * 1_000_000),
-        data: frame.bytes,
-      }));
+      this.#decoder.configure({
+        codec: frame.codec,
+        sampleRate: frame.sampleRate,
+        numberOfChannels: frame.channels,
+      });
     } catch {
       this.#errors += 1;
     }
+  }
+
+  /**
+   * デコーダが壊れたら作り直す。WebCodecs のデコーダは一度 error を出すと
+   * 閉じたままになるので、放っておくと以後ずっと無音になる。
+   */
+  #recover(): void {
+    if (this.#closed || this.#context === null) return;
+    this.#errors += 1;
+    try { this.#decoder?.close(); } catch { /* 既に閉じている */ }
+    this.#codec = '';
+    this.#sampleRate = 0;
+    this.#channels = 0;
+    this.#pending = new Uint8Array(0);
+    this.#decoder = new AudioDecoder({
+      output: (data) => this.#play(data),
+      error: () => { this.#recover(); },
+    });
   }
 
   setVolume(volume: number): void {
