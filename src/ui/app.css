@@ -1,9 +1,17 @@
 /*
  * 見た目は作り込まない。OS 標準の見え方に任せる。
  *
- * ここにあるのは「素のままでは読めない」ものだけ。色、影、角丸、独自アイコン、
- * アニメーション、カスタムスクロールバーは作らない。フォーカスリングは既定のまま
- * 残す。キーボードと D-pad の操作を前提にするため。
+ * ナビゲーション部分は agy 経由の Gemini 3.8 Flash が書いたものを取り込み、
+ * クラス名を既存のものへ揃えた（`.nav-badge` → `.badge`。設定画面が同じ
+ * ヘルパを使っているため）。
+ *
+ * 色はできるだけシステム色キーワード（Canvas / CanvasText / ButtonFace /
+ * ButtonBorder）で書く。OS のライト/ダークに勝手に追従し、こちらで配色を
+ * 決めずに済むため。グラデーション、影の作り込み、独自アイコン、
+ * カスタムスクロールバーは作らない。
+ *
+ * フォーカスリングは既定のまま残す。キーボードと D-pad の操作を前提にするため、
+ * `outline: none` は書かない。
  */
 
 :root {
@@ -15,47 +23,237 @@ body {
   margin: 0;
 }
 
-header {
+.shell {
+  display: flex;
+  flex-direction: column;
+  min-height: 100dvh;
+  background-color: Canvas;
+  color: CanvasText;
+}
+
+.shell-header {
   display: flex;
   align-items: center;
-  gap: 0.5rem;
-  padding: 0.5rem;
-  border-bottom: 1px solid;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.5rem 1rem;
+  border-bottom: 1px solid ButtonBorder;
+  background-color: Canvas;
+  box-sizing: border-box;
 }
 
-header h1 {
-  font-size: 1rem;
+.shell-header-start {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.shell-title {
   margin: 0;
+  font-size: 1.125rem;
+  line-height: 1.3;
 }
 
-main {
+.shell-main {
+  flex: 1;
   padding: 0.5rem 1rem 2rem;
 }
 
-/* 要設定の印。中黒の色を変えるだけで、画像もアイコンセットも使わない。 */
+.nav-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.2rem;
+  padding: 0.35rem 0.6rem;
+  font: inherit;
+  font-size: 1.2rem;
+  line-height: 1;
+  background-color: ButtonFace;
+  color: CanvasText;
+  border: 1px solid ButtonBorder;
+  border-radius: 4px;
+  box-sizing: border-box;
+}
+
+.nav-list {
+  display: flex;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.nav-item {
+  display: flex;
+}
+
+.nav-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 0.5rem 0.75rem;
+  color: CanvasText;
+  text-decoration: none;
+  border-radius: 4px;
+  line-height: 1.4;
+  box-sizing: border-box;
+}
+
+.nav-link:hover {
+  background-color: color-mix(in srgb, CanvasText 8%, transparent);
+}
+
+/* 現在地。配色を作らず、地の色を薄く混ぜるだけにする。 */
+.nav-link[aria-current='page'] {
+  font-weight: bold;
+  background-color: color-mix(in srgb, CanvasText 12%, transparent);
+}
+
+/*
+ * 要設定の印。中黒の文字色を変えるだけで、画像もアイコンセットも使わない。
+ * 「地域設定・チャンネルスキャン」のように名前自体が中黒を含むことがあるので、
+ * 地の文と続けて読めないよう間を空ける。
+ */
 .badge {
-  color: #c00;
-  /* 中黒は小さいので、印として見える程度に大きくする。 */
-  font-size: 1.4em;
+  color: #c62828;
+  color: light-dark(#c62828, #ff6b6b);
+  font-size: 1.3em;
   line-height: 0;
   vertical-align: middle;
-  /* 「地域設定・チャンネルスキャン」のように名前自体が中黒を含むことがあるので、
-     地の文と続けて読めないよう間を空ける。 */
   margin-inline-start: 0.35em;
 }
 
-@media (prefers-color-scheme: dark) {
-  .badge { color: #f66; }
+.badge[hidden] {
+  display: none;
 }
 
-.menu,
+/* 狭い画面: 端から出るドロワー。 */
+@media (max-width: 640px) {
+  /* `<dialog>` の既定の中央配置を上書きし、左端に縦いっぱいで出す。 */
+  .nav-dialog {
+    margin: 0;
+    inset: 0 auto 0 0;
+    width: min(80vw, 300px);
+    height: 100dvh;
+    max-width: 80vw;
+    max-height: 100dvh;
+    padding: 1rem;
+    box-sizing: border-box;
+    background-color: Canvas;
+    color: CanvasText;
+    border: none;
+    border-right: 1px solid ButtonBorder;
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+    overflow-y: auto;
+  }
+
+  .nav-dialog:not([open]) {
+    display: none;
+  }
+
+  .nav-dialog::backdrop {
+    background-color: rgb(0 0 0 / 40%);
+  }
+
+  .nav-dialog-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    border-bottom: 1px solid ButtonBorder;
+    padding-bottom: 0.5rem;
+  }
+
+  .nav-dialog-title {
+    font-weight: bold;
+  }
+
+  .nav-dialog-close {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 2rem;
+    height: 2rem;
+    font: inherit;
+    line-height: 1;
+    background-color: ButtonFace;
+    color: CanvasText;
+    border: 1px solid ButtonBorder;
+    border-radius: 4px;
+  }
+
+  /* ドロワーの中は縦並び。指で押せる高さにする。 */
+  .nav-list {
+    flex-direction: column;
+    gap: 0.5rem;
+  }
+
+  .nav-link {
+    width: 100%;
+    padding: 0.75rem 0.5rem;
+  }
+}
+
+/* 広い画面: ヘッダ内に横並びで常時出す。 */
+@media (min-width: 641px) {
+  .nav-toggle {
+    display: none;
+  }
+
+  /*
+   * 開閉を JavaScript で切り替えず、CSS だけで `<dialog>` をただの箱に戻す。
+   * 閉じている `<dialog>` は UA スタイルで `display: none` なので、
+   * `:not([open])` にも同じ指定が要る。
+   */
+  .nav-dialog,
+  .nav-dialog:not([open]) {
+    display: block;
+    position: static;
+    inset: auto;
+    width: auto;
+    height: auto;
+    max-width: none;
+    max-height: none;
+    margin: 0;
+    padding: 0;
+    border: none;
+    background: transparent;
+    color: inherit;
+    overflow: visible;
+  }
+
+  .nav-dialog-header {
+    display: none;
+  }
+
+  .nav-list {
+    flex-direction: row;
+    gap: 0.25rem;
+  }
+
+  /* 狭い画面で開いたまま広げられても、背景が覆われたままにならないように。 */
+  .nav-dialog::backdrop {
+    display: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    transition: none !important;
+    animation: none !important;
+  }
+}
+
+/* 以下は画面の中身。ナビゲーションとは独立している。 */
+
 .channels {
   list-style: none;
   margin: 0;
   padding: 0;
 }
 
-.menu button,
 .channels button {
   display: block;
   width: 100%;
