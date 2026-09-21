@@ -1,6 +1,6 @@
 // Vitest ships its own defineConfig so the `test` block is typed. Importing it
 // from 'vite' leaves `test` unknown and fails the typecheck.
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { createReadStream, mkdirSync, statSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { defineConfig, type Plugin } from 'vitest/config';
 
@@ -16,9 +16,13 @@ const crossOriginIsolation = {
 // Development-only. Lets a page hand a file to the machine running the dev
 // server, which is the same machine the browser is on.
 //
+// POST writes a file, GET reads one back. Reading has to go through here too,
+// because a captured stream is named .ts and Vite would otherwise try to
+// transform it as TypeScript.
+//
 // This exists because browser downloads are awkward to drive while developing
 // -- a save dialog or a download shelf gets in the way -- and because captures
-// taken for demux work have to land somewhere predictable. It writes only into
+// taken for demux work have to land somewhere predictable. It touches only
 // local/, which is gitignored, and only under a sanitised name. `apply: 'serve'`
 // keeps it out of any build, and the dev server is bound to localhost, so
 // nothing here is reachable from outside this machine.
@@ -29,9 +33,9 @@ function localCapture(): Plugin {
     apply: 'serve',
     configureServer(server) {
       server.middlewares.use('/__local-capture', (request, response) => {
-        if (request.method !== 'POST') {
+        if (request.method !== 'POST' && request.method !== 'GET') {
           response.statusCode = 405;
-          response.end('POST only');
+          response.end('GET or POST only');
           return;
         }
         const query = new URL(request.url ?? '/', 'http://localhost');
@@ -42,6 +46,19 @@ function localCapture(): Plugin {
         if (name === '' || !name.endsWith('.ts')) {
           response.statusCode = 400;
           response.end('name must be a simple basename ending in .ts');
+          return;
+        }
+        if (request.method === 'GET') {
+          try {
+            const path = join(directory, name);
+            response.statusCode = 200;
+            response.setHeader('Content-Type', 'video/mp2t');
+            response.setHeader('Content-Length', String(statSync(path).size));
+            createReadStream(path).pipe(response);
+          } catch (error) {
+            response.statusCode = 404;
+            response.end(error instanceof Error ? error.message : String(error));
+          }
           return;
         }
         const chunks: Buffer[] = [];
