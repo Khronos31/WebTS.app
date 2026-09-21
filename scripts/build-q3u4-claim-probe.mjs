@@ -7,7 +7,7 @@
 // cross-origin isolated, which vite.config.ts and public/_headers provide.
 
 import { mkdirSync, readFileSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { findCompilers, run, version } from './lib/emscripten.mjs';
 import { C_SOURCES, CXX_SOURCES, prepareVariant } from './lib/libusb-variants.mjs';
@@ -15,7 +15,16 @@ import { C_SOURCES, CXX_SOURCES, prepareVariant } from './lib/libusb-variants.mj
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const upstream = join(root, 'vendor', 'upstream', 'px4-userland', 'userland');
 const output = join(root, 'build', 'q3u4-claim-probe');
-const probe = join(root, 'native', 'q3u4-claim-probe.cpp');
+const probes = [
+  join(root, 'native', 'q3u4-claim-probe.cpp'),
+  join(root, 'native', 'q3u4-version-probe.cpp'),
+  join(root, 'native', 'q3u4-firmware-probe.cpp'),
+];
+// 上流の transport と IT930x 制御をそのままリンクする。書き写さない。
+const upstreamSources = [
+  'libusb_transport.cpp', 'it930x.cpp', 'it930x_protocol.cpp', 'bridge_i2c.cpp',
+  'identity.cpp', 'firmware.cpp', 'error.cpp', 'logging.cpp',
+].map((name) => join(upstream, 'src', name));
 
 const COMMON = ['-O2', '-DPLATFORM_POSIX=1', '-DOS_EMSCRIPTEN=1', '-DENABLE_LOGGING=1', '-pthread'];
 
@@ -41,9 +50,12 @@ for (const relativePath of CXX_SOURCES) {
   objects.push(object);
 }
 
-const probeObject = join(variantRoot, 'q3u4-claim-probe.o');
-run(emxx, [...COMMON, ...include, '-I', join(upstream, 'include'), '-std=c++20',
-  '-c', probe, '-o', probeObject]);
+const px4Include = ['-I', join(upstream, 'include'), '-I', join(upstream, 'src')];
+for (const source of [...probes, ...upstreamSources]) {
+  const object = join(variantRoot, basename(source, '.cpp') + '.px4.o');
+  run(emxx, [...COMMON, ...include, ...px4Include, '-std=c++20', '-c', source, '-o', object]);
+  objects.push(object);
+}
 
 const module = join(output, 'q3u4-claim-probe.mjs');
 run(emxx, [
@@ -52,12 +64,15 @@ run(emxx, [
   '-s', 'EXPORT_ES6=1', '-s', 'ENVIRONMENT=web,worker',
   '-s', 'ALLOW_MEMORY_GROWTH=1',
   '-s', 'EXPORTED_RUNTIME_METHODS=["ccall","HEAPU8"]',
-  '-s', 'EXPORTED_FUNCTIONS=["_webts_q3u4_claim_probe","_webts_q3u4_claim_probe_words","_malloc","_free"]',
-  '-o', module, probeObject, ...objects,
+  '-s', 'EXPORTED_FUNCTIONS=["_webts_q3u4_claim_probe","_webts_q3u4_claim_probe_words",' +
+    '"_webts_q3u4_version_probe","_webts_q3u4_version_probe_words",' +
+    '"_webts_q3u4_firmware_probe","_webts_q3u4_firmware_probe_words","_malloc","_free"]',
+  '-o', module, ...objects,
 ]);
 
 const text = readFileSync(module, 'utf8');
-for (const required of ['webts_q3u4_claim_probe', 'ccall']) {
+for (const required of ['webts_q3u4_claim_probe', 'webts_q3u4_version_probe',
+  'webts_q3u4_firmware_probe', 'ccall']) {
   if (!text.includes(required)) throw new Error(`q3u4-claim-probe.mjs is missing ${required}`);
 }
 process.stdout.write(`built ${module}\n`);
