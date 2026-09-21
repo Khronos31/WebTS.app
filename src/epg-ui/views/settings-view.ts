@@ -15,6 +15,8 @@ import {
   type FirmwareStage,
 } from '../../usb/firmware';
 import { readSetupState } from '../../ui/setup-state';
+import { ChannelScan } from '../channel-scan';
+import { saveChannels } from '../channel-store';
 import { loadQ3U4Identifiers } from '../../usb/px4-identity';
 import { getTheme, setTheme, type ThemeMode } from '../theme-manager';
 
@@ -27,6 +29,7 @@ export class SettingsView {
   private onStateChanged: () => void;
   private isScanning = false;
   private scanTimer: number | null = null;
+  private scan: ChannelScan | null = null;
 
   constructor(options: SettingsViewOptions) {
     this.onStateChanged = options.onStateChanged;
@@ -422,9 +425,6 @@ export class SettingsView {
       scanBox.style.display = 'block';
       scanLog.innerHTML = '';
 
-      const channels = FULL_SCAN_PHYSICAL_CHANNELS;
-      let currentIdx = 0;
-
       const appendLog = (msg: string) => {
         const line = document.createElement('div');
         line.textContent = msg;
@@ -434,43 +434,48 @@ export class SettingsView {
 
       appendLog('[FULL-SCAN] 地上デジタル全帯域フルスキャン (13ch〜52ch) を開始します...');
 
-      this.scanTimer = window.setInterval(() => {
-        if (currentIdx >= channels.length) {
-          if (this.scanTimer !== null) clearInterval(this.scanTimer);
-          this.isScanning = false;
-          startBtn.disabled = false;
-          scanBar.style.width = '100%';
-          scanPctText.textContent = '100%';
-          scanChannelText.textContent = 'フルスキャン完了！';
-          appendLog(`[FULL-SCAN] 全帯域スキャンが完了しました。${MOCK_CHANNELS.length} 局のサービスを検出しました。`);
-          renderTable();
-          updateStatusBadge();
-          this.onStateChanged();
-          return;
-        }
+      const scan = new ChannelScan();
+      this.scan = scan;
+      // ロックの成否は進捗の切り替わりでしか分からないので、直前のチャンネルの
+      // 結果は「見つかった件数が増えたか」で判断して記録する。
+      let previousFound = 0;
+      let previousChannel: number | null = null;
 
-        const ch = channels[currentIdx];
-        if (ch === undefined) {
-          currentIdx++;
-          return;
-        }
-
-        const pct = Math.round(((currentIdx + 1) / channels.length) * 100);
-        scanBar.style.width = `${pct}%`;
-        scanPctText.textContent = `${pct}%`;
-        scanChannelText.textContent = `物理チャンネル ch${ch} を同期・搬送波ロック中...`;
-
-        // 該当物理チャンネルの局一覧
-        const found = MOCK_CHANNELS.filter((c) => c.channel === String(ch));
-        if (found.length > 0) {
-          const names = found.map((c) => c.halfWidthName).join(', ');
-          appendLog(`✔ ch${ch} ロック成功 (CNR: 29.1dB) 検出: ${names}`);
-        } else {
-          appendLog(`- ch${ch}: 信号なし`);
-        }
-
-        currentIdx++;
-      }, 200);
+      void scan.run({
+        onProgress: (progress) => {
+          const pct = Math.round(((progress.index + 1) / progress.total) * 100);
+          scanBar.style.width = `${pct}%`;
+          scanPctText.textContent = `${pct}%`;
+          scanChannelText.textContent =
+            `物理チャンネル ch${progress.channel} を同期・搬送波ロック中...`;
+          if (previousChannel !== null) {
+            const gained = progress.found - previousFound;
+            appendLog(gained > 0
+              ? `✔ ch${previousChannel} ロック成功 検出: ${gained} サービス`
+              : `- ch${previousChannel}: 信号なし`);
+          }
+          previousChannel = progress.channel;
+          previousFound = progress.found;
+        },
+      }).then(async (channels) => {
+        await saveChannels(channels);
+        enabledIds = new Set(channels.map((c) => c.id));
+        saveEnabledChannelIds(enabledIds);
+        scanBar.style.width = '100%';
+        scanPctText.textContent = '100%';
+        scanChannelText.textContent = 'フルスキャン完了！';
+        appendLog(
+          `[FULL-SCAN] 全帯域スキャンが完了しました。${channels.length} 局のサービスを検出しました。`);
+        renderTable();
+        updateStatusBadge();
+        this.onStateChanged();
+      }).catch((error: unknown) => {
+        appendLog(`[FULL-SCAN] 失敗: ${error instanceof Error ? error.message : String(error)}`);
+      }).finally(() => {
+        this.isScanning = false;
+        this.scan = null;
+        startBtn.disabled = false;
+      });
     });
 
     return card;
@@ -586,6 +591,9 @@ export class SettingsView {
       clearInterval(this.scanTimer);
       this.scanTimer = null;
     }
+    // 走査中に画面を離れたら、チューナーを掴んだままにしない。
+    this.scan?.stop();
+    this.scan = null;
   }
 }
 

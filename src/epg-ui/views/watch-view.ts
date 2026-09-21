@@ -2,7 +2,7 @@
 // 16:9動画プレイヤー、リアルタイム字幕、番組メタデータ、電波モニター
 
 import type { ChannelItem, ProgramItem } from '../types';
-import { MOCK_CHANNELS, generateOnAirSchedules, getEnabledChannelIds } from '../mock-data';
+import { channelsSync, findChannelSync } from '../channel-source';
 import { VideoPlayer } from '../components/video-player';
 import { LiveSession, type LiveStats } from '../live-session';
 
@@ -26,13 +26,15 @@ export class WatchView {
     this.element.className = 'watch-container';
 
     // チャンネルと番組情報の特定
-    const foundChannel = MOCK_CHANNELS.find((c) => c.id === options.channelId) || MOCK_CHANNELS[0]!;
+    // 番組情報は EIT を読むようにするまで空。作り物を出さない。
+    const known = channelsSync(false);
+    const foundChannel = findChannelSync(options.channelId) ?? known[0] ?? null;
+    if (foundChannel === null) {
+      throw new Error('チャンネルがありません。設定からスキャンしてください。');
+    }
     this.channel = foundChannel;
-
-    const schedules = generateOnAirSchedules();
-    const schedule = schedules.find((s) => s.channel.id === this.channel.id);
-    this.currentProgram = schedule?.currentProgram ?? null;
-    this.nextProgram = schedule?.nextProgram ?? null;
+    this.currentProgram = currentProgramFor(this.channel);
+    this.nextProgram = nextProgramFor(this.channel);
 
     // 1. トップナビゲーション（戻るボタン ＆ チャンネル情報）
     const topBar = document.createElement('div');
@@ -112,7 +114,7 @@ export class WatchView {
         <h2 class="watch-program-title">${escapeHtml(this.currentProgram?.name || '番組情報なし')}</h2>
 
         <div class="progress-track" style="margin-top: 8px; margin-bottom: 16px;">
-          <div class="progress-fill" id="watch-progress-fill" style="width: ${schedule?.digestibility ?? 0}%;"></div>
+          <div class="progress-fill" id="watch-progress-fill" style="width: 0%;"></div>
         </div>
 
         <p class="watch-program-desc">${escapeHtml(this.currentProgram?.description || '詳細情報はありません。')}</p>
@@ -145,9 +147,8 @@ export class WatchView {
           クイック選局
         </div>
         <div class="watch-channel-chips">
-          ${getEnabledChannelIds().size > 0
-            ? MOCK_CHANNELS
-                .filter((c) => getEnabledChannelIds().has(c.id))
+          ${channelsSync().length > 0
+            ? channelsSync()
                 .map((c) => `
                   <button type="button" class="channel-chip ${c.id === this.channel.id ? 'current' : ''}" data-channel-id="${c.id}">
                     <span class="channel-type-badge ${c.channelType}" style="font-size: 0.625rem; padding: 1px 4px;">${c.channelType}</span>
@@ -271,6 +272,20 @@ export class WatchView {
     this.stopLive();
     this.player.destroy();
   }
+}
+
+/**
+ * 番組情報の取り出し口。**いまは常に空を返す。**スキャンで読んでいるのは
+ * SDT と NIT だけで、EIT は読んでいない。実在の局名の横に作り物の番組名を
+ * 並べると、どれが本物か区別が付かなくなる。EIT を読むようになったら
+ * ここを実装する。
+ */
+function currentProgramFor(_channel: ChannelItem): ProgramItem | null {
+  return null;
+}
+
+function nextProgramFor(_channel: ChannelItem): ProgramItem | null {
+  return null;
 }
 
 function escapeHtml(str: string): string {

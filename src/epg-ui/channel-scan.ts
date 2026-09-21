@@ -1,0 +1,248 @@
+// チャンネルスキャンの進行。C 側が選局と受信を、こちらが SDT/NIT の解釈を持つ。
+//
+// 1チャンネルぶんの TS を読み、必要な section が揃った時点で「次へ」と伝える。
+// 固定時間を待つより速く終わり、待ち足りずに取りこぼすこともない。
+//
+// **セッションは C 側で開いたまま巡回する。**選局のたびに開き直す形は実機で
+// 事故を起こしている（docs/FINDINGS.md 12章）。
+
+import { ServiceInfoReader, type NetworkEntry, type ServiceEntry } from '../ts/service-info';
+import { decodeAribText } from '../ts/arib-text';
+import { readCachedFirmware } from '../usb/firmware';
+import type { ChannelItem } from './types';
+
+const MODULE_URL = '/build/q3u4-scan/q3u4-scan.mjs';
+const DRAIN_BYTES = 512 * 1024;
+const POLL_BASE_WORDS = 6;
+
+const CHANNEL_BASE_KHZ = 473_143;
+const CHANNEL_STEP_KHZ = 6_000;
+/** 地上デジタルの UHF は ch13〜ch62。 */
+export const MIN_PHYSICAL_CHANNEL = 13;
+export const MAX_PHYSICAL_CHANNEL = 62;
+
+export function physicalChannels(): number[] {
+  const channels: number[] = [];
+  for (let channel = MIN_PHYSICAL_CHANNEL; channel <= MAX_PHYSICAL_CHANNEL; channel += 1) {
+    channels.push(channel);
+  }
+  return channels;
+}
+
+function frequencyKhz(channel: number): number {
+  return CHANNEL_BASE_KHZ + (channel - MIN_PHYSICAL_CHANNEL) * CHANNEL_STEP_KHZ;
+}
+
+/**
+ * サービス形式種別のうち、視聴できるものだけを残す。
+ * 0x01 がデジタルTV、0xA5 が臨時映像。データ放送とワンセグは対象外。
+ */
+function isWatchable(service: ServiceEntry): boolean {
+  return service.serviceType === 0x01 || service.serviceType === 0xa5;
+}
+
+export interface ScanProgress {
+  /** いま見ている物理チャンネル。 */
+  readonly channel: number;
+  readonly index: number;
+  readonly total: number;
+  /** 直前のチャンネルでロックしたか。まだなら null。 */
+  readonly locked: boolean | null;
+  readonly found: number;
+  readonly message: string;
+}
+
+export interface ScanOptions {
+  readonly channels?: readonly number[] | undefined;
+  readonly onProgress?: ((progress: ScanProgress) => void) | undefined;
+}
+
+interface ScanModule {
+  ccall(
+    name: string,
+    returnType: string | null,
+    argumentTypes: string[],
+    args: unknown[],
+  ): number | string;
+  _malloc(size: number): number;
+  _free(pointer: number): void;
+  HEAPU8: Uint8Array;
+  HEAP32: Int32Array;
+}
+
+let modulePromise: Promise<ScanModule> | null = null;
+async function loadModule(): Promise<ScanModule> {
+  modulePromise ??= (async () => {
+    const factory = (await import(/* @vite-ignore */ MODULE_URL)) as {
+      default: () => Promise<ScanModule>;
+    };
+    return factory.default();
+  })();
+  return modulePromise;
+}
+
+function sleep(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => { setTimeout(resolve, milliseconds); });
+}
+
+/** サービスと局情報から、UI が使う形の1行を作る。 */
+function toChannelItem(
+  service: ServiceEntry,
+  network: NetworkEntry,
+  physical: number,
+  primary: boolean,
+): ChannelItem {
+  const name = service.serviceName !== '' ? service.serviceName : network.tsName;
+  return {
+    // EPGStation と同じ組み立て方。networkId と serviceId から一意に決まる。
+    id: service.networkId * 100_000 + service.serviceId,
+    serviceId: service.serviceId,
+    networkId: service.networkId,
+    name,
+    halfWidthName: name,
+    channelType: 'GR',
+    channel: String(physical),
+    remoteControlKeyId: network.remoteControlKeyId ?? undefined,
+    hasLogoData: false,
+    isPrimary: primary,
+    isSubChannel: !primary,
+  };
+}
+
+export class ChannelScan {
+  #stopped = false;
+
+  stop(): void {
+    this.#stopped = true;
+  }
+
+  async run(options: ScanOptions = {}): Promise<ChannelItem[]> {
+    const channels = options.channels ?? physicalChannels();
+    const firmware = await readCachedFirmware();
+    if (firmware === null) {
+      throw new Error('ファームウェアが設定されていません。設定から取得してください。');
+    }
+    const module = await loadModule();
+
+    const firmwarePointer = module._malloc(firmware.length);
+    module.HEAPU8.set(firmware, firmwarePointer);
+    const listPointer = module._malloc(channels.length * 4);
+    module.HEAP32.set(channels.map(frequencyKhz), listPointer / 4);
+    const drainPointer = module._malloc(DRAIN_BYTES);
+    const pollWords = POLL_BASE_WORDS + channels.length;
+    const pollPointer = module._malloc(pollWords * 4);
+
+    const found: ChannelItem[] = [];
+    try {
+      // 受信機 2 は dev1 の地上波。スキャン中は1本しか使わない。
+      const started = module.ccall('webts_q3u4_scan_start', 'number',
+        ['number', 'number', 'number', 'number', 'number'],
+        [firmwarePointer, firmware.length, 2, listPointer, channels.length]) as number;
+      if (started !== 0) {
+        const name = String(module.ccall(
+          'webts_q3u4_scan_error_name', 'string', ['number'], [started]));
+        throw new Error(`スキャンを開始できません: ${name} (${started})`);
+      }
+
+      let index = -1;
+      let reader: ServiceInfoReader | null = null;
+      let services: ServiceEntry[] = [];
+      let network: NetworkEntry | null = null;
+
+      for (;;) {
+        if (this.#stopped) {
+          module.ccall('webts_q3u4_scan_stop', null, [], []);
+        }
+        module.ccall('webts_q3u4_scan_poll', 'number', ['number', 'number'],
+          [pollPointer, pollWords]);
+        const words = module.HEAP32.subarray(pollPointer / 4, pollPointer / 4 + pollWords);
+        const state = words[0] ?? 0;
+        const current = words[3] ?? 0;
+
+        if (current !== index) {
+          // 前のチャンネルの結果を確定させてから次へ。
+          if (reader !== null && network !== null) {
+            this.#collect(found, services, network, channels[index] ?? 0);
+          }
+          index = current;
+          services = [];
+          network = null;
+          reader = new ServiceInfoReader({
+            decodeText: decodeAribText,
+            onServices: (list) => { services = [...list]; },
+            onNetwork: (entry) => { network = entry; },
+          });
+          options.onProgress?.({
+            channel: channels[index] ?? 0,
+            index,
+            total: channels.length,
+            locked: null,
+            found: found.length,
+            message: `ch${channels[index] ?? '?'} を確認しています…`,
+          });
+        }
+
+        // 溜まっているぶんを読む。
+        for (;;) {
+          const size = module.ccall('webts_q3u4_scan_drain', 'number', ['number', 'number'],
+            [drainPointer, DRAIN_BYTES]) as number;
+          if (size <= 0) break;
+          reader?.push(module.HEAPU8.subarray(drainPointer, drainPointer + size));
+        }
+
+        if (reader !== null && reader.complete) {
+          // 必要なものが揃った。待たずに次へ。
+          module.ccall('webts_q3u4_scan_advance', null, [], []);
+        }
+
+        if (state !== 1) {
+          // 失敗をそのまま握り潰すと、途中で止まったスキャンが成功に見える。
+          if (state === 3) {
+            const code = words[2] ?? 0;
+            const name = String(module.ccall(
+              'webts_q3u4_scan_error_name', 'string', ['number'], [code]));
+            const stage = words[1] ?? 0;
+            throw new Error(
+              `スキャンが止まりました: ${name} (${code}) 段階 ${stage} ch${channels[current] ?? '?'}`);
+          }
+          break;
+        }
+        await sleep(100);
+      }
+
+      // 走査が終わった時点でまだ読み残しがあることがある。最後のチャンネルの
+      // SI がそこに入っていると、そのチャンネルだけ丸ごと落ちる。
+      for (;;) {
+        const size = module.ccall('webts_q3u4_scan_drain', 'number', ['number', 'number'],
+          [drainPointer, DRAIN_BYTES]) as number;
+        if (size <= 0) break;
+        reader?.push(module.HEAPU8.subarray(drainPointer, drainPointer + size));
+      }
+      if (network !== null) this.#collect(found, services, network, channels[index] ?? 0);
+
+      module.ccall('webts_q3u4_scan_join', 'number', [], []);
+    } finally {
+      module.HEAPU8.fill(0, firmwarePointer, firmwarePointer + firmware.length);
+      module._free(firmwarePointer);
+      module._free(listPointer);
+      module._free(drainPointer);
+      module._free(pollPointer);
+    }
+    return found;
+  }
+
+  #collect(
+    found: ChannelItem[],
+    services: readonly ServiceEntry[],
+    network: NetworkEntry,
+    physical: number,
+  ): void {
+    // NIT が物理チャンネルを持っていればそちらを信じる。選局した番号と
+    // 食い違うことは普通ないが、放送側の申告のほうが正しい。
+    const channel = network.physicalChannel ?? physical;
+    const watchable = services.filter(isWatchable);
+    watchable.forEach((service, position) => {
+      found.push(toChannelItem(service, network, channel, position === 0));
+    });
+  }
+}

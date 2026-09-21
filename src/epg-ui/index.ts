@@ -12,6 +12,7 @@ import { SettingsView } from './views/settings-view';
 import { AboutView } from './views/about-view';
 import { initTheme } from './theme-manager';
 import { readSetupState } from '../ui/setup-state';
+import { primeChannels } from './channel-source';
 
 initTheme();
 
@@ -120,6 +121,9 @@ export class EpgApp {
     this.appBar.setTitle(title);
     this.navDrawer.setActive(route);
     document.title = route === 'onair' ? '放映中 — WebTS.app' : `${title} — WebTS.app`;
+
+    // 保存済みのチャンネルを読んでおく。視聴画面は DOM を組み立てる時点で要る。
+    await primeChannels();
 
     // セットアップ状態の確認
     try {

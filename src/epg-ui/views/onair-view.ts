@@ -1,7 +1,7 @@
 // EPGStationスタイルの「放映中 (OnAir)」ビュー
 
 import type { BroadcastType, OnAirScheduleItem } from '../types';
-import { generateOnAirSchedules, MOCK_CHANNELS } from '../mock-data';
+import { loadSchedules } from '../channel-source';
 import type { ProgramDialog } from '../components/program-dialog';
 import type { StreamDialog } from '../components/stream-dialog';
 
@@ -82,26 +82,14 @@ export class OnAirView {
   }
 
   private async loadData(): Promise<void> {
-    // まずモックデータを高速生成して描画
-    this.schedules = generateOnAirSchedules();
+    await this.reload();
     this.renderCards();
+  }
 
-    // バックグラウンドで実機 (192.168.1.135:8888) の channels API が取得できるか試行
-    try {
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 2000);
-      const res = await fetch('http://192.168.1.135:8888/api/channels', { signal: controller.signal });
-      clearTimeout(timeoutId);
-      if (res.ok) {
-        const liveChannels = await res.json();
-        if (Array.isArray(liveChannels) && liveChannels.length > 0) {
-          // 実機のチャンネル一覧が取れた場合はチャンネル情報を更新
-          console.log('[OnAirView] EPGStation 実機 (192.168.1.135:8888) と同期しました。チャンネル数:', liveChannels.length);
-        }
-      }
-    } catch {
-      // オフライン・別ネットワークの場合はモックデータで動作継続
-    }
+  /** 保存済みのスキャン結果を読み直す。まだスキャンしていなければ空になる。 */
+  private async reload(): Promise<void> {
+    this.schedules = await loadSchedules();
+    this.renderCards();
   }
 
   private renderCards(): void {
