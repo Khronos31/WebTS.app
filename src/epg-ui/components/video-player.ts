@@ -1,5 +1,11 @@
 // EPGStationスタイルの動画プレイヤーコンポーネント
 // ARIB STD-B24 風の字幕オーバーレイ・字幕切替トグル・主/副音声・全画面・PiP対応
+//
+// 映像は `<video>` ではなく `<canvas>` へ描く。地デジは MPEG-2 Video で、
+// ブラウザ内蔵のデコーダが受け付けないため、WASM で復号して自前で描くしかない
+// （docs/FINDINGS.md 7章）。音声も `<video>` 経由ではなく WebCodecs と
+// AudioContext で鳴らすので、再生・音量・字幕はすべて外から差し込む。
+// 見た目と文言はそのまま。
 
 export interface VideoPlayerOptions {
   videoSrc?: string | undefined;
@@ -7,11 +13,16 @@ export interface VideoPlayerOptions {
   programTitle?: string | undefined;
   onSubtitleToggle?: ((enabled: boolean) => void) | undefined;
   onAudioTrackChange?: ((track: 'main' | 'sub') => void) | undefined;
+  /** 再生・停止。live なので「一時停止」は受信の停止と再開になる。 */
+  onPlayPause?: ((playing: boolean) => void) | undefined;
+  /** 音量 (0-1) とミュート。Web Audio 側へ渡す。 */
+  onVolumeChange?: ((volume: number, muted: boolean) => void) | undefined;
 }
 
 export class VideoPlayer {
   public readonly element: HTMLElement;
-  private video: HTMLVideoElement;
+  /** 映像の描画先。制御を Worker へ渡すのは呼び出し側の仕事。 */
+  public readonly media: HTMLCanvasElement;
   private subtitleOverlay: HTMLElement;
   private subtitleText: HTMLElement;
   private controlsBar: HTMLElement;
@@ -28,34 +39,22 @@ export class VideoPlayer {
   private isSubtitlesEnabled = true;
   private currentAudioTrack: 'main' | 'sub' = 'main';
   private hideControlsTimer: number | null = null;
-  private subtitleTimer: number | null = null;
-  private subtitleIndex = 0;
-
-  // モック用の放送字幕サンプル（リアルタイムに巡回表示）
-  private mockSubtitles: string[] = [
-    '最新の全国の気象情報をお伝えします。',
-    '日本海側を中心にお昼頃にかけて雨が強まる見込みです。',
-    '東京地方は夜遅くにかけて雷を伴う所があるでしょう。',
-    '各地の注意報・警報の最新状況をご確認ください。',
-    '続いて経済ニュースです。東京市場の平均株価は…',
-    '以上、ニュースセンターからお伝えしました。',
-  ];
+  private isPlaying = true;
+  private pipVideo: HTMLVideoElement | null = null;
+  private volume = 1;
+  private muted = false;
 
   constructor(options: VideoPlayerOptions = {}) {
     this.element = document.createElement('div');
     this.element.className = 'video-player-container';
     this.element.tabIndex = 0;
 
-    // 1. ビデオ要素
-    this.video = document.createElement('video');
-    this.video.className = 'video-player-media';
-    this.video.src = options.videoSrc || '/mock-stream.mp4';
-    this.video.playsInline = true;
-    this.video.loop = true;
-    this.video.muted = true; // ブラウザの自動再生ポリシー対策で初期ミュート
-    if (options.autoplay !== false) {
-      this.video.autoplay = true;
-    }
+    // 1. 映像の描画先
+    this.media = document.createElement('canvas');
+    this.media.className = 'video-player-media';
+    // 実際の寸法は sequence が分かった時点で描画側が設定する。
+    this.media.width = 1280;
+    this.media.height = 720;
 
     // 2. 字幕オーバーレイレイヤー (ARIB STD-B24 風スタイル)
     this.subtitleOverlay = document.createElement('div');
@@ -63,7 +62,7 @@ export class VideoPlayer {
 
     this.subtitleText = document.createElement('div');
     this.subtitleText.className = 'video-subtitle-text';
-    this.subtitleText.textContent = this.mockSubtitles[0] ?? '';
+    this.subtitleText.textContent = '';
     this.subtitleOverlay.append(this.subtitleText);
 
     // 3. コントロールバー
@@ -158,57 +157,47 @@ export class VideoPlayer {
     this.controlsBar.append(leftGroup, rightGroup);
 
     // プレイヤーコンテナに組み立て
-    this.element.append(this.video, this.subtitleOverlay, this.controlsBar);
+    this.element.append(this.media, this.subtitleOverlay, this.controlsBar);
 
     // イベントバインド
     this.bindEvents(options);
 
-    // 字幕の巡回タイマー開始 (3.5秒ごと)
-    this.startSubtitleLoop();
-
-    // 初期再生の試行
-    void this.video.play().catch(() => {
-      this.updatePlayIcon(false);
-    });
+    this.updatePlayIcon(true);
+    this.updateVolumeIcon(false);
   }
 
   private bindEvents(options: VideoPlayerOptions): void {
     // 再生/一時停止クリック
     const togglePlay = () => {
-      if (this.video.paused) {
-        void this.video.play();
-        this.updatePlayIcon(true);
-      } else {
-        this.video.pause();
-        this.updatePlayIcon(false);
-      }
+      this.isPlaying = !this.isPlaying;
+      this.updatePlayIcon(this.isPlaying);
+      options.onPlayPause?.(this.isPlaying);
     };
 
     this.playBtn.addEventListener('click', togglePlay);
-    this.video.addEventListener('click', togglePlay);
-
-    this.video.addEventListener('play', () => this.updatePlayIcon(true));
-    this.video.addEventListener('pause', () => this.updatePlayIcon(false));
+    this.media.addEventListener('click', togglePlay);
 
     // 音量 & ミュート
     this.volumeBtn.addEventListener('click', () => {
-      if (this.video.muted || this.video.volume === 0) {
-        this.video.muted = false;
-        this.video.volume = 0.5;
+      if (this.muted || this.volume === 0) {
+        this.muted = false;
+        this.volume = 0.5;
         this.volumeSlider.value = '0.5';
         this.updateVolumeIcon(false);
       } else {
-        this.video.muted = true;
+        this.muted = true;
         this.volumeSlider.value = '0';
         this.updateVolumeIcon(true);
       }
+      options.onVolumeChange?.(this.volume, this.muted);
     });
 
     this.volumeSlider.addEventListener('input', () => {
       const val = Number(this.volumeSlider.value);
-      this.video.volume = val;
-      this.video.muted = val === 0;
+      this.volume = val;
+      this.muted = val === 0;
       this.updateVolumeIcon(val === 0);
+      options.onVolumeChange?.(this.volume, this.muted);
     });
 
     // 字幕切替クリック
@@ -229,13 +218,26 @@ export class VideoPlayer {
     });
 
     // PiP クリック
+    // Picture-in-Picture は `<video>` にしか掛けられないので、canvas の
+    // captureStream を流す video を隠して持ち、それを渡す。
     this.pipBtn.addEventListener('click', async () => {
       try {
         if (document.pictureInPictureElement) {
           await document.exitPictureInPicture();
-        } else if (document.pictureInPictureEnabled) {
-          await this.video.requestPictureInPicture();
+          return;
         }
+        if (!document.pictureInPictureEnabled) return;
+        if (this.pipVideo === null) {
+          const video = document.createElement('video');
+          video.muted = true;
+          video.playsInline = true;
+          video.style.display = 'none';
+          video.srcObject = this.media.captureStream();
+          this.element.append(video);
+          this.pipVideo = video;
+        }
+        await this.pipVideo.play();
+        await this.pipVideo.requestPictureInPicture();
       } catch (err) {
         console.warn('PiP error:', err);
       }
@@ -258,7 +260,7 @@ export class VideoPlayer {
     const showControls = () => {
       this.controlsBar.classList.remove('hidden');
       if (this.hideControlsTimer !== null) clearTimeout(this.hideControlsTimer);
-      if (!this.video.paused) {
+      if (this.isPlaying) {
         this.hideControlsTimer = window.setTimeout(() => {
           this.controlsBar.classList.add('hidden');
         }, 3000);
@@ -268,7 +270,7 @@ export class VideoPlayer {
     this.element.addEventListener('mousemove', showControls);
     this.element.addEventListener('touchstart', showControls, { passive: true });
     this.element.addEventListener('mouseleave', () => {
-      if (!this.video.paused) {
+      if (this.isPlaying) {
         this.controlsBar.classList.add('hidden');
       }
     });
@@ -302,12 +304,14 @@ export class VideoPlayer {
     }
   }
 
-  private startSubtitleLoop(): void {
-    this.subtitleTimer = window.setInterval(() => {
-      if (!this.isSubtitlesEnabled || this.video.paused) return;
-      this.subtitleIndex = (this.subtitleIndex + 1) % this.mockSubtitles.length;
-      this.subtitleText.textContent = this.mockSubtitles[this.subtitleIndex] ?? '';
-    }, 3500);
+  /** 放送から取り出した字幕文字列を表示する。空文字で消える。 */
+  public setSubtitleText(text: string): void {
+    this.subtitleText.textContent = text;
+  }
+
+  /** 映像の実寸が分かった時点で表示比を合わせる。 */
+  public setAspectRatio(ratio: string): void {
+    this.element.style.aspectRatio = ratio;
   }
 
   private updatePlayIcon(isPlaying: boolean): void {
@@ -327,12 +331,10 @@ export class VideoPlayer {
       clearTimeout(this.hideControlsTimer);
       this.hideControlsTimer = null;
     }
-    if (this.subtitleTimer !== null) {
-      clearInterval(this.subtitleTimer);
-      this.subtitleTimer = null;
+    if (this.pipVideo !== null) {
+      this.pipVideo.srcObject = null;
+      this.pipVideo.remove();
+      this.pipVideo = null;
     }
-    this.video.pause();
-    this.video.src = '';
-    this.video.load();
   }
 }

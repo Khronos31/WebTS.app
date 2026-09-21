@@ -58,6 +58,13 @@ export function readAdtsHeader(
 
 export class AudioPlayer {
   #context: AudioContext | null = null;
+  /**
+   * 音量は GainNode で効かせる。`<video>` を使わないので `video.volume` が
+   * 無く、UI の音量操作の宛先がここになる。
+   */
+  #gain: GainNode | null = null;
+  #volume = 1;
+  #muted = false;
   #decoder: AudioDecoder | null = null;
   #configured = false;
   /** ctx.currentTime と PTS を結び付ける点。 */
@@ -84,6 +91,10 @@ export class AudioPlayer {
     if (this.#context !== null) return;
     const context = new AudioContext({ sampleRate: SAMPLE_RATE, latencyHint: 'playback' });
     void context.resume();
+    const gain = context.createGain();
+    gain.gain.value = this.#muted ? 0 : this.#volume;
+    gain.connect(context.destination);
+    this.#gain = gain;
     this.#context = context;
     this.#decoder = new AudioDecoder({
       output: (data) => this.#play(data),
@@ -117,6 +128,16 @@ export class AudioPlayer {
     }
   }
 
+  setVolume(volume: number): void {
+    this.#volume = Math.max(0, Math.min(1, volume));
+    if (this.#gain !== null) this.#gain.gain.value = this.#muted ? 0 : this.#volume;
+  }
+
+  setMuted(muted: boolean): void {
+    this.#muted = muted;
+    if (this.#gain !== null) this.#gain.gain.value = muted ? 0 : this.#volume;
+  }
+
   /** いま鳴っている位置を PTS で返す。未再生なら null。 */
   clockPts(): number | null {
     if (!this.#anchored || this.#context === null) return null;
@@ -141,6 +162,7 @@ export class AudioPlayer {
     this.#closed = true;
     try { this.#decoder?.close(); } catch { /* 既に閉じている */ }
     this.#decoder = null;
+    this.#gain = null;
     const context = this.#context;
     this.#context = null;
     if (context !== null) await context.close();
@@ -173,7 +195,7 @@ export class AudioPlayer {
       }
       const source = context.createBufferSource();
       source.buffer = buffer;
-      source.connect(context.destination);
+      source.connect(this.#gain ?? context.destination);
       source.start(at);
       this.#scheduled = Math.max(this.#scheduled, at + seconds);
       this.#decodedFrames += 1;

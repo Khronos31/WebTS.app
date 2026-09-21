@@ -4,6 +4,7 @@
 import type { ChannelItem, ProgramItem } from '../types';
 import { MOCK_CHANNELS, generateOnAirSchedules, getEnabledChannelIds } from '../mock-data';
 import { VideoPlayer } from '../components/video-player';
+import { LiveSession, type LiveStats } from '../live-session';
 
 export interface WatchViewOptions {
   channelId: number;
@@ -14,6 +15,7 @@ export interface WatchViewOptions {
 export class WatchView {
   public readonly element: HTMLElement;
   private player: VideoPlayer;
+  private session: LiveSession | null = null;
   private progressTimer: number | null = null;
   private channel: ChannelItem;
   private currentProgram: ProgramItem | null = null;
@@ -65,13 +67,26 @@ export class WatchView {
     playerWrapper.className = 'watch-player-wrapper';
 
     this.player = new VideoPlayer({
-      videoSrc: '/mock-stream.mp4',
       autoplay: true,
       programTitle: this.currentProgram?.name,
+      onPlayPause: (playing) => {
+        // live なので「一時停止」は受信の停止、「再生」は開き直しになる。
+        if (playing) void this.startLive();
+        else this.stopLive();
+      },
+      onVolumeChange: (volume, muted) => {
+        this.session?.setVolume(volume);
+        this.session?.setMuted(muted);
+      },
+      onSubtitleToggle: (enabled) => {
+        if (!enabled) this.player.setSubtitleText('');
+      },
     });
 
     playerWrapper.append(this.player.element);
     this.element.append(playerWrapper);
+
+    void this.startLive();
 
     // 3. 番組情報 & メタデータエリア
     const detailsSection = document.createElement('div');
@@ -151,15 +166,15 @@ export class WatchView {
         <div class="watch-signal-grid">
           <div class="signal-item">
             <span class="signal-label">CNR (搬送波対雑音比)</span>
-            <span class="signal-val ok">29.4 dB (良好)</span>
+            <span class="signal-val" id="watch-signal-cnr">—</span>
           </div>
           <div class="signal-item">
             <span class="signal-label">BER (ビットエラー)</span>
-            <span class="signal-val">0.00e+0</span>
+            <span class="signal-val" id="watch-signal-ber">—</span>
           </div>
           <div class="signal-item">
             <span class="signal-label">TS ドロップ</span>
-            <span class="signal-val">0 packets</span>
+            <span class="signal-val" id="watch-signal-drop">—</span>
           </div>
           <div class="signal-item">
             <span class="signal-label">デコーダ</span>
@@ -194,11 +209,66 @@ export class WatchView {
     }, 5000);
   }
 
+  /**
+   * 受信を開始する。canvas の制御は Worker へ移るので、開き直すときは
+   * 描画先を作り直す必要がある。
+   */
+  private async startLive(): Promise<void> {
+    this.stopLive();
+    const physical = Number(this.channel.channel);
+    if (!Number.isFinite(physical)) {
+      this.showStatus('このチャンネルの物理チャンネルが分かりません。');
+      return;
+    }
+    try {
+      const canvas = this.player.media.transferControlToOffscreen();
+      this.session = await LiveSession.start({
+        canvas,
+        physicalChannel: physical,
+        serviceId: this.channel.serviceId,
+        onStatus: (text) => { this.showStatus(text); },
+        onStats: (stats) => { this.showStats(stats); },
+        onCaption: (text) => { this.player.setSubtitleText(text); },
+        onEnded: (reason) => { if (reason !== '') this.showStatus(reason); },
+      });
+    } catch (error) {
+      this.showStatus(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  private stopLive(): void {
+    this.session?.stop();
+    this.session = null;
+    this.player.setSubtitleText('');
+  }
+
+  /**
+   * 受信・デコード状態へ実測値を入れる。
+   *
+   * CNR と BER は**この経路では測っていない**。復調器のレジスタから読む値で、
+   * 上流の API を通していない。出せない数字を埋めると嘘になるので「—」のままにする。
+   */
+  private showStats(stats: LiveStats): void {
+    const drop = this.element.querySelector<HTMLElement>('#watch-signal-drop');
+    if (drop) {
+      const continuity = stats.demux['continuityErrors'] ?? 0;
+      const dropped = Math.round(stats.droppedTsBytes / 188);
+      drop.textContent = `${continuity + dropped} packets`;
+      drop.classList.toggle('ok', continuity + dropped === 0);
+    }
+  }
+
+  /** 受信の状況を字幕の場所に出す。専用の枠を足すと見た目が変わるため。 */
+  private showStatus(text: string): void {
+    this.player.setSubtitleText(text);
+  }
+
   public destroy(): void {
     if (this.progressTimer !== null) {
       clearInterval(this.progressTimer);
       this.progressTimer = null;
     }
+    this.stopLive();
     this.player.destroy();
   }
 }

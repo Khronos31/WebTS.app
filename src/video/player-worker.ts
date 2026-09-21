@@ -68,7 +68,16 @@ export type PlayerMessage =
   | PlayerWant | PlayerDone | PlayerFailed;
 
 export type PlayerRequest =
-  | { readonly kind: 'init'; readonly canvas: OffscreenCanvas }
+  /**
+   * programNumber を指定すると、その番組だけを選ぶ。1つの物理チャンネルに
+   * 複数サービスが多重化されているので、指定が無いと最初に見つかった
+   * 映像付きの番組になる。
+   */
+  | {
+      readonly kind: 'init';
+      readonly canvas: OffscreenCanvas;
+      readonly programNumber?: number;
+    }
   /** backlogBytes は送り手側にまだ残っている TS。live の遅延の一部である。 */
   | { readonly kind: 'chunk'; readonly bytes: ArrayBuffer; readonly backlogBytes?: number }
   /** 音声の時計。これが来ている間は映像はこれに追随する。 */
@@ -105,6 +114,7 @@ class Player {
   #ended = false;
   #wantOutstanding = false;
   #wake: (() => void) | null = null;
+  readonly #wantedProgram: number | null;
   #videoPid: number | null = null;
   #audioPid: number | null = null;
   #captionPid: number | null = null;
@@ -125,8 +135,9 @@ class Player {
   #sequence: Mpeg2Sequence | null = null;
   #sized = false;
 
-  constructor(canvas: OffscreenCanvas) {
+  constructor(canvas: OffscreenCanvas, wantedProgram: number | null) {
     this.#canvas = canvas;
+    this.#wantedProgram = wantedProgram;
     const context = canvas.getContext('2d');
     if (context === null) throw new Error('2d コンテキストを取れません');
     this.#context = context;
@@ -186,6 +197,7 @@ class Player {
   #choose(programs: readonly Program[]): void {
     if (this.#videoPid !== null) return;
     for (const program of programs) {
+      if (this.#wantedProgram !== null && program.programNumber !== this.#wantedProgram) continue;
       const video = program.streams.find(
         (stream) => stream.streamType === STREAM_TYPE.mpeg2Video);
       if (video === undefined) continue;
@@ -391,7 +403,7 @@ self.addEventListener('message', (event: MessageEvent<PlayerRequest>) => {
   const request = event.data;
   try {
     if (request.kind === 'init') {
-      player = new Player(request.canvas);
+      player = new Player(request.canvas, request.programNumber ?? null);
       player.run().catch((error: unknown) => {
         post({ kind: 'failed', message: error instanceof Error ? error.message : String(error) });
       });
