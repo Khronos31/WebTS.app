@@ -1,0 +1,88 @@
+/*
+ * 見た目は作り込まない。OS 標準の見え方に任せる。
+ *
+ * ここにあるのは「素のままでは読めない」ものだけ。色、影、角丸、独自アイコン、
+ * アニメーション、カスタムスクロールバーは作らない。フォーカスリングは既定のまま
+ * 残す。キーボードと D-pad の操作を前提にするため。
+ */
+
+:root {
+  color-scheme: light dark;
+  font-family: system-ui, sans-serif;
+}
+
+body {
+  margin: 0;
+}
+
+header {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem;
+  border-bottom: 1px solid;
+}
+
+header h1 {
+  font-size: 1rem;
+  margin: 0;
+}
+
+main {
+  padding: 0.5rem 1rem 2rem;
+}
+
+/* 要設定の印。中黒の色を変えるだけで、画像もアイコンセットも使わない。 */
+.badge {
+  color: #c00;
+  /* 中黒は小さいので、印として見える程度に大きくする。 */
+  font-size: 1.4em;
+  line-height: 0;
+  vertical-align: middle;
+  /* 「地域設定・チャンネルスキャン」のように名前自体が中黒を含むことがあるので、
+     地の文と続けて読めないよう間を空ける。 */
+  margin-inline-start: 0.35em;
+}
+
+@media (prefers-color-scheme: dark) {
+  .badge { color: #f66; }
+}
+
+.menu,
+.channels {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.menu button,
+.channels button {
+  display: block;
+  width: 100%;
+  text-align: start;
+  padding: 0.6rem;
+  font: inherit;
+}
+
+.channels .logo {
+  display: inline-block;
+  /* 局ロゴは0.1.0では出さない。後から足してもずれないよう領域だけ確保する。 */
+  width: 2.5rem;
+}
+
+.channels .programme {
+  margin-inline-start: 0.5rem;
+}
+
+.detail {
+  margin: 0.2rem 0;
+}
+
+section {
+  margin-block: 1.5rem;
+}
+
+section h2 {
+  font-size: 1rem;
+  margin-block-end: 0.2rem;
+}
