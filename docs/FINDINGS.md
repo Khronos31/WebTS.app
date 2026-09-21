@@ -402,7 +402,71 @@ dev1 と dev2 の両方で同じ値。1回目だけ `already_loaded` が 0 で�
 
 ---
 
-## 12. 未達のまま残っていること
+## 12. 選局と復調ロックは実機で成立する。ただし main thread + Asyncify では遅すぎる
+
+2026-09-21、実機の PX-Q3U4 で地上デジタルを選局し、実際の放送波に復調ロックした。
+
+```
+ch27 (557,143 kHz)  receiver = 2 (ISDB-T)
+  locked = 1   checks = 2   lockMs = 350
+```
+
+組み立ては上流の `frontend_probe` と同じで、ロジックは書き写していない。
+`Q3U4Runtime` → `It930xController` ×2 → `It930xBackendPower` ×2 →
+`CoupledProbePower` → `It930xBridgeI2cMaster` → `Q3U4Frontend`。電源は dev1/dev2
+連動でなければならない。TC90522 復調器、R850 チューナー、I2C ブリッジがブラウザで動く。
+
+### 受信機の割り当て
+
+`local_receiver` 0 と 1 が **ISDB-S**（衛星、RT710）、2 と 3 が **ISDB-T**（地上波、R850）。
+地上波に 0 を渡すと `UNSUPPORTED` が返る。上流 `open_receiver()` が
+`local_receiver < 2 ? isdb_s : isdb_t` で期待する系を決めている。
+
+### セッションは開きっぱなしにする
+
+最初の実装は選局のたびに `Q3U4Runtime` を作り直し、毎回 backend power を落としていた。
+それを走査ループで12回連打した結果、**実機の片方の USB デバイスが列挙から消えた。**
+抜き差しで完全に復帰し（両デバイス再列挙、コールドに戻る、WebUSB の再許可は不要）、
+恒久的な影響はなかった。ファームウェアが RAM のみという読みどおりである。
+
+上流の probe は「プロセス起動につき1回」の想定で、ループへの流用が誤りだった。
+open と初期化は1回だけ行い、以後は選局だけを繰り返す形に変えると安定する。実運用でも
+チャンネル切替のたびに USB を開き直すことはないので、こちらが正しい。
+
+### main runtime thread + Asyncify は選局走査に耐えない
+
+ロック待ちは上流で **300回 × 10ms ポーリング**である。信号があれば2回で抜けるが、
+無い場合は300回回る。**無信号チャンネルを1つ選局している間、心拍で計測したところ
+イベントループが通常の約1/10に落ちた**（30秒間に setInterval(100ms) が31回しか発火せず、
+期待値は約300回）。1反復あたり約1秒で、無信号1チャンネルあたり約5分になる。
+観測された挙動と一致する。
+
+イベントループは止まっていない（同期ブロックではない）。最も整合する説明は
+**Asyncify のアンワインド／リワインド費用**である。1反復ごとに
+`Q3U4Frontend → Bank → Tc90522 → BridgeI2c → It930xController → Transport → libusb →
+WebUSB Promise` という深いスタックを巻き戻して復元し、それをポーリング300回と
+sleep 300回で計600回繰り返す。**ただし Asyncify が主因だと切り分けたわけではない。**
+
+### 含意
+
+ドライバスタックは **Dedicated Worker 内の pthread** で動かすべきである。非メイン
+スレッドでは `events_posix.c` が `emscripten_atomic_wait_u32` による同期待ちを使い
+（[2章](#2-chrome-の-worker-の-event-loop-は共有メモリさえあれば上流のまま動く)）、
+上流のブロッキング前提のコード（`sleep_for`、ポーリングループ）がそのまま動く。
+スタックを巻き戻す必要がなくなる。libusb の Emscripten backend がプロキシ機構を
+持っているのもこの使い方を想定しているためと読める。cross-origin isolation が要ると
+いう既存の結論とも整合する。
+
+### 測定していないこと
+
+**TS 受信は未着手。**`start_terrestrial_capture`、`start_stream` / `wait_stream` は
+呼んでいない。カード操作と B25 も未着手。走査は完走していないため、この地域で
+どの物理チャンネルが受信できるかは ch27 以外分かっていない。Asyncify が遅さの
+主因であることの確証もない。
+
+---
+
+## 13. 未達のまま残っていること
 
 - **M1 の受け入れ条件**（両機種で各30分の生TS、transfer error / overflow 0、メモリ増加上限、
   切断後の安全停止）は未達。実 firmware 送信、選局、実 TS 受信は未実施。

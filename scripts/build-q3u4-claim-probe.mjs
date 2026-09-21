@@ -19,11 +19,15 @@ const probes = [
   join(root, 'native', 'q3u4-claim-probe.cpp'),
   join(root, 'native', 'q3u4-version-probe.cpp'),
   join(root, 'native', 'q3u4-firmware-probe.cpp'),
+  join(root, 'native', 'q3u4-tune-probe.cpp'),
+  join(root, 'native', 'q3u4-session.cpp'),
 ];
 // 上流の transport と IT930x 制御をそのままリンクする。書き写さない。
 const upstreamSources = [
   'libusb_transport.cpp', 'it930x.cpp', 'it930x_protocol.cpp', 'bridge_i2c.cpp',
   'identity.cpp', 'firmware.cpp', 'error.cpp', 'logging.cpp',
+  'q3u4_frontend.cpp', 'q3u4_power.cpp', 'frontend_probe_support.cpp',
+  'tc90522.cpp', 'r850.cpp', 'rt710.cpp',
 ].map((name) => join(upstream, 'src', name));
 
 const COMMON = ['-O2', '-DPLATFORM_POSIX=1', '-DOS_EMSCRIPTEN=1', '-DENABLE_LOGGING=1', '-pthread'];
@@ -63,16 +67,21 @@ run(emxx, [
   '-s', 'ASYNCIFY=1', '-s', 'ASSERTIONS=1', '-s', 'MODULARIZE=1',
   '-s', 'EXPORT_ES6=1', '-s', 'ENVIRONMENT=web,worker',
   '-s', 'ALLOW_MEMORY_GROWTH=1',
-  '-s', 'EXPORTED_RUNTIME_METHODS=["ccall","HEAPU8"]',
+  '-s', 'EXPORTED_RUNTIME_METHODS=["ccall","HEAPU8","UTF8ToString"]',
   '-s', 'EXPORTED_FUNCTIONS=["_webts_q3u4_claim_probe","_webts_q3u4_claim_probe_words",' +
     '"_webts_q3u4_version_probe","_webts_q3u4_version_probe_words",' +
-    '"_webts_q3u4_firmware_probe","_webts_q3u4_firmware_probe_words","_malloc","_free"]',
+    '"_webts_q3u4_firmware_probe","_webts_q3u4_firmware_probe_words",' +
+    '"_webts_q3u4_tune_probe","_webts_q3u4_tune_probe_words",' +
+    '"_webts_q3u4_tune_probe_stage_name",' +
+    '"_webts_q3u4_session_open","_webts_q3u4_session_tune","_webts_q3u4_session_close",' +
+    '"_webts_q3u4_session_is_open","_webts_q3u4_session_dev1_version",' +
+    '"_webts_q3u4_session_dev2_version","_malloc","_free"]',
   '-o', module, ...objects,
 ]);
 
 const text = readFileSync(module, 'utf8');
 for (const required of ['webts_q3u4_claim_probe', 'webts_q3u4_version_probe',
-  'webts_q3u4_firmware_probe', 'ccall']) {
+  'webts_q3u4_firmware_probe', 'webts_q3u4_session_open', 'ccall']) {
   if (!text.includes(required)) throw new Error(`q3u4-claim-probe.mjs is missing ${required}`);
 }
 process.stdout.write(`built ${module}\n`);
