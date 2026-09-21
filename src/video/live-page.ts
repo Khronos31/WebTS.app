@@ -1,5 +1,6 @@
 import { readCachedFirmware } from '../usb/firmware';
 import { AudioPlayer } from './audio';
+import { CaptionOverlay } from './captions';
 import type { PlayerMessage, PlayerRequest } from './player-worker';
 
 // 見た目は作り込まない。素の要素のみ。
@@ -51,14 +52,14 @@ const app = document.querySelector('#app');
 if (!(app instanceof HTMLElement)) throw new Error('app root missing');
 
 const heading = document.createElement('h1');
-heading.textContent = 'ライブ視聴（映像のみ）';
+heading.textContent = 'ライブ視聴';
 app.append(heading);
 
 const explain = document.createElement('p');
 explain.textContent =
   'チューナーで受信し、内蔵カードで復号し、分離して復号して表示するまでを'
   + 'すべてブラウザ内で行います。保存も送信もしません。'
-  + '音声は主音声を鳴らします。字幕はまだありません。';
+  + '音声は主音声を鳴らし、字幕も出します。';
 app.append(explain);
 
 const form = document.createElement('form');
@@ -143,15 +144,39 @@ function render(rows: [string, string][]): void {
   table.replaceChildren(body);
 }
 
-/** transferControlToOffscreen は canvas ひとつにつき一度きり。 */
-function freshCanvas(): OffscreenCanvas {
+/**
+ * transferControlToOffscreen は canvas ひとつにつき一度きりなので、毎回作る。
+ * 字幕はこの上に重ねるので、入れ物を position: relative にしておく。
+ *
+ * 表示比は入れ物が持つ。canvas の内在寸法は符号化された 1440x1080 のままで、
+ * それをそのまま見せると横に潰れる。標本比 4:3 を掛けた 16:9 を
+ * aspect-ratio として入れ物に与え、canvas は入れ物いっぱいに伸ばす。
+ */
+function freshScreen(): { canvas: OffscreenCanvas; overlay: HTMLDivElement } {
+  const overlay = document.createElement('div');
+  overlay.style.position = 'relative';
+  overlay.style.width = '100%';
+  overlay.style.maxWidth = '960px';
+  overlay.style.aspectRatio = '16 / 9';
+  overlay.style.background = 'black';
   const canvas = document.createElement('canvas');
   canvas.width = 640;
   canvas.height = 360;
-  canvas.style.maxWidth = '100%';
-  canvas.style.height = 'auto';
-  screen.replaceChildren(canvas);
-  return canvas.transferControlToOffscreen();
+  canvas.style.width = '100%';
+  canvas.style.height = '100%';
+  canvas.style.display = 'block';
+  overlay.append(canvas);
+  screen.replaceChildren(overlay);
+  return { canvas: canvas.transferControlToOffscreen(), overlay };
+}
+
+/** sequence が分かった時点で、標本比を含めた表示比を入れ物へ与える。 */
+function applyAspect(overlay: HTMLDivElement, sequence: {
+  pictureWidth: number; pictureHeight: number; pixelWidth: number; pixelHeight: number;
+}): void {
+  const width = sequence.pictureWidth * (sequence.pixelWidth || 1);
+  const height = sequence.pictureHeight * (sequence.pixelHeight || 1);
+  if (width > 0 && height > 0) overlay.style.aspectRatio = `${width} / ${height}`;
 }
 
 let cached: DescrambleModule | null = null;
@@ -176,6 +201,9 @@ interface Session {
   readonly module: DescrambleModule;
   readonly worker: Worker;
   readonly audio: AudioPlayer;
+  readonly captions: CaptionOverlay;
+  readonly overlay: HTMLDivElement;
+  aspectApplied: boolean;
   clock: number;
   readonly drainPointer: number;
   readonly pollPointer: number;
@@ -198,6 +226,7 @@ function teardown(): void {
   clearInterval(active.clock);
   active.worker.terminate();
   void active.audio.close();
+  active.captions.destroy();
   active.module.HEAPU8.fill(0, active.firmwarePointer,
     active.firmwarePointer + active.firmwareLength);
   active.module._free(active.firmwarePointer);
@@ -252,7 +281,7 @@ form.addEventListener('submit', async (event) => {
     const firmwarePointer = module._malloc(firmware.length);
     module.HEAPU8.set(firmware, firmwarePointer);
 
-    const canvas = freshCanvas();
+    const { canvas, overlay } = freshScreen();
     const worker = new Worker(new URL('./player-worker.ts', import.meta.url), { type: 'module' });
     const active: Session = {
       module,
@@ -262,6 +291,11 @@ form.addEventListener('submit', async (event) => {
       firmwarePointer,
       firmwareLength: firmware.length,
       audio: new AudioPlayer(),
+      // 字幕の座標系は 960x540（ARIB の標準的な表示領域）。実際の表示寸法は
+      // renderer が canvas の CSS 側で合わせる。
+      captions: new CaptionOverlay(overlay, 960, 540),
+      overlay,
+      aspectApplied: false,
       clock: 0,
       wantPending: false,
       retry: 0,
@@ -283,6 +317,10 @@ form.addEventListener('submit', async (event) => {
         active.audio.push({ pts: data.pts, bytes: new Uint8Array(data.bytes) });
         return;
       }
+      if (data.kind === 'caption') {
+        active.captions.push(data.pts, new Uint8Array(data.bytes));
+        return;
+      }
       if (data.kind === 'failed') {
         status.textContent = `再生に失敗: ${data.message}`;
         teardown();
@@ -300,6 +338,10 @@ form.addEventListener('submit', async (event) => {
       }
       if (data.kind === 'progress') {
         const sequence = data.sequence;
+        if (sequence !== null && !active.aspectApplied) {
+          applyAspect(active.overlay, sequence);
+          active.aspectApplied = true;
+        }
         const pending = Number(module.ccall('webts_q3u4_descramble_pending', 'number', [], []));
         const dropped = Number(module.ccall('webts_q3u4_descramble_dropped', 'number', [], []));
         const audio = active.audio.stats();
@@ -319,6 +361,8 @@ form.addEventListener('submit', async (event) => {
           ['音声フレーム', `${audio.decoded}（取りこぼし ${audio.dropped}、エラー ${audio.errors}）`],
           ['音声の置き直し', String(audio.reanchors)],
           ['音声バッファ', `${audio.bufferedSeconds.toFixed(2)} s`],
+          ['字幕', (() => { const c = active.captions.stats();
+            return `受信 ${c.fed}、描画 ${c.rendered}、エラー ${c.errors}`; })()],
           ['未復号の映像 ES', kib(data.pendingEsBytes)],
           ['未取り出しの TS', kib(pending)],
           ['詰まって捨てた TS', kib(dropped)],
@@ -345,12 +389,13 @@ form.addEventListener('submit', async (event) => {
     }
     stop.disabled = false;
 
-    // 鳴っている位置を Worker へ伝える。映像はこれに合わせる。
+    // 鳴っている位置を Worker へ伝える。映像も字幕もこれに合わせる。
     active.clock = self.setInterval(() => {
       const pts = active.audio.clockPts();
       if (pts === null) return;
       const clock: PlayerRequest = { kind: 'clock', pts };
       worker.postMessage(clock);
+      active.captions.tick(pts);
     }, 100);
 
     // Worker の要求に応えられなかったぶんを拾い直す。

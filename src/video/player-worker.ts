@@ -52,12 +52,20 @@ export interface PlayerAudio {
   readonly bytes: ArrayBuffer;
 }
 
+/** 字幕は解釈も描画も main の aribb24.js に任せるので、そのまま渡す。 */
+export interface PlayerCaption {
+  readonly kind: 'caption';
+  readonly pts: number;
+  readonly bytes: ArrayBuffer;
+}
+
 export interface PlayerWant { readonly kind: 'want' }
 export interface PlayerDone { readonly kind: 'done'; readonly frames: number }
 export interface PlayerFailed { readonly kind: 'failed'; readonly message: string }
 
 export type PlayerMessage =
-  PlayerStarted | PlayerProgress | PlayerAudio | PlayerWant | PlayerDone | PlayerFailed;
+  PlayerStarted | PlayerProgress | PlayerAudio | PlayerCaption
+  | PlayerWant | PlayerDone | PlayerFailed;
 
 export type PlayerRequest =
   | { readonly kind: 'init'; readonly canvas: OffscreenCanvas }
@@ -99,6 +107,7 @@ class Player {
   #wake: (() => void) | null = null;
   #videoPid: number | null = null;
   #audioPid: number | null = null;
+  #captionPid: number | null = null;
   #demuxer: TsDemuxer;
 
   /** main から届く音声の時計。届いた時刻とともに覚えて、間を補間する。 */
@@ -125,13 +134,17 @@ class Player {
       onPrograms: (programs) => this.#choose(programs),
       onPes: (packet) => {
         if (packet.data.length === 0) return;
-        if (packet.pid === this.#audioPid) {
-          // 音声は復号せずそのまま main へ渡す。Web Audio は Worker に無い。
+        if (packet.pid === this.#audioPid || packet.pid === this.#captionPid) {
+          // 音声も字幕も main 側で扱う。Web Audio も aribb24.js の描画も
+          // Worker には置けない。ここでは触らずそのまま渡す。
+          if (packet.pts === null) return;
           const copy = packet.data.slice();
-          const message: PlayerAudio = {
-            kind: 'audio', pts: packet.pts ?? 0, bytes: copy.buffer,
+          const message: PlayerAudio | PlayerCaption = {
+            kind: packet.pid === this.#audioPid ? 'audio' : 'caption',
+            pts: packet.pts,
+            bytes: copy.buffer,
           };
-          if (packet.pts !== null) self.postMessage(message, [copy.buffer]);
+          self.postMessage(message, [copy.buffer]);
           return;
         }
         this.#es.push({ bytes: packet.data, pts: packet.pts });
@@ -179,9 +192,14 @@ class Player {
       this.#videoPid = video.pid;
       const audio = program.streams.find(
         (stream) => stream.streamType === STREAM_TYPE.adtsAac);
+      // component_tag 0x30 が主字幕、0x38 が文字スーパー。字幕だけを取る。
+      const caption = program.streams.find(
+        (stream) => stream.streamType === STREAM_TYPE.privateData
+          && stream.componentTag === 0x30);
       this.#audioPid = audio?.pid ?? null;
-      this.#demuxer.select(
-        audio === undefined ? [video.pid] : [video.pid, audio.pid]);
+      this.#captionPid = caption?.pid ?? null;
+      this.#demuxer.select([video.pid, audio?.pid, caption?.pid]
+        .filter((pid): pid is number => pid !== undefined));
       post({
         kind: 'started',
         programNumber: program.programNumber,

@@ -1,4 +1,5 @@
 import { AudioPlayer } from './audio';
+import { CaptionOverlay } from './captions';
 import type { PlayerMessage, PlayerRequest } from './player-worker';
 
 // 見た目は作り込まない。素の要素のみ。
@@ -10,14 +11,14 @@ const app = document.querySelector('#app');
 if (!(app instanceof HTMLElement)) throw new Error('app root missing');
 
 const heading = document.createElement('h1');
-heading.textContent = 'TS 再生（映像のみ）';
+heading.textContent = 'TS 再生';
 app.append(heading);
 
 const explain = document.createElement('p');
 explain.textContent =
   '復号済みの TS を渡すと、分離・MPEG-2 復号・描画をすべてブラウザ内で行います。'
   + 'ファイルは読み込むだけで、どこへも送信しません。'
-  + '音声は主音声を鳴らします。字幕はまだありません。';
+  + '音声は主音声を鳴らし、字幕も出します。';
 app.append(explain);
 
 const form = document.createElement('form');
@@ -73,22 +74,43 @@ function render(rows: [string, string][]): void {
 }
 
 /**
- * transferControlToOffscreen は canvas ひとつにつき一度きりなので、
- * 再生のたびに新しい canvas を作る。
+ * transferControlToOffscreen は canvas ひとつにつき一度きりなので、毎回作る。
+ * 字幕はこの上に重ねるので、入れ物を position: relative にしておく。
+ *
+ * 表示比は入れ物が持つ。canvas の内在寸法は符号化された 1440x1080 のままで、
+ * それをそのまま見せると横に潰れる。標本比 4:3 を掛けた 16:9 を
+ * aspect-ratio として入れ物に与え、canvas は入れ物いっぱいに伸ばす。
  */
-function freshCanvas(): OffscreenCanvas {
+function freshScreen(): { canvas: OffscreenCanvas; overlay: HTMLDivElement } {
+  const overlay = document.createElement('div');
+  overlay.style.position = 'relative';
+  overlay.style.width = '100%';
+  overlay.style.maxWidth = '960px';
+  overlay.style.aspectRatio = '16 / 9';
+  overlay.style.background = 'black';
   const canvas = document.createElement('canvas');
   canvas.width = 640;
   canvas.height = 360;
-  // 画面幅を超えないようにするだけ。装飾はしない。
-  canvas.style.maxWidth = '100%';
-  canvas.style.height = 'auto';
-  screen.replaceChildren(canvas);
-  return canvas.transferControlToOffscreen();
+  canvas.style.width = '100%';
+  canvas.style.height = '100%';
+  canvas.style.display = 'block';
+  overlay.append(canvas);
+  screen.replaceChildren(overlay);
+  return { canvas: canvas.transferControlToOffscreen(), overlay };
+}
+
+/** sequence が分かった時点で、標本比を含めた表示比を入れ物へ与える。 */
+function applyAspect(overlay: HTMLDivElement, sequence: {
+  pictureWidth: number; pictureHeight: number; pixelWidth: number; pixelHeight: number;
+}): void {
+  const width = sequence.pictureWidth * (sequence.pixelWidth || 1);
+  const height = sequence.pictureHeight * (sequence.pixelHeight || 1);
+  if (width > 0 && height > 0) overlay.style.aspectRatio = `${width} / ${height}`;
 }
 
 let worker: Worker | null = null;
 let audio: AudioPlayer | null = null;
+let captions: CaptionOverlay | null = null;
 let clockTimer = 0;
 
 /** Worker が消費したぶんだけ送る。溜め込ませない。 */
@@ -117,11 +139,16 @@ form.addEventListener('submit', async (event) => {
 
     worker?.terminate();
     void audio?.close();
+    captions?.destroy();
     audio = new AudioPlayer();
     // AudioContext は利用者の操作から作る。ここは submit の中なので許される。
     audio.start();
     const active_audio = audio;
-    const canvas = freshCanvas();
+    const { canvas, overlay } = freshScreen();
+    // 字幕の座標系は 960x540。表示寸法は renderer が CSS 側で合わせる。
+    captions = new CaptionOverlay(overlay, 960, 540);
+    const active_captions = captions;
+    let aspectApplied = false;
     const active = new Worker(new URL('./player-worker.ts', import.meta.url), { type: 'module' });
     worker = active;
 
@@ -146,6 +173,10 @@ form.addEventListener('submit', async (event) => {
         active_audio.push({ pts: data.pts, bytes: new Uint8Array(data.bytes) });
         return;
       }
+      if (data.kind === 'caption') {
+        active_captions.push(data.pts, new Uint8Array(data.bytes));
+        return;
+      }
       if (data.kind === 'failed') {
         status.textContent = `失敗: ${data.message}`;
         play.disabled = false;
@@ -164,7 +195,12 @@ form.addEventListener('submit', async (event) => {
         return;
       }
       if (data.kind === 'progress') {
-        render([...header, ...progressRows(data), ...audioRows(active_audio)]);
+        if (data.sequence !== null && !aspectApplied) {
+          applyAspect(overlay, data.sequence);
+          aspectApplied = true;
+        }
+        render([...header, ...progressRows(data),
+          ...audioRows(active_audio), ...captionRows(active_captions)]);
         return;
       }
       if (data.kind === 'done') status.textContent = `終了しました。${data.frames} フレーム。`;
@@ -177,7 +213,9 @@ form.addEventListener('submit', async (event) => {
     clearInterval(clockTimer);
     clockTimer = self.setInterval(() => {
       const pts = active_audio.clockPts();
-      if (pts !== null) send({ kind: 'clock', pts });
+      if (pts === null) return;
+      send({ kind: 'clock', pts });
+      active_captions.tick(pts);
     }, 100);
   } catch (error) {
     status.textContent = `失敗: ${error instanceof Error ? error.message : String(error)}`;
@@ -213,4 +251,9 @@ function audioRows(player: AudioPlayer): [string, string][] {
     ['音声の置き直し', String(stats.reanchors)],
     ['音声バッファ', `${stats.bufferedSeconds.toFixed(2)} s`],
   ];
+}
+
+function captionRows(overlay: CaptionOverlay): [string, string][] {
+  const stats = overlay.stats();
+  return [['字幕', `受信 ${stats.fed}、描画 ${stats.rendered}、エラー ${stats.errors}`]];
 }
