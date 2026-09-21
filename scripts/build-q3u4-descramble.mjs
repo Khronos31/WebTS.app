@@ -86,7 +86,9 @@ run(emxx, [
   '-s', 'ENVIRONMENT=web,worker', '-s', 'ALLOW_MEMORY_GROWTH=1',
   '-s', 'EXPORTED_RUNTIME_METHODS=["ccall","HEAPU8","HEAP32"]',
   '-s', 'EXPORTED_FUNCTIONS=["_webts_q3u4_descramble_start","_webts_q3u4_descramble_poll",' +
-    '"_webts_q3u4_descramble_join","_webts_q3u4_descramble_error_name","_malloc","_free"]',
+    '"_webts_q3u4_descramble_join","_webts_q3u4_descramble_error_name",'+
+    '"_webts_q3u4_descramble_output","_webts_q3u4_descramble_output_size",'+
+    '"_webts_q3u4_descramble_discard","_malloc","_free"]',
   '-o', module, ...objects,
 ]);
 

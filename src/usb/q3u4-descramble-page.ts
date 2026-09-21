@@ -30,6 +30,7 @@ interface DescrambleModule {
     argumentTypes: string[],
     args: unknown[],
   ): number | string;
+  // 復号済み TS は WASM ヒープ上にある。取り出したら discard で消す。
   _malloc(size: number): number;
   _free(pointer: number): void;
   HEAPU8: Uint8Array;
@@ -48,7 +49,9 @@ explain.textContent =
   '選局してロックし、TS を受信しながら内蔵カードで復号します。'
   + '受信したデータも復号したデータも保存・送信しません。'
   + '表示するのはスクランブル制御ビットが落ちたかどうかといった形の集計だけです。'
-  + 'これでもまだ映像ではありません。分離と MPEG-2 復号が残っています。';
+  + '「復号した TS を保存」を選ぶと、復号済み TS を手元にダウンロードできます。'
+  + '自分の受信機で受信した放送を自分の端末に保存するだけで、どこへも送信しません。'
+  + 'VLC などのプレイヤーで再生できます。';
 app.append(explain);
 
 const form = document.createElement('form');
@@ -94,10 +97,25 @@ form.append(channelField);
 form.append(field('受信機:', receiver));
 form.append(field('受信時間 (ms):', duration));
 
+const collect = document.createElement('input');
+collect.type = 'checkbox';
+collect.checked = true;
+form.append(field('復号した TS を保存:', collect));
+
 const start = document.createElement('button');
 start.type = 'submit';
 start.textContent = '受信して復号';
 form.append(start);
+
+// 保存したときだけ現れる。リンクは使い終わったら必ず revoke する。
+const download = document.createElement('p');
+app.append(download);
+let objectUrl: string | null = null;
+function clearDownload(): void {
+  if (objectUrl !== null) URL.revokeObjectURL(objectUrl);
+  objectUrl = null;
+  download.replaceChildren();
+}
 
 const status = document.createElement('p');
 status.setAttribute('role', 'status');
@@ -148,6 +166,27 @@ function name(module: DescrambleModule, error: number): string {
   return String(module.ccall('webts_q3u4_descramble_error_name', 'string', ['number'], [error]));
 }
 
+/**
+ * 溜めた復号済み TS を利用者の端末へ渡す。コピーを1回取ったら WASM 側は
+ * すぐ捨てる。ヒープに放送内容を残したままにしない。
+ */
+function offerDownload(module: DescrambleModule): void {
+  const size = module.ccall('webts_q3u4_descramble_output_size', 'number', [], []) as number;
+  if (size <= 0) return;
+  const pointer = module.ccall('webts_q3u4_descramble_output', 'number', [], []) as number;
+  if (pointer === 0) return;
+  const copy = module.HEAPU8.slice(pointer, pointer + size);
+  module.ccall('webts_q3u4_descramble_discard', null, [], []);
+
+  objectUrl = URL.createObjectURL(new Blob([copy], { type: 'video/mp2t' }));
+  const link = document.createElement('a');
+  link.href = objectUrl;
+  const stamp = new Date().toISOString().replaceAll(/[:.]/g, '-');
+  link.download = `webts-${stamp}.ts`;
+  link.textContent = `復号済み TS をダウンロード (${(size / 1_048_576).toFixed(1)} MiB)`;
+  download.replaceChildren(link);
+}
+
 function describe(module: DescrambleModule, words: Int32Array): [string, string][] {
   const at = (index: number): number => words[index] ?? 0;
   const inPackets = at(6) >>> 0;
@@ -179,6 +218,7 @@ form.addEventListener('submit', async (event) => {
   event.preventDefault();
   start.disabled = true;
   table.replaceChildren();
+  clearDownload();
   status.textContent = 'ファームウェアを読み出しています…';
 
   let firmwarePointer = 0;
@@ -204,9 +244,9 @@ form.addEventListener('submit', async (event) => {
     status.textContent = '受信を開始しています…';
     const started = module.ccall(
       'webts_q3u4_descramble_start', 'number',
-      ['number', 'number', 'number', 'number', 'number'],
+      ['number', 'number', 'number', 'number', 'number', 'number'],
       [firmwarePointer, firmware.length, Number(receiver.value), frequencyKhz(),
-        Number(duration.value)],
+        Number(duration.value), collect.checked ? 1 : 0],
     ) as number;
     if (started !== 0) {
       status.textContent = `開始できません: ${name(module, started)} (${started})`;
@@ -227,6 +267,7 @@ form.addEventListener('submit', async (event) => {
       await new Promise((resolve) => setTimeout(resolve, 250));
     }
     module.ccall('webts_q3u4_descramble_join', 'number', [], []);
+    offerDownload(module);
   } catch (error) {
     status.textContent = `失敗: ${error instanceof Error ? error.message : String(error)}`;
   } finally {

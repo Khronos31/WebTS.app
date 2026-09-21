@@ -12,8 +12,10 @@
 // 復号は上流 libaribb25 の `arib_std_b25` facade が行う。PAT/PMT の追跡も
 // ECM の取り出しも MULTI2 もすべて上流であり、ここには書かない。
 //
-// **復号した TS は保存も送信もしない。**出すのは形の集計だけで、鍵も
-// カード情報も放送内容も持ち出さない。
+// 復号した TS は、利用者が明示的に求めたときだけ、利用者自身の端末へ
+// 渡すために保持する。これは利用者が自分の受信機で受信した自分の放送を
+// 自分で見るための経路であり、どこへも送信しない。既定では保持しない。
+// 鍵とカード情報はどちらの場合も持ち出さない。
 
 #include "frontend_probe_support.h"
 #include "q3u4_card_backend.h"
@@ -35,6 +37,7 @@ extern "C" void webts_winscard_bind(void* service, std::uint64_t client);
 extern "C" void webts_winscard_unbind(void);
 
 #include <atomic>
+#include <algorithm>
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
@@ -76,6 +79,8 @@ struct Job final {
     int receiver = 2;
     int frequency_khz = 0;
     int duration_ms = 5000;
+    // 復号済み TS を手元へ渡すために溜めるかどうか。既定は溜めない。
+    bool collect = false;
 
     std::atomic<int> state{kIdle};
     std::atomic<int> stage{kStageStart};
@@ -96,6 +101,10 @@ struct Job final {
     std::atomic<std::uint64_t> undecrypted_packets{0U};
     std::atomic<int> ecm_unpurchased{-1};
     std::atomic<int> last_ecm_error{-1};
+
+    // worker だけが書き、state が実行中でなくなってから main が読む。
+    std::vector<std::uint8_t> output;
+    std::atomic<std::uint64_t> output_bytes{0U};
 };
 
 Job* g_job = nullptr;
@@ -358,6 +367,11 @@ void* worker_main(void* argument) noexcept {
             if (output.data != nullptr && output.size > 0) {
                 count_packets(output.data, static_cast<std::size_t>(output.size),
                               job.out_packets, job.out_scrambled, &job.out_bad_sync);
+                if (job.collect) {
+                    job.output.insert(job.output.end(), output.data,
+                                      output.data + output.size);
+                    job.output_bytes.store(job.output.size());
+                }
             }
             publish_program_info(job, b25);
         }
@@ -370,10 +384,18 @@ void* worker_main(void* argument) noexcept {
     if (result == Error::OK) {
         job.stage.store(kStageFlush);
         if (b25->flush(b25) == 0) {
-            ARIB_STD_B25_BUFFER output{nullptr, 0};
-            if (b25->get(b25, &output) == 0 && output.data != nullptr && output.size > 0) {
+            // 1回の get で出し切れる保証はないので、空が返るまで繰り返す。
+            for (;;) {
+                ARIB_STD_B25_BUFFER output{nullptr, 0};
+                if (b25->get(b25, &output) != 0) break;
+                if (output.data == nullptr || output.size <= 0) break;
                 count_packets(output.data, static_cast<std::size_t>(output.size),
                               job.out_packets, job.out_scrambled, &job.out_bad_sync);
+                if (job.collect) {
+                    job.output.insert(job.output.end(), output.data,
+                                      output.data + output.size);
+                    job.output_bytes.store(job.output.size());
+                }
             }
         }
         publish_program_info(job, b25);
@@ -389,7 +411,8 @@ extern "C" {
 
 /** 選局・受信・復号を pthread で行う。即座に戻る。この関数は USB に触れない。 */
 int webts_q3u4_descramble_start(const std::uint8_t* firmware, int firmware_size,
-                                int receiver, int frequency_khz, int duration_ms) {
+                                int receiver, int frequency_khz, int duration_ms,
+                                int collect) {
     if (g_job != nullptr && g_job->state.load() == kRunning) return static_cast<int>(Error::BUSY);
     // 地上波の global 受信機は 2, 3（dev1）と 6, 7（dev2）。
     const bool terrestrial = (receiver >= 2 && receiver < 4) || receiver >= 6;
@@ -404,6 +427,11 @@ int webts_q3u4_descramble_start(const std::uint8_t* firmware, int firmware_size,
     g_job->receiver = receiver;
     g_job->frequency_khz = frequency_khz;
     g_job->duration_ms = duration_ms;
+    g_job->collect = collect != 0;
+    if (g_job->collect) {
+        // 15 Mbps 前後なので、あらかじめそのぶん確保して再確保を避ける。
+        g_job->output.reserve(static_cast<std::size_t>(duration_ms) * 2048U);
+    }
     g_job->state.store(kRunning);
     if (pthread_create(&g_thread, nullptr, worker_main, g_job) != 0) {
         g_job->state.store(kFailed);
@@ -436,6 +464,29 @@ int webts_q3u4_descramble_poll(std::int32_t* output, int output_words) {
     output[14] = job.ecm_unpurchased.load();
     output[15] = job.last_ecm_error.load();
     return 0;
+}
+
+/**
+ * 溜めた復号済み TS の先頭。実行中は 0 を返す。返るポインタは次の start か
+ * discard まで有効。
+ */
+std::uint8_t* webts_q3u4_descramble_output(void) {
+    if (g_job == nullptr || g_job->state.load() == kRunning) return nullptr;
+    return g_job->output.empty() ? nullptr : g_job->output.data();
+}
+
+int webts_q3u4_descramble_output_size(void) {
+    if (g_job == nullptr) return 0;
+    return static_cast<int>(g_job->output_bytes.load());
+}
+
+/** 溜めた TS を捨てる。呼び出し側が取り出したら必ず呼ぶ。 */
+void webts_q3u4_descramble_discard(void) {
+    if (g_job == nullptr || g_job->state.load() == kRunning) return;
+    std::fill(g_job->output.begin(), g_job->output.end(), std::uint8_t{0});
+    g_job->output.clear();
+    g_job->output.shrink_to_fit();
+    g_job->output_bytes.store(0U);
 }
 
 const char* webts_q3u4_descramble_error_name(int error) {
