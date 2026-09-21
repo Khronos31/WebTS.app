@@ -14,7 +14,10 @@ import { mkdirSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { findCompilers, run, version } from './lib/emscripten.mjs';
-import { C_SOURCES, CXX_SOURCES, VARIANTS, prepareVariant } from './lib/libusb-variants.mjs';
+import { C_SOURCES, CXX_SOURCES, prepareVariant } from './lib/libusb-variants.mjs';
+
+// The Node regression compares the shipped tree against pristine upstream.
+const NODE_VARIANTS = ['stock', 'patched'];
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const buildRoot = join(repoRoot, 'build', 'libusb-ownership');
@@ -102,7 +105,7 @@ function invoke(module, scenario) {
 
 mkdirSync(buildRoot, { recursive: true });
 const modules = {};
-for (const variant of VARIANTS) {
+for (const variant of NODE_VARIANTS) {
   process.stdout.write(`building ${variant}…\n`);
   modules[variant] = build(variant);
 }
@@ -111,7 +114,7 @@ const failures = [];
 const rows = [];
 for (let scenario = 0; scenario < SCENARIOS.length; scenario += 1) {
   const results = {};
-  for (const variant of VARIANTS) {
+  for (const variant of NODE_VARIANTS) {
     const result = invoke(modules[variant], scenario);
     results[variant] = result.outcome === 'REPORTED' ? result.report.diagnostic : result.outcome;
     if (variant === 'patched') {
@@ -123,7 +126,7 @@ for (let scenario = 0; scenario < SCENARIOS.length; scenario += 1) {
   }
 
   if (scenario === GUARD) {
-    for (const variant of VARIANTS) {
+    for (const variant of NODE_VARIANTS) {
       if (results[variant] !== 'OK') {
         failures.push(`scenario ${scenario} (${SCENARIOS[scenario]}): ${variant} regressed ordinary completion (${results[variant]})`);
       }

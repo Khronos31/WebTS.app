@@ -9,7 +9,7 @@
 
 | 対象 | 固定 | ライセンス | 用途 | 改変 |
 |---|---|---|---|---|
-| [libusb](https://github.com/libusb/libusb) | v1.0.30 / `87a55632db62c9bdc58cd31d3ccfa673f1bb017f` | LGPL-2.1-or-later | 公式 Emscripten/WebUSB backend と、それが必要とする core | **あり（3ファイル）** |
+| [libusb](https://github.com/libusb/libusb) | v1.0.30 / `87a55632db62c9bdc58cd31d3ccfa673f1bb017f` | LGPL-2.1-or-later | 公式 Emscripten/WebUSB backend と、それが必要とする core | **あり（2ファイル）** |
 | [Khronos31/px4-userland](https://github.com/Khronos31/px4-userland) | `10a373dbda0603b2d8180bb2508e2d88dd70eb2d` | GPL-2.0-only | PX-Q3U4 のコア。IT930x ブリッジ、identity grouping、tagged TS demux、stream data plane、内蔵カード | なし |
 | [shirow-github/libaribb25](https://github.com/shirow-github/libaribb25) | v0.2.10 / `b978fe5caf6bfe162e944ad4d323b7c0205276e3` | ISC | TS section parser、MULTI2、`arib_std_b25` facade | なし |
 
@@ -27,9 +27,10 @@ LGPL-2.1 第2条(a)に従い、改変したファイルには変更告知を入�
 |---|---|
 | `libusb/os/emscripten_webusb.cpp` | 保留転送の所有権。promise callback が生の `usbi_transfer*` を持たないようにし、`em_cancel_transfer()` が有界な論理完了を1回だけ発行し、transfer private の破棄と detach を user callback より前に行う |
 | `libusb/io.c` | `usbi_handle_disconnect()` が backend の発行済み完了を回収してから `NO_DEVICE` 完了を走らせる |
-| `libusb/os/events_posix.c` | `em_libusb_wait()` が非正の timeout で即座に戻る。Chrome の Worker で event API が返らない問題への**回避策であって解決ではない** |
 
-理由と実測は [`docs/FINDINGS.md`](docs/FINDINGS.md) の1章と2章に記録している。
+理由と実測は [`docs/FINDINGS.md`](docs/FINDINGS.md) の1章に記録している。
+`events_posix.c` にも一時的に改変を当てていたが、共有メモリ付きでビルドすれば上流のまま
+動くことが分かったため取り下げた（同2章）。
 
 ## 参照のみ（成果物へ組み込まない）
 

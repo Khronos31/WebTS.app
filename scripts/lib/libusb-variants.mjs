@@ -15,7 +15,14 @@ import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, write
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-export const VARIANTS = Object.freeze(['stock', 'patched']);
+// Which parts of vendor/PATCHES/libusb.diff each variant keeps. `stock` is the
+// pristine upstream, reconstructed by reverse-applying the whole diff.
+export const VARIANT_SPECS = Object.freeze({
+  patched: { revert: [] },
+  stock: { revert: null },  // null means the whole diff
+});
+
+export const VARIANTS = Object.freeze(Object.keys(VARIANT_SPECS));
 
 // libusb builds this from configure. The Emscripten backend needs very little
 // of it, and the values below are what the WebUSB build actually uses.
@@ -57,7 +64,8 @@ function sha256(path) {
  * beside it. Returns the include directories the compiler needs.
  */
 export function prepareVariant(repoRoot, outputRoot, variant) {
-  if (!VARIANTS.includes(variant)) throw new Error(`unknown variant: ${variant}`);
+  const spec = VARIANT_SPECS[variant];
+  if (!spec) throw new Error(`unknown variant: ${variant}`);
   const vendored = join(repoRoot, 'vendor', 'upstream', 'libusb');
   const patch = join(repoRoot, 'vendor', 'PATCHES', 'libusb.diff');
   const root = join(outputRoot, variant);
@@ -66,7 +74,7 @@ export function prepareVariant(repoRoot, outputRoot, variant) {
   rmSync(root, { recursive: true, force: true });
   mkdirSync(src, { recursive: true });
 
-  if (variant === 'patched') {
+  if (spec.revert !== null && spec.revert.length === 0) {
     cpSync(vendored, src, { recursive: true });
   } else {
     if (!existsSync(patch)) throw new Error(`missing ${patch}; run npm run vendor:sync`);
@@ -76,14 +84,17 @@ export function prepareVariant(repoRoot, outputRoot, variant) {
     const staging = mkdtempSync(join(tmpdir(), 'webts-libusb-stock-'));
     try {
       cpSync(vendored, staging, { recursive: true });
+      const only = (spec.revert ?? []).flatMap((path) => ['--include', path]);
       const applied = spawnSync('git', [
         '-c', 'core.autocrlf=false', '-c', 'core.eol=lf',
-        'apply', '-R', '-p1', patch,
+        'apply', '-R', '-p1', ...only, patch,
       ], { cwd: staging, encoding: 'utf8' });
       if (applied.status !== 0) {
         throw new Error(`reverse-applying libusb.diff failed: ${applied.stderr || applied.stdout}`);
       }
-      verifyAgainstUpstreamLock(repoRoot, staging);
+      // Only a full revert is expected to reproduce upstream exactly.
+      if (spec.revert === null) verifyAgainstUpstreamLock(repoRoot, staging);
+      else verifyRevertedFiles(repoRoot, staging, spec.revert);
       cpSync(staging, src, { recursive: true });
     } finally {
       rmSync(staging, { recursive: true, force: true });
@@ -92,6 +103,19 @@ export function prepareVariant(repoRoot, outputRoot, variant) {
 
   writeFileSync(join(root, 'config.h'), CONFIG_H);
   return { root, src, includes: [root, join(src, 'libusb')] };
+}
+
+/** A partial revert must restore exactly the named files to upstream bytes. */
+function verifyRevertedFiles(repoRoot, src, paths) {
+  const lock = JSON.parse(readFileSync(join(repoRoot, 'vendor', 'SOURCE_LOCK.json'), 'utf8'));
+  const source = lock.sources.find((entry) => entry.name === 'libusb');
+  for (const path of paths) {
+    const file = source?.files.find((entry) => entry.path === path);
+    if (!file) throw new Error(`${path} is not in the libusb lock`);
+    if (sha256(join(src, ...path.split('/'))) !== file.upstreamSha256) {
+      throw new Error(`reverting ${path} did not reproduce the upstream bytes`);
+    }
+  }
 }
 
 /** The reconstructed tree must be byte-identical to the pinned upstream. */

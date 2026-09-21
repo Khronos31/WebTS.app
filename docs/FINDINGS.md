@@ -52,9 +52,14 @@ source-bound harness で、1 scenario = 1 隔離プロセス / Dedicated Worker 
 再構成し、**再構成した木が固定上流のバイト列と一致すること**を確認してから使うため、
 ネットワークも上流の再取得も要らない。CI の `libusb-regression` ジョブが同じものを回す。
 
-Node 側は pthread ビルドである。無改変の `events_posix.c` が `Atomics.waitAsync` を
-HEAP32 に対して呼ぶため、共有メモリでないと baseline がそもそも起動しない。ブラウザ
-Worker 向けは no-pthread ビルドで、そちらの事情は次章。
+Node もブラウザも pthread ビルドである。無改変の `events_posix.c` が `Atomics.waitAsync`
+を HEAP32 に対して呼ぶため、共有メモリでないと baseline がそもそも起動しない（次章）。
+
+Chrome の Dedicated Worker でも同じ10シナリオを実測し、**Node と全行一致**した。
+`npm run build:libusb-browser` で Worker モジュールを生成し、dev 専用ページ
+`/libusb-ownership.html` から実行する。1 Worker = 1 scenario で、実行後に terminate する。
+Worker の terminate は測定を有界にするだけで、保留 Promise・libusb handle・物理転送の解放を
+意味しない。
 
 ### 修正には core の変更も要る
 
@@ -63,7 +68,7 @@ backend だけを直しても「cancel → event処理前に disconnect」で二
 自分の `NO_DEVICE` 完了を走らせる必要がある。`list_del()` が entry を NULL 化するため
 この回収は冪等にできる。
 
-成立した修正の骨子は次の3点だった。
+成立した修正の骨子は次の3点で、`os/emscripten_webusb.cpp` と `io.c` の2ファイルに収まる。
 
 1. transfer private を `PromiseResult` から「shared state + `optional<PromiseResult>`」へ
    変え、promise callback に生の `usbi_transfer*` を持たせない
@@ -79,19 +84,34 @@ pthread build での競合（検証はすべて単一thread）。
 
 ---
 
-## 2. Chrome の Worker で公式 event loop が返らない
+## 2. Chrome の Worker の event loop は、共有メモリさえあれば上流のまま動く
 
-固定 `os/events_posix.c` の `em_libusb_wait()` は、timeout が 0 でも `poll()` の前に
-`Atomics.waitAsync` を使う helper へ入る。**Chrome の Worker runtime thread では、USB も
-転送も無い状態で `libusb_handle_events_timeout()` に zero timeout を渡しても返ってこない。**
+**これは以前の記録の訂正である。**かつて「固定 `events_posix.c` の `em_libusb_wait()` が
+Chrome の Worker runtime thread で返らない」と記録し、`timeout <= 0` で wait を飛ばす
+回避策を当てていた。再測定の結果、**原因は Chrome でも上流でもなく、no-pthread ビルドで
+あること**だった。
 
-上記1の Chrome 検証は、`timeout <= 0` のとき wait を飛ばす実験的な差分を当てた build
-copy でのみ通っている。したがって Chrome の結果は**所有権 patch と event loop 差分の2つの
-上**で得たものであり、公式 snapshot そのままの挙動ではない。
+`em_libusb_wait()` は main runtime thread では `Atomics.waitAsync(HEAP32, ...)` を呼ぶ。
+`HEAP32` が `SharedArrayBuffer` 由来でないと、この呼び出しは
+`TypeError: [object Int32Array] is not a shared typed array` になる。no-pthread ビルドでは
+まさにそうなる。Dedicated Worker 内に読み込んだモジュールは自身が main runtime thread に
+なるため、この経路へ入る。
 
-固定 `events_posix.c` のまま Chrome で event API を回す方法は未解決である。
+`-pthread -s SHARED_MEMORY=1` でビルドすれば、**固定の `events_posix.c` のまま**
+Chrome の Dedicated Worker で event API が正常に返る。所有権修正のみを当てて
+`events_posix.c` を上流へ戻した variant を作り、全10シナリオが patched と同一結果に
+なることを確認したうえで、この改変は取り下げた。上流との差分は3ファイルから2ファイルへ
+減っている。
 
----
+付随して分かったこと。
+
+- **pthread プールは0にする。**`PTHREAD_POOL_SIZE` が1以上だと、モジュールを Dedicated
+  Worker 内へ読み込んだときに `still waiting on run dependencies: loading-workers` で
+  止まる。ハーネスはスレッドを作らないので、必要なのは共有メモリだけである。
+- 共有メモリを使う以上、ページは cross-origin isolation を必要とする。dev/preview は
+  `vite.config.ts`、Cloudflare Pages は `public/_headers` で同じ契約を張っている。
+- したがって **0.1.0 は実質 `SharedArrayBuffer` 前提**になる。これは未決扱いだった項目の
+  一つに答えを与えている。
 
 ## 3. WebUSB 列挙は成立している
 

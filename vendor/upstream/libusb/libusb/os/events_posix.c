@@ -18,14 +18,6 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
  */
 
-
-/*
- * Modified 2026-09-21 by the WebTS.app project.
- * Changed: em_libusb_wait() returns immediately for a non-positive
- * timeout. Without this, libusb_handle_events_timeout() never returns on
- * a Chrome Worker runtime thread. This is a workaround, not a diagnosis.
- * Rationale and measurements: docs/FINDINGS.md section 2.
- */
 #include "libusbi.h"
 
 #include <errno.h>
@@ -54,15 +46,6 @@ EM_ASYNC_JS(void, em_libusb_wait_async, (const _Atomic int* ptr, int expected_va
 
 static void em_libusb_wait(const _Atomic int *ptr, int expected_value, int timeout)
 {
-	/* WebTS.app change: a zero timeout means "do not block", and the
-	 * poll() below is already non-blocking, so skip the wait entirely.
-	 * Without this, libusb_handle_events_timeout() with a zero timeval
-	 * never returns on a Chrome Worker runtime thread, even with no
-	 * device and no transfer in flight. This is a workaround, not a
-	 * diagnosis: the underlying Atomics.waitAsync behaviour is still
-	 * unexplained. See docs/FINDINGS.md section 2. */
-	if (timeout <= 0)
-		return;
 	if (emscripten_is_main_runtime_thread()) {
 		em_libusb_wait_async(ptr, expected_value, timeout);
 	} else {

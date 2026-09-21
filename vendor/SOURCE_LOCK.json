@@ -16,7 +16,7 @@
       "license": "LGPL-2.1-or-later",
       "root": "vendor/upstream/libusb",
       "fileCount": 20,
-      "modifiedCount": 3,
+      "modifiedCount": 2,
       "files": [
         {
           "path": "AUTHORS",
@@ -83,8 +83,7 @@
         {
           "path": "libusb/os/events_posix.c",
           "upstreamSha256": "aabddcc6ca86faba726ca87862eef9fc5d3b3168faef99c5be22827ac5b66ec0",
-          "vendoredSha256": "83d6da19e9bdd8ab93a3138ebc4bdfcddf656737fef7a4c70050dec522bdca5a",
-          "modified": true
+          "vendoredSha256": "aabddcc6ca86faba726ca87862eef9fc5d3b3168faef99c5be22827ac5b66ec0"
         },
         {
           "path": "libusb/os/events_posix.h",
