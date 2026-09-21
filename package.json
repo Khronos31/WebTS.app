@@ -24,7 +24,8 @@
     "build:q3u4-capture": "node scripts/build-q3u4-capture.mjs",
     "build:mpeg2": "node scripts/build-mpeg2-decoder.mjs",
     "build:q3u4-card": "node scripts/build-q3u4-card.mjs",
-    "build:q3u4-b25": "node scripts/build-q3u4-b25.mjs"
+    "build:q3u4-b25": "node scripts/build-q3u4-b25.mjs",
+    "build:q3u4-descramble": "node scripts/build-q3u4-descramble.mjs"
   },
   "devDependencies": {
     "@types/node": "^26.6.2",
