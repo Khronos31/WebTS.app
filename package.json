@@ -18,7 +18,8 @@
     "vendor:sync": "node scripts/vendor-sync.mjs",
     "regression:libusb": "node scripts/libusb-ownership-regression.mjs",
     "build:libusb-browser": "node scripts/build-libusb-ownership-browser.mjs",
-    "build:px4-identity": "node scripts/build-px4-identity.mjs"
+    "build:px4-identity": "node scripts/build-px4-identity.mjs",
+    "build:q3u4-probe": "node scripts/build-q3u4-claim-probe.mjs"
   },
   "devDependencies": {
     "typescript": "7.0.2",

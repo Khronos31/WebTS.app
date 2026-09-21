@@ -308,7 +308,42 @@ dev_id が 1 と 2 に分かれるため結果を左右する経路がない。
 
 ---
 
-## 10. 未達のまま残っていること
+## 10. 実機の open / claim は本番経路で成立する
+
+2026-09-21、実機の PX-Q3U4 に対し、**同梱した（所有権修正済みの）libusb の
+Emscripten/WebUSB backend 経由**で open → claim(interface 0) → release(0) → close の
+一往復を行った。fake `navigator.usb` は使っていない。ページが持つ実際の WebUSB 権限を
+通している。
+
+| 項目 | 値 |
+| --- | --- |
+| libusb が列挙した数 | 2 |
+| VID:PID 一致 | 2 |
+| device 0 | open=0 claim=0 release=0 close 呼び出し済み |
+| device 1 | open=0 claim=0 release=0 close 呼び出し済み |
+
+`0` は `LIBUSB_SUCCESS`。3回連続で同一結果、16〜19ms で完了した。
+
+ビルドは `-pthread -s SHARED_MEMORY=1 -s PTHREAD_POOL_SIZE=0`、ページは
+cross-origin isolated。所有権回帰で確立した構成をそのまま使っている。
+
+### 読み取り方法の注意
+
+最初の1回だけ、出力バッファの読み取りが矛盾した値を返した（`returnCode` が OK なのに
+一致数 0、列挙数が 90848）。**原因は特定できていない。**呼び出し前に領域をマーカーで
+埋め、呼び出し後に `Int32Array` を作り直して読む方法に変えたところ一貫し、3回再現した。
+ABI 側ではなく読み取り側の問題と見ているが断定しない。WASM 出力を読む箇所では
+書き込み範囲を検証する形にすること。
+
+### 測定していないこと
+
+**転送を一切行っていない。**bulk read/write、clear halt、set configuration、reset、
+firmware、選局、TS 受信、B25 はすべて未着手。claim 競合、抜き差し後の再 claim、
+claim 失敗経路、4チューナーの個別制御も未確認。
+
+---
+
+## 11. 未達のまま残っていること
 
 - **M1 の受け入れ条件**（両機種で各30分の生TS、transfer error / overflow 0、メモリ増加上限、
   切断後の安全停止）は未達。実 firmware 送信、選局、実 TS 受信は未実施。
