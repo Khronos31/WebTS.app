@@ -15,11 +15,11 @@ import {
 import { readSetupState } from '../../ui/setup-state';
 import { ChannelScan } from '../channel-scan';
 import { saveChannels } from '../channel-store';
-import { knownTunings, refreshPrograms } from '../epg-refresh';
 import type { ChannelItem } from '../types';
 import { channelsSync } from '../channel-source';
 import { loadQ3U4Identifiers } from '../../usb/px4-identity';
 import { getTheme, setTheme, type ThemeMode } from '../theme-manager';
+import { allowLnb15v, setAllowLnb15v } from '../lnb-setting';
 
 export interface SettingsViewOptions {
   onStateChanged: () => void;
@@ -57,7 +57,10 @@ export class SettingsView {
     // 4. チューナー接続 カード
     this.element.append(this.createTunerCard(state.tuner));
 
-    // 5. 受信状態 (Signal Monitor) カード
+    // 5. BS/CS アンテナ電源 (LNB) カード
+    this.element.append(this.createLnbCard());
+
+    // 6. 受信状態 (Signal Monitor) カード
     this.element.append(this.createSignalCard());
   }
 
@@ -294,13 +297,6 @@ export class SettingsView {
           </svg>
           スキャン開始
         </button>
-
-        <button type="button" class="btn btn-secondary" id="refresh-epg-btn">
-          <svg viewBox="0 0 24 24" style="width:18px;height:18px;fill:currentColor">
-            <path d="M17.65 6.35C16.2 4.9 14.21 4 12 4c-4.42 0-7.99 3.58-8 8s3.58 8 8 8c3.73 0 6.84-2.55 7.73-6h-2.08c-.82 2.33-3.04 4-5.65 4-3.31 0-6-2.69-6-6s2.69-6 6-6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z"/>
-          </svg>
-          番組情報を更新
-        </button>
       </div>
 
       <div class="scan-progress-box" id="scan-box" style="display: none; margin-bottom: 20px;">
@@ -350,7 +346,6 @@ export class SettingsView {
     `;
 
     const startBtn = card.querySelector<HTMLButtonElement>('#start-scan-btn')!;
-    const refreshBtn = card.querySelector<HTMLButtonElement>('#refresh-epg-btn')!;
     const scanBox = card.querySelector<HTMLElement>('#scan-box')!;
     const scanChannelText = card.querySelector<HTMLElement>('#scan-current-channel')!;
     const scanPctText = card.querySelector<HTMLElement>('#scan-progress-pct')!;
@@ -442,7 +437,6 @@ export class SettingsView {
       if (this.isScanning) return;
       this.isScanning = true;
       startBtn.disabled = true;
-      refreshBtn.disabled = true;
       scanBox.style.display = 'block';
       scanLog.innerHTML = '';
 
@@ -485,52 +479,6 @@ export class SettingsView {
         this.isScanning = false;
         this.scan = null;
         startBtn.disabled = false;
-        refreshBtn.disabled = false;
-      });
-    });
-
-    // 番組情報だけを取り直す。
-    //
-    // **全帯域を舐め直す必要は無い。**既に分かっている物理チャンネルだけを
-    // 回れば EIT[p/f] は取れる。関東なら 50 波ではなく 10 波前後で済む。
-    // 局の一覧と有効/無効の選択には触らない（番組の更新で局が消えたり、
-    // 外したチェックが戻ったりしないようにする）。
-    refreshBtn.addEventListener('click', () => {
-      if (this.isScanning) return;
-      const physical = knownTunings();
-
-      scanBox.style.display = 'block';
-      scanLog.innerHTML = '';
-      if (physical.length === 0) {
-        appendLog('[EPG] 局が登録されていません。先にスキャンを実行してください。');
-        return;
-      }
-
-      this.isScanning = true;
-      startBtn.disabled = true;
-      refreshBtn.disabled = true;
-      appendLog(`[EPG] 既知の ${physical.length} 波から番組情報を取り直します...`);
-
-      void refreshPrograms((progress) => {
-        const pct = Math.round(((progress.index + 1) / progress.total) * 100);
-        scanBar.style.width = `${pct}%`;
-        scanPctText.textContent = `${pct}%`;
-        scanChannelText.textContent = `物理チャンネル ch${progress.label} の番組情報を取得中...`;
-        appendLog(progress.locked === true
-          ? `✔ ch${progress.label} 取得`
-          : `- ch${progress.label}: 信号なし`);
-      }).then((programs) => {
-        scanBar.style.width = '100%';
-        scanPctText.textContent = '100%';
-        scanChannelText.textContent = '番組情報の更新完了！';
-        appendLog(`[EPG] ${programs} 件の番組情報を保存しました。`);
-        this.onStateChanged();
-      }).catch((error: unknown) => {
-        appendLog(`[EPG] 失敗: ${error instanceof Error ? error.message : String(error)}`);
-      }).finally(() => {
-        this.isScanning = false;
-        startBtn.disabled = false;
-        refreshBtn.disabled = false;
       });
     });
 
@@ -595,6 +543,57 @@ export class SettingsView {
       } catch (err) {
         statusText.textContent = `キャンセルまたはエラー: ${err instanceof Error ? err.message : String(err)}`;
       }
+    });
+
+    return card;
+  }
+
+  private createLnbCard(): HTMLElement {
+    const card = document.createElement('div');
+    card.className = 'settings-card';
+
+    const isAllowed = allowLnb15v();
+
+    card.innerHTML = `
+      <div class="settings-card-header">
+        <div class="settings-card-title">
+          <svg viewBox="0 0 24 24" style="width:20px;height:20px;fill:currentColor">
+            <path d="M7 2v11h3v9l7-12h-4l4-8z"/>
+          </svg>
+          <span>BS/CS アンテナ電源 (LNB 給電)</span>
+        </div>
+        <span class="status-badge ${isAllowed ? 'ok' : ''}" id="lnb-status-badge">
+          ${isAllowed ? '給電中 (15V)' : '給電オフ'}
+        </span>
+      </div>
+
+      <div class="toggle-control-row">
+        <div class="toggle-label-group">
+          <div class="toggle-main-label">
+            LNB へ 15V 電源を供給する
+          </div>
+          <p class="settings-card-desc" style="margin-top: 6px; margin-bottom: 0;">
+            BS/110度CSアンテナ（LNBコンバーター）への電源供給（DC 15V）を設定します。
+            集合住宅の共同受信設備やブースター等ですでに給電されている回線では、機器の故障や競合を防ぐため必ずオフ（デフォルト）のままにしてください。
+            チューナーから単独のパラボラアンテナへ直接給電が必要な環境のみオンにします。
+          </p>
+        </div>
+        <label class="toggle-switch">
+          <input type="checkbox" id="lnb-power-toggle" ${isAllowed ? 'checked' : ''} />
+          <span class="toggle-slider"></span>
+        </label>
+      </div>
+    `;
+
+    const toggle = card.querySelector<HTMLInputElement>('#lnb-power-toggle')!;
+    const badge = card.querySelector<HTMLElement>('#lnb-status-badge')!;
+
+    toggle.addEventListener('change', () => {
+      const allowed = toggle.checked;
+      setAllowLnb15v(allowed);
+      badge.textContent = allowed ? '給電中 (15V)' : '給電オフ';
+      badge.className = `status-badge ${allowed ? 'ok' : ''}`;
+      this.onStateChanged();
     });
 
     return card;

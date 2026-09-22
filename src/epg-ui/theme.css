@@ -799,6 +799,11 @@ body {
   color: #ffb74d;
 }
 
+.status-badge:not(.ok):not(.warning) {
+  background-color: var(--ripple);
+  color: var(--text-secondary);
+}
+
 .settings-card-desc {
   font-size: 0.875rem;
   color: var(--text-secondary);
@@ -1573,3 +1578,77 @@ body {
 .signal-val.ok {
   color: var(--success);
 }
+
+/* ==========================================================
+   Toggle Switch (LNB & Settings)
+   ========================================================== */
+.toggle-control-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+}
+
+.toggle-label-group {
+  flex: 1;
+}
+
+.toggle-main-label {
+  font-size: 0.9375rem;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.toggle-switch {
+  position: relative;
+  display: inline-block;
+  width: 50px;
+  height: 28px;
+  flex-shrink: 0;
+  cursor: pointer;
+}
+
+.toggle-switch input {
+  opacity: 0;
+  width: 0;
+  height: 0;
+  position: absolute;
+}
+
+.toggle-slider {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background-color: var(--surface-border);
+  border-radius: 28px;
+  transition: background-color 0.25s ease;
+}
+
+.toggle-slider::before {
+  position: absolute;
+  content: "";
+  height: 22px;
+  width: 22px;
+  left: 3px;
+  bottom: 3px;
+  background-color: #ffffff;
+  border-radius: 50%;
+  transition: transform 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+  box-shadow: 0 2px 5px rgba(0, 0, 0, 0.3);
+}
+
+.toggle-switch input:checked + .toggle-slider {
+  background-color: var(--primary);
+}
+
+.toggle-switch input:checked + .toggle-slider::before {
+  transform: translateX(22px);
+}
+
+.toggle-switch input:focus-visible + .toggle-slider {
+  outline: 2px solid var(--primary-light);
+  outline-offset: 2px;
+}
+
