@@ -222,7 +222,7 @@ export class WatchView {
       return;
     }
     try {
-      const canvas = this.player.media.transferControlToOffscreen();
+      const canvas = this.player.takeOffscreen();
       this.session = await LiveSession.start({
         canvas,
         physicalChannel: physical,
@@ -241,6 +241,7 @@ export class WatchView {
     this.session?.stop();
     this.session = null;
     this.player.setSubtitleText('');
+    this.player.setStatusText('');
   }
 
   /**
@@ -259,9 +260,14 @@ export class WatchView {
     }
   }
 
-  /** 受信の状況を字幕の場所に出す。専用の枠を足すと見た目が変わるため。 */
+  /**
+   * 受信の状況とエラーを出す。
+   *
+   * 以前は字幕の枠へ流していたが、選局の失敗が放送の字幕のような見た目で
+   * 出てしまった。プレイヤー側に別の表示先を持たせてそちらへ出す。
+   */
   private showStatus(text: string): void {
-    this.player.setSubtitleText(text);
+    this.player.setStatusText(text);
   }
 
   public destroy(): void {

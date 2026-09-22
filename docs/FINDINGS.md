@@ -857,6 +857,11 @@ PES の内訳（program 1024、18.4秒）:
 描画まで Worker で完結させる。`OffscreenCanvas` を渡せば `VideoFrame` を
 スレッド間で渡す必要がなく、main thread は UI だけを見ていられる。
 
+**`transferControlToOffscreen()` は同じ canvas 要素に一度しか掛けられない。**
+二度目は `InvalidStateError` になる。受信を開き直すたびに掛け直す作りにすると、
+一時停止から再生へ戻せない。canvas 要素そのものを作り替えて渡す
+（`VideoPlayer.takeOffscreen()`）。
+
 I420 のまま `VideoFrame` に渡し、`drawImage` で描く。3面を1本の連続した
 バッファへ写す1回が、表示経路で唯一のコピーである。`visibleRect` で
 符号化 1440x1088 から表示 1440x1080 を切り出し、`displayWidth` に標本比 4:3 を

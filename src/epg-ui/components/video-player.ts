@@ -22,9 +22,10 @@ export interface VideoPlayerOptions {
 export class VideoPlayer {
   public readonly element: HTMLElement;
   /** 映像の描画先。制御を Worker へ渡すのは呼び出し側の仕事。 */
-  public readonly media: HTMLCanvasElement;
+  public media: HTMLCanvasElement;
   private subtitleOverlay: HTMLElement;
   private subtitleText: HTMLElement;
+  private statusText: HTMLElement;
   private controlsBar: HTMLElement;
   private playBtn: HTMLButtonElement;
   private playIcon: HTMLElement;
@@ -43,6 +44,8 @@ export class VideoPlayer {
   private pipVideo: HTMLVideoElement | null = null;
   private volume = 1;
   private muted = false;
+  /** 差し替えた canvas にも掛け直すため、ハンドラを持っておく。 */
+  private togglePlay: () => void = () => {};
 
   constructor(options: VideoPlayerOptions = {}) {
     this.element = document.createElement('div');
@@ -50,11 +53,7 @@ export class VideoPlayer {
     this.element.tabIndex = 0;
 
     // 1. 映像の描画先
-    this.media = document.createElement('canvas');
-    this.media.className = 'video-player-media';
-    // 実際の寸法は sequence が分かった時点で描画側が設定する。
-    this.media.width = 1280;
-    this.media.height = 720;
+    this.media = this.createMedia();
 
     // 2. 字幕オーバーレイレイヤー (ARIB STD-B24 風スタイル)
     this.subtitleOverlay = document.createElement('div');
@@ -63,7 +62,33 @@ export class VideoPlayer {
     this.subtitleText = document.createElement('div');
     this.subtitleText.className = 'video-subtitle-text';
     this.subtitleText.textContent = '';
+    // 中身が空でも枠と背景は描かれる。字幕の無い番組で下端に黒い帯だけが
+    // 残るので、文字が入っていないあいだは要素ごと出さない。
+    this.subtitleText.style.display = 'none';
     this.subtitleOverlay.append(this.subtitleText);
+
+    // 2b. 受信の状況とエラーの表示先。
+    // **字幕の枠には混ぜない。**放送から来た字幕とアプリのメッセージが
+    // 見分けられなくなる。実際、選局の失敗が字幕として大きく出ていた。
+    this.statusText = document.createElement('div');
+    this.statusText.className = 'video-player-status';
+    this.statusText.style.cssText = [
+      'position:absolute',
+      'left:50%',
+      'top:50%',
+      'transform:translate(-50%, -50%)',
+      'max-width:80%',
+      'padding:6px 12px',
+      'border-radius:4px',
+      'background-color:rgba(0, 0, 0, 0.6)',
+      'color:#fff',
+      'font-size:0.8125rem',
+      'line-height:1.5',
+      'text-align:center',
+      'pointer-events:none',
+      'z-index:11',
+      'display:none',
+    ].join(';');
 
     // 3. コントロールバー
     this.controlsBar = document.createElement('div');
@@ -157,7 +182,7 @@ export class VideoPlayer {
     this.controlsBar.append(leftGroup, rightGroup);
 
     // プレイヤーコンテナに組み立て
-    this.element.append(this.media, this.subtitleOverlay, this.controlsBar);
+    this.element.append(this.media, this.subtitleOverlay, this.statusText, this.controlsBar);
 
     // イベントバインド
     this.bindEvents(options);
@@ -174,8 +199,8 @@ export class VideoPlayer {
       options.onPlayPause?.(this.isPlaying);
     };
 
+    this.togglePlay = togglePlay;
     this.playBtn.addEventListener('click', togglePlay);
-    this.media.addEventListener('click', togglePlay);
 
     // 音量 & ミュート
     this.volumeBtn.addEventListener('click', () => {
@@ -293,6 +318,38 @@ export class VideoPlayer {
     });
   }
 
+  private createMedia(): HTMLCanvasElement {
+    const canvas = document.createElement('canvas');
+    canvas.className = 'video-player-media';
+    // 実際の寸法は sequence が分かった時点で描画側が設定する。
+    canvas.width = 1280;
+    canvas.height = 720;
+    canvas.addEventListener('click', () => { this.togglePlay(); });
+    return canvas;
+  }
+
+  /**
+   * 描画先を作り直し、Worker へ渡す OffscreenCanvas を返す。
+   *
+   * `transferControlToOffscreen()` は**同じ canvas に二度掛けられない**。
+   * 一時停止から再生へ戻すときに同じ要素へ掛け直すと例外になり、再生へ
+   * 復帰できなかった。要素そのものを取り替える。
+   */
+  public takeOffscreen(): OffscreenCanvas {
+    const next = this.createMedia();
+    this.media.replaceWith(next);
+    this.media = next;
+    // PiP 中なら、流しているストリームも新しい canvas のものへ繋ぎ直す。
+    if (this.pipVideo !== null) this.pipVideo.srcObject = next.captureStream();
+    return next.transferControlToOffscreen();
+  }
+
+  /** 受信の状況とエラーを出す。空文字で消える。 */
+  public setStatusText(text: string): void {
+    this.statusText.textContent = text;
+    this.statusText.style.display = text === '' ? 'none' : '';
+  }
+
   public setSubtitlesEnabled(enabled: boolean): void {
     this.isSubtitlesEnabled = enabled;
     this.subtitleOverlay.style.display = enabled ? 'flex' : 'none';
@@ -307,6 +364,7 @@ export class VideoPlayer {
   /** 放送から取り出した字幕文字列を表示する。空文字で消える。 */
   public setSubtitleText(text: string): void {
     this.subtitleText.textContent = text;
+    this.subtitleText.style.display = text === '' ? 'none' : '';
   }
 
   /** 映像の実寸が分かった時点で表示比を合わせる。 */
