@@ -52,6 +52,7 @@ extern "C" void webts_winscard_unbind(void);
 #include <cstring>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <pthread.h>
 #include <thread>
 #include <vector>
@@ -251,6 +252,139 @@ void publish_program_info(Job& job, ARIB_STD_B25* b25) noexcept {
     job.undecrypted_packets.store(undecrypted);
 }
 
+// ---- セッション ----
+//
+// **デバイスを開いた状態そのものを、仕事より長く生かす。**
+//
+// 以前はこれらがすべて worker_main のスタックにあり、1つの仕事が終わると
+// デバイスごと畳まれていた。受信機は8本（地上波4・衛星4）あるのに同時に
+// 動かせるのが1本だけだったのはこれが理由で、ハードウェアにも上流にも
+// 制約は無い。上流の `Q3U4StreamDataPlane` は受信機ごとの attachment を取り、
+// ブリッジごとに pump スレッドを持ち、ロック順序まで定めてある。
+//
+// セッションはヒープに置き、複数の仕事が参照する。数えている仕事が 0 になり、
+// かつ閉じる要求が出ていれば畳む。
+//
+// **作るのも畳むのも pthread の上で行う。**どちらも USB に触れる。
+
+struct Session final {
+    BlockingDelay delay;
+    bool allow_15v = false;
+
+    std::unique_ptr<Q3U4Runtime> runtime;
+    std::optional<It930xController> dev1;
+    std::optional<It930xController> dev2;
+    std::optional<It930xBackendPower> dev1_power;
+    std::optional<It930xBackendPower> dev2_power;
+    std::optional<It930xBridgeI2cMaster> bridge1;
+    std::optional<It930xBridgeI2cMaster> bridge2;
+    std::optional<Q3U4FrontendEnclosure> enclosure;
+    std::optional<It930xLnbPower> lnb1;
+    std::optional<It930xLnbPower> lnb2;
+    std::optional<Q3U4LnbPowerCoordinator> lnb;
+    std::unique_ptr<Q3U4StreamDataPlane> plane;
+
+    // カード経路。復号する仕事だけが使う。カードは1枚なので使えるのも1つ。
+    std::optional<Q3U4CardBackend> card_backend;
+    std::optional<It930xCardHardware> hardware;
+    SystemCardTime card_time;
+    std::optional<CardSession> card;
+    std::optional<NativeCardProtocolSession> protocol;
+    std::optional<CardService> service;
+
+    /** いま走っている仕事の数。0 のときだけ畳める。 */
+    std::atomic<int> tasks{0};
+    /** attach のたびに新しくする。使い回すと上流が BUSY を返す。 */
+    std::atomic<unsigned long long> next_attachment{1U};
+};
+
+std::mutex g_session_mutex;
+Session* g_session = nullptr;
+std::atomic<bool> g_session_close_requested{true};
+
+/**
+ * セッションを用意し、仕事を1つ数える。既にあれば数えるだけ。
+ * stage には進み具合を書く。呼び出し側の仕事が JS へ見せる。
+ */
+Error acquire_session(const std::vector<std::uint8_t>& firmware, bool allow_15v,
+                      std::atomic<int>& stage, Session** out) noexcept {
+    std::lock_guard<std::mutex> guard(g_session_mutex);
+    if (g_session != nullptr) {
+        g_session->tasks.fetch_add(1);
+        *out = g_session;
+        return Error::OK;
+    }
+
+    stage.store(kStageImage);
+    const Result<FirmwareImage> image = stage_image(firmware);
+    if (!image) return image.error();
+
+    auto session = std::unique_ptr<Session>(new (std::nothrow) Session());
+    if (!session) return Error::INTERNAL;
+    session->allow_15v = allow_15v;
+
+    stage.store(kStageOpen);
+    Result<std::unique_ptr<Q3U4Runtime>> runtime = Q3U4Runtime::open_native();
+    if (!runtime) return runtime.error();
+    session->runtime = std::move(runtime.value());
+
+    session->dev1.emplace(session->runtime->dev1(),
+                          CommandPacingOptions{CommandPacingMode::no_delay});
+    session->dev2.emplace(session->runtime->dev2(),
+                          CommandPacingOptions{CommandPacingMode::no_delay});
+    session->dev1_power.emplace(*session->dev1);
+    session->dev2_power.emplace(*session->dev2);
+    session->bridge1.emplace(*session->dev1);
+    session->bridge2.emplace(*session->dev2);
+    session->enclosure.emplace(*session->bridge1, *session->bridge2,
+                               *session->dev1_power, *session->dev2_power, session->delay);
+    // LNB は GPIO 11 を握る唯一の権限で、ブリッジ上の2受信機を参照計数する。
+    // 地上波でも作っておく。作るだけでは給電しない。
+    session->lnb1.emplace(*session->dev1);
+    session->lnb2.emplace(*session->dev2);
+    session->lnb.emplace(*session->lnb1, *session->lnb2, allow_15v);
+
+    stage.store(kStageInit);
+    const auto init1 = session->dev1->initialize_q3u4(image.value());
+    if (!init1) return init1.error();
+    const auto init2 = session->dev2->initialize_q3u4(image.value());
+    if (!init2) return init2.error();
+
+    // **データプレーンはセッションが持つ。**受信機ごとの attachment を束ねる
+    // 側なので、仕事ごとに作り直すと同時に使えない。
+    stage.store(kStageDataPlane);
+    Result<std::unique_ptr<Q3U4StreamDataPlane>> plane =
+        Q3U4StreamDataPlane::create(session->runtime->dev1(), session->runtime->dev2());
+    if (!plane) return plane.error();
+    session->plane = std::move(plane.value());
+
+    g_session = session.release();
+    // **数えるのは鍵の中で。**増える前に畳む判定が走ると、使っている最中の
+    // セッションが消える。
+    g_session->tasks.fetch_add(1);
+    *out = g_session;
+    return Error::OK;
+}
+
+/** 仕事を1つ終える。最後の1つで、かつ閉じる要求が出ていれば畳む。 */
+void release_session(Session* session) noexcept {
+    if (session != nullptr) session->tasks.fetch_sub(1);
+    std::lock_guard<std::mutex> guard(g_session_mutex);
+    if (g_session == nullptr) return;
+    if (g_session->tasks.load() > 0) return;
+    if (!g_session_close_requested.load()) return;
+
+    if (g_session->plane) {
+        // 保留中の bulk 転送のキャンセルを伴う停止。
+        g_session->plane->shutdown();
+        g_session->plane.reset();
+    }
+    if (g_session->service.has_value()) g_session->service->shutdown();
+    if (g_session->lnb.has_value()) g_session->lnb->shutdown();
+    delete g_session;
+    g_session = nullptr;
+}
+
 void* worker_main(void* argument) noexcept {
     Job& job = *static_cast<Job*>(argument);
     const auto started = std::chrono::steady_clock::now();
@@ -265,49 +399,34 @@ void* worker_main(void* argument) noexcept {
         job.state.store(kFailed);
     };
 
-    job.stage.store(kStageImage);
-    const Result<FirmwareImage> image = stage_image(job.firmware);
-    if (!image) { fail(kStageImage, image.error()); return nullptr; }
+    Session* session_ptr = nullptr;
+    const Error acquired =
+        acquire_session(job.firmware, job.allow_15v, job.stage, &session_ptr);
+    if (acquired != Error::OK || session_ptr == nullptr) {
+        fail(static_cast<ProbeStage>(job.stage.load()), acquired);
+        release_session(nullptr);
+        return nullptr;
+    }
+    Session& session = *session_ptr;
+    Q3U4FrontendEnclosure& enclosure = *session.enclosure;
+    Q3U4LnbPowerCoordinator& lnb = *session.lnb;
 
-    job.stage.store(kStageOpen);
-    Result<std::unique_ptr<Q3U4Runtime>> runtime = Q3U4Runtime::open_native();
-    if (!runtime) { fail(kStageOpen, runtime.error()); return nullptr; }
-
-    BlockingDelay delay;
-    It930xController dev1(runtime.value()->dev1(),
-                          CommandPacingOptions{CommandPacingMode::no_delay});
-    It930xController dev2(runtime.value()->dev2(),
-                          CommandPacingOptions{CommandPacingMode::no_delay});
-    It930xBackendPower dev1_power(dev1);
-    It930xBackendPower dev2_power(dev2);
-    It930xBridgeI2cMaster bridge1(dev1);
-    It930xBridgeI2cMaster bridge2(dev2);
-    Q3U4FrontendEnclosure enclosure(bridge1, bridge2, dev1_power, dev2_power, delay);
-    // LNB は GPIO 11 を握る唯一の権限で、ブリッジ上の2受信機を参照計数する。
-    // 地上波でも作っておく。作るだけでは給電しない。
-    It930xLnbPower lnb1(dev1);
-    It930xLnbPower lnb2(dev2);
-    Q3U4LnbPowerCoordinator lnb(lnb1, lnb2, job.allow_15v);
-
-    job.stage.store(kStageInit);
-    const auto init1 = dev1.initialize_q3u4(image.value());
-    if (!init1) { fail(kStageInit, init1.error()); return nullptr; }
-    const auto init2 = dev2.initialize_q3u4(image.value());
-    if (!init2) { fail(kStageInit, init2.error()); return nullptr; }
-
-    Q3U4CardBackend card_backend(dev1, enclosure);
-    It930xCardHardware hardware(dev1);
-    SystemCardTime time;
-    CardSession card(hardware, time);
-    NativeCardProtocolSession protocol(card);
-    CardService service(card_backend, protocol);
+    // カードはセッションに1組だけ持つ。復号する仕事だけが使う。
+    if (!session.service.has_value()) {
+        session.card_backend.emplace(*session.dev1, enclosure);
+        session.hardware.emplace(*session.dev1);
+        session.card.emplace(*session.hardware, session.card_time);
+        session.protocol.emplace(*session.card);
+        session.service.emplace(*session.card_backend, *session.protocol);
+    }
 
     job.stage.store(kStageCard);
-    webts_winscard_bind(&service, 1U);
+    webts_winscard_bind(&*session.service, 1U);
     B_CAS_CARD* bcas = create_b_cas_card();
     if (bcas == nullptr) {
         webts_winscard_unbind();
         fail(kStageCard, Error::INTERNAL);
+        release_session(&session);
         return nullptr;
     }
     const int card_initialized = bcas->init(bcas);
@@ -315,8 +434,8 @@ void* worker_main(void* argument) noexcept {
         job.b25_error.store(card_initialized);
         bcas->release(bcas);
         webts_winscard_unbind();
-        service.shutdown();
         fail(kStageCard, Error::PROTOCOL_ERROR);
+        release_session(&session);
         return nullptr;
     }
 
@@ -325,8 +444,8 @@ void* worker_main(void* argument) noexcept {
     if (b25 == nullptr) {
         bcas->release(bcas);
         webts_winscard_unbind();
-        service.shutdown();
         fail(kStageB25, Error::INTERNAL);
+        release_session(&session);
         return nullptr;
     }
     // EMM 処理は行わない。受信のみの用途では不要で、カードへの書き込みを
@@ -339,8 +458,8 @@ void* worker_main(void* argument) noexcept {
         b25->release(b25);
         bcas->release(bcas);
         webts_winscard_unbind();
-        service.shutdown();
         fail(kStageB25, Error::INTERNAL);
+        release_session(&session);
         return nullptr;
     }
 
@@ -350,15 +469,17 @@ void* worker_main(void* argument) noexcept {
     Error result = Error::OK;
     bool frontend_open = false;
     bool capture_started = false;
-    std::unique_ptr<Q3U4StreamDataPlane> plane;
     TunerAttachment attachment{};
     bool attached = false;
 
     const auto finish = [&]() {
         job.stage.store(kStageCleanup);
-        if (plane && attached) {
-            const auto detached = plane->detach(attachment);
+        // **データプレーンは畳まない。**セッションの持ち物で、ほかの受信機が
+        // 使っている。外すのは自分の attachment だけ。
+        if (attached) {
+            const auto detached = session.plane->detach(attachment);
             if (!detached && result == Error::OK) result = detached.error();
+            session.plane->release_final(attachment);
         }
         if (capture_started) {
             const auto stopped = job.wave == kWaveSatellite
@@ -366,30 +487,19 @@ void* worker_main(void* argument) noexcept {
                 : enclosure.stop_terrestrial_capture(receiver);
             if (!stopped && result == Error::OK) result = stopped.error();
         }
-        if (plane) {
-            // 保留中の bulk 転送のキャンセルを伴う停止。
-            const auto shutdown = plane->shutdown();
-            if (!shutdown && result == Error::OK) result = shutdown.error();
-            plane.reset();
-        }
         if (frontend_open) {
             const auto closed = enclosure.close_receiver(receiver);
             if (!closed && result == Error::OK) result = closed.error();
         }
         b25->release(b25);
         bcas->release(bcas);
-        if (job.wave == kWaveSatellite) {
-            lnb.release_receiver(receiver);
-            const auto lnb_off = lnb.shutdown();
-            if (!lnb_off && result == Error::OK) result = lnb_off.error();
-        }
+        if (job.wave == kWaveSatellite) lnb.release_receiver(receiver);
         webts_winscard_unbind();
-        const auto card_down = service.shutdown();
-        if (!card_down && result == Error::OK) result = card_down.error();
         job.error.store(static_cast<int>(result));
         job.elapsed_ms.store(elapsed());
         job.stage.store(kStageDone);
         job.state.store(result == Error::OK ? kFinished : kFailed);
+        release_session(&session);
     };
 
     const bool satellite = job.wave == kWaveSatellite;
@@ -430,18 +540,12 @@ void* worker_main(void* argument) noexcept {
     job.stage.store(kStageLock);
     lock_context.started = std::chrono::steady_clock::now();
     const ProbeLockPollResult lock =
-        poll_frontend_probe_lock(demod_lock, &lock_context, delay);
+        poll_frontend_probe_lock(demod_lock, &lock_context, session.delay);
     if (!lock.locked) { result = lock.error; finish(); return nullptr; }
-
-    job.stage.store(kStageDataPlane);
-    Result<std::unique_ptr<Q3U4StreamDataPlane>> created =
-        Q3U4StreamDataPlane::create(runtime.value()->dev1(), runtime.value()->dev2());
-    if (!created) { result = created.error(); finish(); return nullptr; }
-    plane = std::move(created.value());
 
     attachment.owner_client_id = 1U;
     attachment.lease_id = 1U;
-    attachment.attachment_id = 1U;
+    attachment.attachment_id = session.next_attachment.fetch_add(1U);
     attachment.receiver = receiver;
     attachment.system = satellite ? ipc::System::ISDB_S : ipc::System::ISDB_T;
 
@@ -450,7 +554,7 @@ void* worker_main(void* argument) noexcept {
                                    : enclosure.start_terrestrial_capture(receiver);
     if (!capture) { result = capture.error(); finish(); return nullptr; }
     capture_started = true;
-    const auto attach = plane->attach(attachment);
+    const auto attach = session.plane->attach(attachment);
     if (!attach) { result = attach.error(); finish(); return nullptr; }
     attached = true;
 
@@ -465,7 +569,7 @@ void* worker_main(void* argument) noexcept {
     const auto deadline = reading_started + std::chrono::milliseconds(job.duration_ms);
     while (!job.stop_requested.load()
            && (!bounded || std::chrono::steady_clock::now() < deadline)) {
-        const auto read = plane->read(
+        const auto read = session.plane->read(
             attachment, MutableByteView{buffer.data(), buffer.size()}, Timeout{500U});
         if (!read) { result = read.error(); break; }
         const TunerStreamReadResult& chunk = read.value();
