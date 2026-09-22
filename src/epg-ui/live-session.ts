@@ -19,16 +19,12 @@ import { AudioPlayer } from '../video/audio';
 import type { PlayerMessage, PlayerRequest } from '../video/player-worker';
 import { readCachedFirmware } from '../usb/firmware';
 import { CaptionText } from './caption-text';
+import type { Tuning } from './tuning';
 
 const MODULE_URL = '/build/q3u4-descramble/q3u4-descramble.mjs';
 const POLL_WORDS = 17;
 /** 1回の drain で取り出す上限。live は 2 MB/s 程度なので十分余る。 */
 const DRAIN_BYTES = 1024 * 1024;
-
-// 地上デジタルの物理チャンネル: ch13 = 473143 kHz、以降 6 MHz 間隔。
-const CHANNEL_BASE_KHZ = 473_143;
-const CHANNEL_STEP_KHZ = 6_000;
-const MIN_PHYSICAL_CHANNEL = 13;
 
 /** 上流の global 受信機番号。地上波は 2, 3（dev1）と 6, 7（dev2）。 */
 const TERRESTRIAL_RECEIVERS = [2, 3, 6, 7] as const;
@@ -38,10 +34,6 @@ const STAGE_LABEL = [
   '受信機を開く', '選局', 'ロック待ち', 'データプレーン', '接続', '受信中',
   '後始末', '後始末', '完了',
 ];
-
-export function frequencyKhzForPhysicalChannel(channel: number): number {
-  return CHANNEL_BASE_KHZ + (channel - MIN_PHYSICAL_CHANNEL) * CHANNEL_STEP_KHZ;
-}
 
 export interface LiveStats {
   readonly frames: number;
@@ -59,8 +51,8 @@ export interface LiveStats {
 export interface LiveSessionOptions {
   /** 描画先。制御は Worker へ移るので、呼び出し側でこの canvas へ描かないこと。 */
   readonly canvas: OffscreenCanvas;
-  /** 地上デジタルの物理チャンネル番号。 */
-  readonly physicalChannel: number;
+  /** どこへ合わせるか。地上波は周波数だけ、衛星は TSID も要る。 */
+  readonly tuning: Tuning;
   /** 見たいサービス。多重化されたチャンネルから1つ選ぶ。 */
   readonly serviceId?: number | undefined;
   readonly onStatus?: ((text: string) => void) | undefined;
@@ -239,12 +231,20 @@ export class LiveSession {
       : { kind: 'init', canvas: options.canvas, programNumber: options.serviceId };
     this.#worker.postMessage(init, [options.canvas]);
 
+    // 衛星は周波数のほかに TSID の指定が要る。C 側がまだ受け取らないので、
+    // 周波数だけで合わせに行かない。中継器には複数の TS が載っており、
+    // どれが出るか決まらない。
+    if (options.tuning.wave !== 'GR') {
+      this.stop();
+      options.onEnded?.(`${options.tuning.wave} の視聴はまだ実装されていません。`);
+      return;
+    }
     options.onStatus?.('選局しています…');
     // duration 0 は「止めるまで」、collect 2 は「溜めては渡す」。
     const started = this.#module.ccall('webts_q3u4_descramble_start', 'number',
       ['number', 'number', 'number', 'number', 'number', 'number'],
       [this.#firmwarePointer, firmwareLength, TERRESTRIAL_RECEIVERS[0],
-        frequencyKhzForPhysicalChannel(options.physicalChannel), 0, 2]) as number;
+        options.tuning.frequencyKhz, 0, 2]) as number;
     if (started !== 0) {
       const name = String(this.#module.ccall(
         'webts_q3u4_descramble_error_name', 'string', ['number'], [started]));

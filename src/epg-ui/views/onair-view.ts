@@ -2,6 +2,7 @@
 
 import type { BroadcastType, OnAirScheduleItem } from '../types';
 import { loadSchedules } from '../channel-source';
+import { isRefreshing, maybeAutoRefresh, stopRefresh } from '../epg-refresh';
 import type { ProgramDialog } from '../components/program-dialog';
 import type { StreamDialog } from '../components/stream-dialog';
 
@@ -41,9 +42,21 @@ export class OnAirView {
     // 初期データ読み込み
     this.loadData();
 
+    // 受信の状況を出す場所。番組情報を取り直しているあいだ受信機が塞がるので、
+    // 黙って握らない。空のときは何も出さない。
+    this.statusLine = document.createElement('div');
+    this.statusLine.style.cssText = [
+      'padding:4px 2px 8px',
+      'font-size:0.8125rem',
+      'color:var(--text-secondary)',
+      'display:none',
+    ].join(';');
+    this.element.insertBefore(this.statusLine, this.gridContainer);
+
     // 消化率（プログレスバー）の定期更新タイマー (1秒毎)
     this.digestTimer = window.setInterval(() => {
       this.updateDigestibility();
+      this.keepCurrent();
     }, 1000);
 
     // チャンネル設定変更イベントの購読
@@ -54,6 +67,10 @@ export class OnAirView {
   }
 
   private onChannelsChanged: () => void;
+  private statusLine!: HTMLElement;
+  /** 自動更新の判定をした時刻。毎秒やる必要は無い。 */
+  private lastAutoCheck = 0;
+  private reloading = false;
 
   private renderTabs(): void {
     this.tabsContainer.replaceChildren();
@@ -88,8 +105,15 @@ export class OnAirView {
 
   /** 保存済みのスキャン結果を読み直す。まだスキャンしていなければ空になる。 */
   private async reload(): Promise<void> {
-    this.schedules = await loadSchedules();
-    this.renderCards();
+    // 毎秒の点検から呼ばれる。読み終わるまでに何度も入ると積み上がる。
+    if (this.reloading) return;
+    this.reloading = true;
+    try {
+      this.schedules = await loadSchedules();
+      this.renderCards();
+    } finally {
+      this.reloading = false;
+    }
   }
 
   private renderCards(): void {
@@ -187,6 +211,51 @@ export class OnAirView {
     }
   }
 
+  /**
+   * 表示を「いま」に合わせ続ける。
+   *
+   * EIT[p/f] は現在と次の2つを持っているので、現在の番組が終わったら
+   * **選局し直さずに**次へ繰り上がる。読み直すだけで追随できる。
+   * その先まで尽きたときだけ、受信機を使って取り直す。
+   */
+  private keepCurrent(): void {
+    const now = Date.now();
+    const passed = this.schedules.some((item) => {
+      const current = item.currentProgram;
+      if (current !== null) {
+        // 終了時刻が未定のものは繰り上げの判断に使えない。
+        return current.endAt > current.startAt && current.endAt <= now;
+      }
+      return item.nextProgram !== null && item.nextProgram.startAt <= now;
+    });
+    if (passed) {
+      void this.reload();
+      return;
+    }
+
+    // 判定は 30 秒に1回で足りる。
+    if (now - this.lastAutoCheck < 30_000) return;
+    this.lastAutoCheck = now;
+
+    // 「いま何をやっているか分からない局」が残っているあいだだけ取りに行く。
+    const exhausted = this.schedules.some((item) => item.currentProgram === null);
+    if (!exhausted || isRefreshing()) return;
+
+    void maybeAutoRefresh((progress) => {
+      this.showStatus(`番組情報を取得しています… ${progress.label}`
+        + ` (${progress.index + 1}/${progress.total})`);
+    }).then(async (result) => {
+      if (!result.ran) return;
+      this.showStatus(result.error === undefined ? '' : `番組情報の取得に失敗しました: ${result.error}`);
+      if (result.error === undefined) await this.reload();
+    });
+  }
+
+  private showStatus(text: string): void {
+    this.statusLine.textContent = text;
+    this.statusLine.style.display = text === '' ? 'none' : '';
+  }
+
   private updateDigestibility(): void {
     const now = Date.now();
     for (const item of this.schedules) {
@@ -207,6 +276,8 @@ export class OnAirView {
   }
 
   public destroy(): void {
+    // 受信機を掴んだまま画面を離れない。視聴へ移るときはここで明け渡す。
+    stopRefresh();
     if (this.digestTimer !== null) {
       clearInterval(this.digestTimer);
       this.digestTimer = null;

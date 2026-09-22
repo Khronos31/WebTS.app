@@ -56,6 +56,36 @@ export async function saveChannels(
   await transact(META, 'readwrite', (store) => store.put(Date.now(), 'scannedAt'));
 }
 
+/**
+ * 番組情報だけを入れ直す。
+ *
+ * **局の一覧には触らない。**番組情報の更新で局が消えたり、利用者が外した
+ * 局のチェックが戻ったりしないようにする。
+ */
+export async function savePrograms(programs: readonly ProgramItem[]): Promise<void> {
+  await transact(PROGRAMS, 'readwrite', (store) => store.put([...programs], 'list'));
+}
+
+/**
+ * 届いたぶんだけを入れ替える。id が同じものは新しいほうで置き換え、
+ * 触れなかった局の番組はそのまま残す。
+ *
+ * 視聴中の更新は**選局しているチャンネルの番組しか届かない**ので、
+ * 丸ごと書き換えると他局の番組が消える。
+ */
+export async function mergePrograms(programs: readonly ProgramItem[]): Promise<ProgramItem[]> {
+  const existing = await readPrograms();
+  const merged = new Map(existing.map((program) => [program.id, program]));
+  for (const program of programs) merged.set(program.id, program);
+  // 終わった番組をいつまでも抱えない。更新のたびに積むと際限なく増える。
+  // 終了時刻が未定 (endAt === startAt) のものは残す。特番で実際に起きる。
+  const stale = Date.now() - 6 * 60 * 60 * 1000;
+  const list = [...merged.values()].filter(
+    (program) => program.endAt === program.startAt || program.endAt > stale);
+  await savePrograms(list);
+  return list;
+}
+
 export async function readPrograms(): Promise<ProgramItem[]> {
   try {
     const programs = await transact<ProgramItem[] | undefined>(

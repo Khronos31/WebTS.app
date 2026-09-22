@@ -5,6 +5,7 @@ import type { ChannelItem, ProgramItem } from '../types';
 import { channelsSync, findChannelSync, programsSync } from '../channel-source';
 import { VideoPlayer } from '../components/video-player';
 import { LiveSession, type LiveStats } from '../live-session';
+import { tuningForChannel } from '../tuning';
 
 export interface WatchViewOptions {
   channelId: number;
@@ -218,16 +219,16 @@ export class WatchView {
    */
   private async startLive(): Promise<void> {
     this.stopLive();
-    const physical = Number(this.channel.channel);
-    if (!Number.isFinite(physical)) {
-      this.showStatus('このチャンネルの物理チャンネルが分かりません。');
+    const tuning = tuningForChannel(this.channel);
+    if (tuning === null) {
+      this.showStatus('このチャンネルの選局先が分かりません。スキャンし直してください。');
       return;
     }
     try {
       const canvas = this.player.takeOffscreen();
       this.session = await LiveSession.start({
         canvas,
-        physicalChannel: physical,
+        tuning,
         serviceId: this.channel.serviceId,
         onStatus: (text) => { this.showStatus(text); },
         onStats: (stats) => { this.showStats(stats); },

@@ -17,6 +17,7 @@ import {
 import { readSetupState } from '../../ui/setup-state';
 import { ChannelScan } from '../channel-scan';
 import { saveChannels } from '../channel-store';
+import { knownTunings, refreshPrograms } from '../epg-refresh';
 import { loadQ3U4Identifiers } from '../../usb/px4-identity';
 import { getTheme, setTheme, type ThemeMode } from '../theme-manager';
 
@@ -289,6 +290,13 @@ export class SettingsView {
           </svg>
           スキャン開始
         </button>
+
+        <button type="button" class="btn btn-secondary" id="refresh-epg-btn">
+          <svg viewBox="0 0 24 24" style="width:18px;height:18px;fill:currentColor">
+            <path d="M17.65 6.35C16.2 4.9 14.21 4 12 4c-4.42 0-7.99 3.58-8 8s3.58 8 8 8c3.73 0 6.84-2.55 7.73-6h-2.08c-.82 2.33-3.04 4-5.65 4-3.31 0-6-2.69-6-6s2.69-6 6-6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z"/>
+          </svg>
+          番組情報を更新
+        </button>
       </div>
 
       <div class="scan-progress-box" id="scan-box" style="display: none; margin-bottom: 20px;">
@@ -338,6 +346,7 @@ export class SettingsView {
     `;
 
     const startBtn = card.querySelector<HTMLButtonElement>('#start-scan-btn')!;
+    const refreshBtn = card.querySelector<HTMLButtonElement>('#refresh-epg-btn')!;
     const scanBox = card.querySelector<HTMLElement>('#scan-box')!;
     const scanChannelText = card.querySelector<HTMLElement>('#scan-current-channel')!;
     const scanPctText = card.querySelector<HTMLElement>('#scan-progress-pct')!;
@@ -417,20 +426,21 @@ export class SettingsView {
       updateStatusBadge();
     });
 
+    const appendLog = (msg: string) => {
+      const line = document.createElement('div');
+      line.textContent = msg;
+      scanLog.append(line);
+      scanLog.scrollTop = scanLog.scrollHeight;
+    };
+
     // フルスキャン開始
     startBtn.addEventListener('click', () => {
       if (this.isScanning) return;
       this.isScanning = true;
       startBtn.disabled = true;
+      refreshBtn.disabled = true;
       scanBox.style.display = 'block';
       scanLog.innerHTML = '';
-
-      const appendLog = (msg: string) => {
-        const line = document.createElement('div');
-        line.textContent = msg;
-        scanLog.append(line);
-        scanLog.scrollTop = scanLog.scrollHeight;
-      };
 
       appendLog('[FULL-SCAN] 地上デジタル全帯域フルスキャン (13ch〜52ch) を開始します...');
 
@@ -446,12 +456,12 @@ export class SettingsView {
           scanBar.style.width = `${pct}%`;
           scanPctText.textContent = `${pct}%`;
           scanChannelText.textContent =
-            `物理チャンネル ch${progress.channel} を同期・搬送波ロック中...`;
+            `物理チャンネル ch${progress.label} を同期・搬送波ロック中...`;
           const gained = progress.found - previousFound;
           previousFound = progress.found;
           appendLog(progress.locked === true
-            ? `✔ ch${progress.channel} ロック成功 検出: ${gained} サービス`
-            : `- ch${progress.channel}: 信号なし`);
+            ? `✔ ch${progress.label} ロック成功 検出: ${gained} サービス`
+            : `- ch${progress.label}: 信号なし`);
         },
       }).then(async (result) => {
         await saveChannels(result.channels, result.programs);
@@ -471,6 +481,52 @@ export class SettingsView {
         this.isScanning = false;
         this.scan = null;
         startBtn.disabled = false;
+        refreshBtn.disabled = false;
+      });
+    });
+
+    // 番組情報だけを取り直す。
+    //
+    // **全帯域を舐め直す必要は無い。**既に分かっている物理チャンネルだけを
+    // 回れば EIT[p/f] は取れる。関東なら 50 波ではなく 10 波前後で済む。
+    // 局の一覧と有効/無効の選択には触らない（番組の更新で局が消えたり、
+    // 外したチェックが戻ったりしないようにする）。
+    refreshBtn.addEventListener('click', () => {
+      if (this.isScanning) return;
+      const physical = knownTunings();
+
+      scanBox.style.display = 'block';
+      scanLog.innerHTML = '';
+      if (physical.length === 0) {
+        appendLog('[EPG] 局が登録されていません。先にスキャンを実行してください。');
+        return;
+      }
+
+      this.isScanning = true;
+      startBtn.disabled = true;
+      refreshBtn.disabled = true;
+      appendLog(`[EPG] 既知の ${physical.length} 波から番組情報を取り直します...`);
+
+      void refreshPrograms((progress) => {
+        const pct = Math.round(((progress.index + 1) / progress.total) * 100);
+        scanBar.style.width = `${pct}%`;
+        scanPctText.textContent = `${pct}%`;
+        scanChannelText.textContent = `物理チャンネル ch${progress.label} の番組情報を取得中...`;
+        appendLog(progress.locked === true
+          ? `✔ ch${progress.label} 取得`
+          : `- ch${progress.label}: 信号なし`);
+      }).then((programs) => {
+        scanBar.style.width = '100%';
+        scanPctText.textContent = '100%';
+        scanChannelText.textContent = '番組情報の更新完了！';
+        appendLog(`[EPG] ${programs} 件の番組情報を保存しました。`);
+        this.onStateChanged();
+      }).catch((error: unknown) => {
+        appendLog(`[EPG] 失敗: ${error instanceof Error ? error.message : String(error)}`);
+      }).finally(() => {
+        this.isScanning = false;
+        startBtn.disabled = false;
+        refreshBtn.disabled = false;
       });
     });
 
