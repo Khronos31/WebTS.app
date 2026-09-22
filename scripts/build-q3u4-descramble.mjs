@@ -34,6 +34,9 @@ const upstreamSources = [
   'libusb_transport.cpp', 'it930x.cpp', 'it930x_protocol.cpp', 'bridge_i2c.cpp',
   'identity.cpp', 'firmware.cpp', 'error.cpp', 'logging.cpp',
   'q3u4_frontend.cpp', 'q3u4_power.cpp', 'frontend_probe_support.cpp',
+  // Satellite tuning needs the LNB authority: it is the only thing allowed to
+  // drive GPIO 11, and it reference-counts the two receivers on a bridge.
+  'q3u4_lnb_power.cpp',
   'tc90522.cpp', 'r850.cpp', 'rt710.cpp',
   'card.cpp', 'card_service.cpp', 'q3u4_card_backend.cpp', 'ipc.cpp',
   'q3u4_stream.cpp', 'tagged_ts_demux.cpp',

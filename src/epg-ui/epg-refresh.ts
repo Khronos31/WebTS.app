@@ -14,6 +14,7 @@ import { mergePrograms } from './channel-store';
 import { channelsSync, primeChannels } from './channel-source';
 import { tuningForChannel, tuningKey, type Tuning } from './tuning';
 import { LiveSession } from './live-session';
+import { allowLnb15v } from './lnb-setting';
 
 /** 自動更新の間隔の下限。失敗しても次の試行まではこれだけ空ける。 */
 const COOLDOWN_MS = 10 * 60 * 1000;
@@ -54,7 +55,9 @@ export async function refreshPrograms(
   lastAttempt = Date.now();
   try {
     const result = await scan.run(
-      onProgress === undefined ? { tunings } : { tunings, onProgress });
+      onProgress === undefined
+        ? { tunings, allowLnb15v: allowLnb15v() }
+        : { tunings, allowLnb15v: allowLnb15v(), onProgress });
     // **届いたぶんだけを入れ替える。**回らなかった局の番組を消さない。
     await mergePrograms(result.programs);
     await primeChannels();

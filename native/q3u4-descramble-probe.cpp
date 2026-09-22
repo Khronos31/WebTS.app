@@ -26,6 +26,7 @@
 #include "frontend_probe_support.h"
 #include "q3u4_card_backend.h"
 #include "q3u4_frontend.h"
+#include "q3u4_lnb_power.h"
 #include "px4/card.h"
 #include "px4/card_service.h"
 #include "px4/firmware.h"
@@ -64,6 +65,8 @@ constexpr std::size_t kReadBytes = Q3U4StreamDataPlane::kPacketSize * 1024U;
 
 enum ProbeState : int { kIdle = 0, kRunning = 1, kFinished = 2, kFailed = 3 };
 
+enum ProbeWave : int { kWaveTerrestrial = 0, kWaveSatellite = 1 };
+
 enum ProbeStage : int {
     kStageStart = 0,
     kStageImage = 1,
@@ -85,7 +88,16 @@ enum ProbeStage : int {
 struct Job final {
     std::vector<std::uint8_t> firmware;
     int receiver = 2;
+    /** 0 が地上波、1 が衛星。 */
+    int wave = 0;
     int frequency_khz = 0;
+    /**
+     * 衛星の TS 選択。中継器には複数の TS が載っており、これを指定しないと
+     * どれが出るか決まらない。地上波では使わない。
+     */
+    int tsid = 0;
+    /** LNB へ 15V を出してよいか。既定は出さない。 */
+    bool allow_15v = false;
     // 0 は「止めるまで」。
     int duration_ms = 5000;
     int collect = 0;
@@ -174,6 +186,7 @@ struct LockContext final {
     std::uint8_t receiver;
     std::chrono::steady_clock::time_point started;
     std::atomic<int>* elapsed_ms;
+    bool satellite = false;
 };
 
 Result<bool> demod_lock(void* context) noexcept {
@@ -183,7 +196,8 @@ Result<bool> demod_lock(void* context) noexcept {
             std::chrono::steady_clock::now() - lock->started).count());
     lock->elapsed_ms->store(waited);
     if (waited > kLockBudgetMs) return Result<bool>::failure(Error::TIMEOUT);
-    return lock->enclosure->is_terrestrial_locked(lock->receiver);
+    return lock->satellite ? lock->enclosure->is_satellite_locked(lock->receiver)
+                           : lock->enclosure->is_terrestrial_locked(lock->receiver);
 }
 
 Result<FirmwareImage> stage_image(const std::vector<std::uint8_t>& firmware) noexcept {
@@ -269,6 +283,11 @@ void* worker_main(void* argument) noexcept {
     It930xBridgeI2cMaster bridge1(dev1);
     It930xBridgeI2cMaster bridge2(dev2);
     Q3U4FrontendEnclosure enclosure(bridge1, bridge2, dev1_power, dev2_power, delay);
+    // LNB は GPIO 11 を握る唯一の権限で、ブリッジ上の2受信機を参照計数する。
+    // 地上波でも作っておく。作るだけでは給電しない。
+    It930xLnbPower lnb1(dev1);
+    It930xLnbPower lnb2(dev2);
+    Q3U4LnbPowerCoordinator lnb(lnb1, lnb2, job.allow_15v);
 
     job.stage.store(kStageInit);
     const auto init1 = dev1.initialize_q3u4(image.value());
@@ -342,7 +361,9 @@ void* worker_main(void* argument) noexcept {
             if (!detached && result == Error::OK) result = detached.error();
         }
         if (capture_started) {
-            const auto stopped = enclosure.stop_terrestrial_capture(receiver);
+            const auto stopped = job.wave == kWaveSatellite
+                ? enclosure.stop_satellite_capture(receiver)
+                : enclosure.stop_terrestrial_capture(receiver);
             if (!stopped && result == Error::OK) result = stopped.error();
         }
         if (plane) {
@@ -357,6 +378,11 @@ void* worker_main(void* argument) noexcept {
         }
         b25->release(b25);
         bcas->release(bcas);
+        if (job.wave == kWaveSatellite) {
+            lnb.release_receiver(receiver);
+            const auto lnb_off = lnb.shutdown();
+            if (!lnb_off && result == Error::OK) result = lnb_off.error();
+        }
         webts_winscard_unbind();
         const auto card_down = service.shutdown();
         if (!card_down && result == Error::OK) result = card_down.error();
@@ -366,15 +392,40 @@ void* worker_main(void* argument) noexcept {
         job.state.store(result == Error::OK ? kFinished : kFailed);
     };
 
+    const bool satellite = job.wave == kWaveSatellite;
+    lock_context.satellite = satellite;
+
     job.stage.store(kStageFrontendOpen);
-    const auto opened = enclosure.open_terrestrial(receiver);
+    const auto opened = satellite ? enclosure.open_satellite(receiver)
+                                  : enclosure.open_terrestrial(receiver);
     if (!opened) { result = opened.error(); finish(); return nullptr; }
     frontend_open = true;
 
     job.stage.store(kStageTune);
-    const auto tuned = enclosure.tune_terrestrial(
-        receiver, static_cast<std::uint32_t>(job.frequency_khz));
-    if (!tuned) { result = tuned.error(); finish(); return nullptr; }
+    if (satellite) {
+        // 給電は許可されたときだけ。別の機器が給電している線へ重ねない。
+        const auto begun = lnb.begin_tune(
+            receiver, static_cast<std::uint8_t>(job.allow_15v ? 15U : 0U));
+        if (!begun) { result = begun.error(); finish(); return nullptr; }
+    }
+    const auto tuned = satellite
+        ? enclosure.tune_satellite(receiver, static_cast<std::uint32_t>(job.frequency_khz))
+        : enclosure.tune_terrestrial(receiver, static_cast<std::uint32_t>(job.frequency_khz));
+    if (!tuned) {
+        if (satellite) lnb.rollback_tune(receiver);
+        result = tuned.error();
+        finish();
+        return nullptr;
+    }
+    if (satellite) {
+        lnb.commit_tune(receiver);
+        // **中継器の中から TS を選ぶ。**走査で控えた TSID をそのまま指定する。
+        // スロット番号ではなく TSID で指すのは、編成が変わるとスロットが
+        // 動くためである。
+        const auto selected = enclosure.select_satellite_tsid(
+            receiver, static_cast<std::uint16_t>(job.tsid));
+        if (!selected) { result = selected.error(); finish(); return nullptr; }
+    }
 
     job.stage.store(kStageLock);
     lock_context.started = std::chrono::steady_clock::now();
@@ -392,10 +443,11 @@ void* worker_main(void* argument) noexcept {
     attachment.lease_id = 1U;
     attachment.attachment_id = 1U;
     attachment.receiver = receiver;
-    attachment.system = ipc::System::ISDB_T;
+    attachment.system = satellite ? ipc::System::ISDB_S : ipc::System::ISDB_T;
 
     job.stage.store(kStageAttach);
-    const auto capture = enclosure.start_terrestrial_capture(receiver);
+    const auto capture = satellite ? enclosure.start_satellite_capture(receiver)
+                                   : enclosure.start_terrestrial_capture(receiver);
     if (!capture) { result = capture.error(); finish(); return nullptr; }
     capture_started = true;
     const auto attach = plane->attach(attachment);
@@ -466,13 +518,22 @@ extern "C" {
 /** 選局・受信・復号を pthread で行う。即座に戻る。この関数は USB に触れない。 */
 int webts_q3u4_descramble_start(const std::uint8_t* firmware, int firmware_size,
                                 int receiver, int frequency_khz, int duration_ms,
-                                int collect) {
+                                int collect, int wave, int tsid, int allow_15v) {
     if (g_job != nullptr && g_job->state.load() == kRunning) return static_cast<int>(Error::BUSY);
-    // 地上波の global 受信機は 2, 3（dev1）と 6, 7（dev2）。
+    if (wave != kWaveTerrestrial && wave != kWaveSatellite) {
+        return static_cast<int>(Error::INVALID_ARGUMENT);
+    }
+    // global 受信機は dev1 が 0..3、dev2 が 4..7。各ブリッジの下2つが
+    // ISDB-S、上2つが ISDB-T。
     const bool terrestrial = (receiver >= 2 && receiver < 4) || receiver >= 6;
+    const bool matches_wave = wave == kWaveSatellite ? !terrestrial : terrestrial;
     if (firmware == nullptr || firmware_size <= 0 || receiver < 0 || receiver > 7 ||
-        !terrestrial || frequency_khz < 0 || duration_ms < 0 || duration_ms > 14400000 ||
+        !matches_wave || frequency_khz < 0 || duration_ms < 0 || duration_ms > 14400000 ||
         collect < 0 || collect > 2) {
+        return static_cast<int>(Error::INVALID_ARGUMENT);
+    }
+    // 衛星は TSID を指定しないと、中継器のどの TS が出るか決まらない。
+    if (wave == kWaveSatellite && (tsid <= 0 || tsid > 0xFFFF)) {
         return static_cast<int>(Error::INVALID_ARGUMENT);
     }
     if (g_thread_started) { pthread_join(g_thread, nullptr); g_thread_started = false; }
@@ -480,6 +541,9 @@ int webts_q3u4_descramble_start(const std::uint8_t* firmware, int firmware_size,
     g_job = new Job();
     g_job->firmware.assign(firmware, firmware + firmware_size);
     g_job->receiver = receiver;
+    g_job->wave = wave;
+    g_job->tsid = tsid;
+    g_job->allow_15v = allow_15v != 0;
     g_job->frequency_khz = frequency_khz;
     g_job->duration_ms = duration_ms;
     g_job->collect = collect;

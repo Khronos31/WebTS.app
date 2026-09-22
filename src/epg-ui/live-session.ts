@@ -20,6 +20,7 @@ import type { PlayerMessage, PlayerRequest } from '../video/player-worker';
 import { readCachedFirmware } from '../usb/firmware';
 import { CaptionText } from './caption-text';
 import type { Tuning } from './tuning';
+import { allowLnb15v } from './lnb-setting';
 
 const MODULE_URL = '/build/q3u4-descramble/q3u4-descramble.mjs';
 const POLL_WORDS = 17;
@@ -28,6 +29,10 @@ const DRAIN_BYTES = 1024 * 1024;
 
 /** 上流の global 受信機番号。地上波は 2, 3（dev1）と 6, 7（dev2）。 */
 const TERRESTRIAL_RECEIVERS = [2, 3, 6, 7] as const;
+/** 衛星は各ブリッジの下2つ。0, 1（dev1）と 4, 5（dev2）。 */
+const SATELLITE_RECEIVERS = [0, 1, 4, 5] as const;
+const WAVE_TERRESTRIAL = 0;
+const WAVE_SATELLITE = 1;
 
 const STAGE_LABEL = [
   '開始', 'ファームウェア', 'デバイスを開く', '初期化', 'カード', 'B25',
@@ -231,20 +236,25 @@ export class LiveSession {
       : { kind: 'init', canvas: options.canvas, programNumber: options.serviceId };
     this.#worker.postMessage(init, [options.canvas]);
 
-    // 衛星は周波数のほかに TSID の指定が要る。C 側がまだ受け取らないので、
-    // 周波数だけで合わせに行かない。中継器には複数の TS が載っており、
-    // どれが出るか決まらない。
-    if (options.tuning.wave !== 'GR') {
+    // 衛星は TSID を指定しないと、中継器のどの TS が出るか決まらない。
+    // 走査で控えていない局は、周波数だけで合わせに行かない。
+    const satellite = options.tuning.wave !== 'GR';
+    if (satellite && (options.tuning.tsid === null || options.tuning.tsid <= 0)) {
       this.stop();
-      options.onEnded?.(`${options.tuning.wave} の視聴はまだ実装されていません。`);
+      options.onEnded?.('この局の TS 識別子が分かりません。スキャンし直してください。');
       return;
     }
     options.onStatus?.('選局しています…');
     // duration 0 は「止めるまで」、collect 2 は「溜めては渡す」。
     const started = this.#module.ccall('webts_q3u4_descramble_start', 'number',
-      ['number', 'number', 'number', 'number', 'number', 'number'],
-      [this.#firmwarePointer, firmwareLength, TERRESTRIAL_RECEIVERS[0],
-        options.tuning.frequencyKhz, 0, 2]) as number;
+      ['number', 'number', 'number', 'number', 'number', 'number',
+        'number', 'number', 'number'],
+      [this.#firmwarePointer, firmwareLength,
+        satellite ? SATELLITE_RECEIVERS[0] : TERRESTRIAL_RECEIVERS[0],
+        options.tuning.frequencyKhz, 0, 2,
+        satellite ? WAVE_SATELLITE : WAVE_TERRESTRIAL,
+        options.tuning.tsid ?? 0,
+        allowLnb15v() ? 1 : 0]) as number;
     if (started !== 0) {
       const name = String(this.#module.ccall(
         'webts_q3u4_descramble_error_name', 'string', ['number'], [started]));
