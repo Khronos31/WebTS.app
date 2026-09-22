@@ -20,9 +20,18 @@
 // （docs/FINDINGS.md 18章と同じ、メインスレッドのタイマーが絞られる問題）。
 //
 // 流した TS はここでは保存しない。JS へ渡したぶんは捨てる。
+//
+// **衛星は「周波数」だけでは TS が決まらない。**1つの中継器に複数の TS が
+// 載っており、TMCC の相対 TS 番号（スロット、0〜11）で1つを選ぶ。走査では
+// スロットを順に試し、`selected_tsid()` で当たった TS を JS に返す。JS は
+// その TSID を保存し、視聴のときはそれを指定して選び直す。
+//
+// JS は (周波数, スロット) の組を1件ずつ並べて渡す。組の並びで周波数が
+// 変わらないあいだは選局し直さない。中継器ごとの選局は1回で済む。
 
 #include "frontend_probe_support.h"
 #include "q3u4_frontend.h"
+#include "q3u4_lnb_power.h"
 #include "px4/firmware.h"
 #include "px4/it930x.h"
 #include "px4/libusb_transport.h"
@@ -46,7 +55,10 @@ using namespace px4::userland;
 
 constexpr const char* kScratchPath = "/tmp/webts-q3u4-scan-firmware.bin";
 constexpr std::size_t kReadBytes = Q3U4StreamDataPlane::kPacketSize * 1024U;
-constexpr int kMaxChannels = 64;
+// 地上波は 50 波だが、衛星は中継器 12 × スロット 12 で 144 件になる。
+constexpr int kMaxChannels = 256;
+/** TMCC の相対 TS 番号の上限。上流が 12 以上を弾く。 */
+constexpr int kMaxSlots = 12;
 /** 1チャンネルあたりの上限。これを過ぎたら諦めて次へ行く。 */
 constexpr int kChannelTimeoutMs = 8000;
 /** JS の応答を待つ上限。応答が来なくても走査は止めない。 */
@@ -55,6 +67,8 @@ constexpr int kAcknowledgeTimeoutMs = 30000;
 constexpr std::size_t kStreamLimit = 8U * 1024U * 1024U;
 
 enum ScanState : int { kIdle = 0, kRunning = 1, kFinished = 2, kFailed = 3 };
+
+enum ScanWave : int { kWaveTerrestrial = 0, kWaveSatellite = 1 };
 
 enum ScanStage : int {
     kStageStart = 0,
@@ -73,7 +87,12 @@ enum ScanStage : int {
 struct Job final {
     std::vector<std::uint8_t> firmware;
     int receiver = 2;
+    int wave = kWaveTerrestrial;
+    /** 設定の給電トグル。既定は false で、15V を出さない。 */
+    bool allow_15v = false;
     std::vector<int> frequencies_khz;
+    /** 衛星の相対 TS 番号。地上波は -1。 */
+    std::vector<int> slots;
 
     std::atomic<int> state{kIdle};
     std::atomic<int> stage{kStageStart};
@@ -89,6 +108,8 @@ struct Job final {
     std::atomic<int> waiting{0};
     /** 各チャンネルのロック結果。-1 未処理、0 ロックせず、1 ロック。 */
     std::atomic<int> locked[kMaxChannels];
+    /** 衛星で実際に掴んだ TSID。-1 は未取得。地上波では使わない。 */
+    std::atomic<int> tsid[kMaxChannels];
 
     std::mutex mutex;
     std::vector<std::uint8_t> output;
@@ -107,8 +128,15 @@ public:
     }
 };
 
+struct LockContext final {
+    Q3U4Frontend* frontend = nullptr;
+    bool satellite = false;
+};
+
 Result<bool> demod_lock(void* context) noexcept {
-    return static_cast<Q3U4Frontend*>(context)->is_terrestrial_locked();
+    auto* lock = static_cast<LockContext*>(context);
+    return lock->satellite ? lock->frontend->is_satellite_locked()
+                           : lock->frontend->is_terrestrial_locked();
 }
 
 Result<FirmwareImage> stage_image(const std::vector<std::uint8_t>& firmware) noexcept {
@@ -206,8 +234,21 @@ void* worker_main(void* argument) noexcept {
     const auto init2 = dev2.initialize_q3u4(image.value());
     if (!init2) { fail(kStageInit, init2.error()); return nullptr; }
 
+    const bool satellite = job.wave == kWaveSatellite;
+
+    // LNB 給電。**既定は出さない。**集合住宅のように別の機器が給電している
+    // 線へ重ねて出すと競合する。設定で明示的に許可されたときだけ 15V を
+    // 出せるようにし、許可が無ければ 0V のまま参照だけ取る。
+    It930xLnbPower lnb1(dev1);
+    It930xLnbPower lnb2(dev2);
+    Q3U4LnbPowerCoordinator lnb(lnb1, lnb2, job.allow_15v);
+    const auto lnb_voltage = static_cast<std::uint8_t>(
+        satellite && job.allow_15v ? 15U : 0U);
+
     job.stage.store(kStageFrontendOpen);
-    const auto opened = frontend.open_terrestrial(static_cast<std::uint8_t>(job.receiver));
+    const auto opened = satellite
+        ? frontend.open_satellite(static_cast<std::uint8_t>(job.receiver))
+        : frontend.open_terrestrial(static_cast<std::uint8_t>(job.receiver));
     if (!opened) { fail(kStageFrontendOpen, opened.error()); return nullptr; }
 
     job.stage.store(kStageDataPlane);
@@ -223,11 +264,15 @@ void* worker_main(void* argument) noexcept {
     attachment.owner_client_id = 1U;
     attachment.lease_id = 1U;
     attachment.receiver = static_cast<std::uint8_t>(job.receiver);
-    attachment.system = ipc::System::ISDB_T;
+    attachment.system = satellite ? ipc::System::ISDB_S : ipc::System::ISDB_T;
     std::uint64_t next_attachment_id = 1U;
 
     Error result = Error::OK;
     std::vector<std::uint8_t> buffer(kReadBytes);
+    LockContext lock_context{&frontend, satellite};
+    // 直前に合わせた周波数。同じ中継器のあいだは選局し直さない。
+    int tuned_khz = -1;
+    bool tuned_locked = false;
 
     for (std::size_t i = 0U; i < job.frequencies_khz.size(); ++i) {
         if (job.stop_requested.load()) break;
@@ -235,23 +280,68 @@ void* worker_main(void* argument) noexcept {
         job.advance.store(false);
         discard(job);
 
-        job.stage.store(kStageTune);
-        const auto tuned =
-            frontend.tune_terrestrial(static_cast<std::uint32_t>(job.frequencies_khz[i]));
-        if (!tuned) { job.locked[i].store(0); continue; }
+        const int frequency = job.frequencies_khz[i];
+        const int slot = satellite ? job.slots[i] : -1;
 
-        job.stage.store(kStageLock);
-        const ProbeLockPollResult lock = poll_frontend_probe_lock(demod_lock, &frontend, delay);
-        job.locked[i].store(lock.locked ? 1 : 0);
-        job.elapsed_ms.store(elapsed());
-        if (!lock.locked) { await_acknowledge(job, static_cast<int>(i)); continue; }
+        if (frequency != tuned_khz) {
+            tuned_khz = frequency;
+            tuned_locked = false;
 
-        const auto capture = frontend.start_terrestrial_capture();
+            job.stage.store(kStageTune);
+            if (satellite) {
+                const auto begun = lnb.begin_tune(
+                    static_cast<std::uint8_t>(job.receiver), lnb_voltage);
+                if (!begun) { job.locked[i].store(0); continue; }
+            }
+            const auto tuned = satellite
+                ? frontend.tune_satellite(static_cast<std::uint32_t>(frequency))
+                : frontend.tune_terrestrial(static_cast<std::uint32_t>(frequency));
+            if (!tuned) {
+                if (satellite) lnb.rollback_tune(static_cast<std::uint8_t>(job.receiver));
+                job.locked[i].store(0);
+                continue;
+            }
+            if (satellite) lnb.commit_tune(static_cast<std::uint8_t>(job.receiver));
+
+            job.stage.store(kStageLock);
+            const ProbeLockPollResult lock =
+                poll_frontend_probe_lock(demod_lock, &lock_context, delay);
+            tuned_locked = lock.locked;
+            job.elapsed_ms.store(elapsed());
+        }
+
+        if (!tuned_locked) {
+            job.locked[i].store(0);
+            // 中継器ごと信号が無いときは、残りのスロットを待たずに落とす。
+            await_acknowledge(job, static_cast<int>(i));
+            continue;
+        }
+
+        // 中継器の中から TS を1つ選ぶ。空きスロットはここで弾かれる。
+        if (satellite) {
+            const auto selected = frontend.select_satellite_slot(
+                static_cast<std::uint8_t>(slot));
+            if (!selected) {
+                job.locked[i].store(0);
+                await_acknowledge(job, static_cast<int>(i));
+                continue;
+            }
+            job.tsid[i].store(static_cast<int>(frontend.selected_tsid()));
+        }
+        job.locked[i].store(1);
+
+        const auto capture = satellite ? frontend.start_satellite_capture()
+                                       : frontend.start_terrestrial_capture();
         if (!capture) { result = capture.error(); break; }
         attachment.attachment_id = next_attachment_id;
         next_attachment_id += 1U;
         const auto attach = plane->attach(attachment);
-        if (!attach) { frontend.stop_terrestrial_capture(); result = attach.error(); break; }
+        if (!attach) {
+            if (satellite) frontend.stop_satellite_capture();
+            else frontend.stop_terrestrial_capture();
+            result = attach.error();
+            break;
+        }
 
         job.stage.store(kStageReading);
         const auto deadline =
@@ -269,12 +359,18 @@ void* worker_main(void* argument) noexcept {
         plane->detach(attachment);
         // 保持されている最終値を返しておく。溜め続けない。
         plane->release_final(attachment);
-        const auto stopped = frontend.stop_terrestrial_capture();
+        const auto stopped = satellite ? frontend.stop_satellite_capture()
+                                       : frontend.stop_terrestrial_capture();
         if (!stopped && result == Error::OK) result = stopped.error();
         await_acknowledge(job, static_cast<int>(i));
     }
 
     job.stage.store(kStageCleanup);
+    if (satellite) {
+        lnb.release_receiver(static_cast<std::uint8_t>(job.receiver));
+        const auto lnb_off = lnb.shutdown();
+        if (!lnb_off && result == Error::OK) result = lnb_off.error();
+    }
     const auto shutdown = plane->shutdown();
     if (!shutdown && result == Error::OK) result = shutdown.error();
     plane.reset();
@@ -298,20 +394,46 @@ extern "C" {
 
 /** 走査を pthread で開始し、即座に戻る。この関数は USB に触れない。 */
 int webts_q3u4_scan_start(const std::uint8_t* firmware, int firmware_size, int receiver,
-                          const std::int32_t* frequencies, int frequency_count) {
+                          const std::int32_t* frequencies, int frequency_count,
+                          int wave, const std::int32_t* slots, int allow_15v) {
     if (g_job != nullptr && g_job->state.load() == kRunning) return static_cast<int>(Error::BUSY);
-    if (firmware == nullptr || firmware_size <= 0 || receiver < 2 || receiver > 3 ||
+    if (firmware == nullptr || firmware_size <= 0 ||
         frequencies == nullptr || frequency_count <= 0 || frequency_count > kMaxChannels) {
         return static_cast<int>(Error::INVALID_ARGUMENT);
+    }
+    const bool satellite = wave == kWaveSatellite;
+    if (wave != kWaveTerrestrial && wave != kWaveSatellite) {
+        return static_cast<int>(Error::INVALID_ARGUMENT);
+    }
+    // 受信機の割り当ては波で決まる。local 0,1 が ISDB-S、2,3 が ISDB-T。
+    if (satellite ? (receiver < 0 || receiver > 1) : (receiver < 2 || receiver > 3)) {
+        return static_cast<int>(Error::INVALID_ARGUMENT);
+    }
+    // 衛星は相対 TS 番号が要る。周波数だけで合わせると、中継器に載っている
+    // どの TS が出るか決まらない。
+    if (satellite && slots == nullptr) return static_cast<int>(Error::INVALID_ARGUMENT);
+    if (satellite) {
+        for (int i = 0; i < frequency_count; ++i) {
+            if (slots[i] < 0 || slots[i] >= kMaxSlots) {
+                return static_cast<int>(Error::INVALID_ARGUMENT);
+            }
+        }
     }
     if (g_thread_started) { pthread_join(g_thread, nullptr); g_thread_started = false; }
     delete g_job;
     g_job = new Job();
     g_job->firmware.assign(firmware, firmware + firmware_size);
     g_job->receiver = receiver;
+    g_job->wave = wave;
+    g_job->allow_15v = allow_15v != 0;
     g_job->frequencies_khz.assign(frequencies, frequencies + frequency_count);
+    if (satellite) g_job->slots.assign(slots, slots + frequency_count);
+    else g_job->slots.assign(static_cast<std::size_t>(frequency_count), -1);
     g_job->output.reserve(kStreamLimit);
-    for (int i = 0; i < kMaxChannels; ++i) g_job->locked[i].store(-1);
+    for (int i = 0; i < kMaxChannels; ++i) {
+        g_job->locked[i].store(-1);
+        g_job->tsid[i].store(-1);
+    }
     g_job->state.store(kRunning);
     if (pthread_create(&g_thread, nullptr, worker_main, g_job) != 0) {
         g_job->state.store(kFailed);
@@ -372,9 +494,11 @@ int webts_q3u4_scan_poll(std::int32_t* output, int output_words) {
     output[4] = g_job->elapsed_ms.load();
     output[5] = static_cast<std::int32_t>(g_job->pending.load());
     output[6] = g_job->waiting.load();
-    const int channels = output_words - 7;
+    // 7 語のあとに locked[] と tsid[] を同じ長さで並べて返す。
+    const int channels = (output_words - 7) / 2;
     for (int i = 0; i < channels && i < kMaxChannels; ++i) {
         output[7 + i] = g_job->locked[i].load();
+        output[7 + channels + i] = g_job->tsid[i].load();
     }
     return 0;
 }

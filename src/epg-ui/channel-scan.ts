@@ -22,6 +22,10 @@ import type { ChannelItem, ProgramItem } from './types';
 const MODULE_URL = '/build/q3u4-scan/q3u4-scan.mjs';
 const DRAIN_BYTES = 512 * 1024;
 const POLL_BASE_WORDS = 7;
+/** 基本の 7 語のあと、locked[] と tsid[] が件数ぶんずつ並ぶ。 */
+const POLL_ARRAYS = 2;
+const WAVE_TERRESTRIAL = 0;
+const WAVE_SATELLITE = 1;
 
 /**
  * サービス形式種別のうち、視聴できるものだけを残す。
@@ -47,6 +51,11 @@ export interface ScanProgress {
 export interface ScanOptions {
   /** 回る中継器。省略すると地上デジタルの全物理チャンネル。 */
   readonly tunings?: readonly Tuning[] | undefined;
+  /**
+   * LNB へ 15V を出してよいか。既定は出さない。
+   * 別の機器が給電している線へ重ねて出すと競合する。
+   */
+  readonly allowLnb15v?: boolean | undefined;
   readonly onProgress?: ((progress: ScanProgress) => void) | undefined;
 }
 
@@ -139,12 +148,14 @@ export class ChannelScan {
 
   async #run(options: ScanOptions): Promise<ScanResult> {
     const tunings = options.tunings ?? grTunings();
-    // 衛星は周波数のほかに TSID の指定が要る。C 側がまだ受け取らないので、
-    // 黙って周波数だけで合わせに行かない。合ったように見えて別の TS を
-    // 読むことになる。
-    const satellite = tunings.find((tuning) => tuning.wave !== 'GR');
-    if (satellite !== undefined) {
-      throw new Error(`${satellite.wave} の走査はまだ実装されていません。`);
+    // **1回の走査で波は混ぜない。**受信機の割り当ても、周波数の意味も、
+    // 選局の手順も波ごとに違う。
+    const satellite = tunings[0]?.wave !== 'GR';
+    if (tunings.some((tuning) => (tuning.wave !== 'GR') !== satellite)) {
+      throw new Error('地上波と衛星は同時に走査できません。');
+    }
+    if (satellite && tunings.some((tuning) => tuning.slot === null)) {
+      throw new Error('衛星の走査には相対 TS 番号が要ります。');
     }
     const firmware = await readCachedFirmware();
     if (firmware === null) {
@@ -156,17 +167,23 @@ export class ChannelScan {
     module.HEAPU8.set(firmware, firmwarePointer);
     const listPointer = module._malloc(tunings.length * 4);
     module.HEAP32.set(tunings.map((tuning) => tuning.frequencyKhz), listPointer / 4);
+    const slotPointer = module._malloc(tunings.length * 4);
+    module.HEAP32.set(tunings.map((tuning) => tuning.slot ?? 0), slotPointer / 4);
     const drainPointer = module._malloc(DRAIN_BYTES);
-    const pollWords = POLL_BASE_WORDS + tunings.length;
+    const pollWords = POLL_BASE_WORDS + tunings.length * POLL_ARRAYS;
     const pollPointer = module._malloc(pollWords * 4);
 
     const found: ChannelItem[] = [];
     const programs: ProgramItem[] = [];
     try {
-      // 受信機 2 は dev1 の地上波。スキャン中は1本しか使わない。
+      // 受信機は波で決まる。dev1 の local 0 が ISDB-S、2 が ISDB-T。
+      // スキャン中は1本しか使わない。
       const started = module.ccall('webts_q3u4_scan_start', 'number',
-        ['number', 'number', 'number', 'number', 'number'],
-        [firmwarePointer, firmware.length, 2, listPointer, tunings.length]) as number;
+        ['number', 'number', 'number', 'number', 'number',
+          'number', 'number', 'number'],
+        [firmwarePointer, firmware.length, satellite ? 0 : 2, listPointer, tunings.length,
+          satellite ? WAVE_SATELLITE : WAVE_TERRESTRIAL, slotPointer,
+          options.allowLnb15v === true ? 1 : 0]) as number;
       if (started !== 0) {
         const name = String(module.ccall(
           'webts_q3u4_scan_error_name', 'string', ['number'], [started]));
@@ -191,6 +208,8 @@ export class ChannelScan {
         const current = words[3] ?? 0;
         const waiting = (words[6] ?? 0) === 1;
         const lockedAt = (at: number): number => words[POLL_BASE_WORDS + at] ?? -1;
+        const tsidAt = (at: number): number =>
+          words[POLL_BASE_WORDS + tunings.length + at] ?? -1;
 
         if (current !== index) {
           index = current;
@@ -226,7 +245,12 @@ export class ChannelScan {
         // C が応答待ちに入っていれば、このチャンネルは読み切っている。
         // 結果を確定させて応答を返す。返すまで C は次へ進まない。
         if (waiting && acknowledged < index) {
-          const tuning = tunings[index];
+          const base = tunings[index];
+          // 実際に掴んだ TS を控える。**スロットではなく TSID で保存する。**
+          // 次に視聴するときはこれを指定して選び直す。
+          const discovered = tsidAt(index);
+          const tuning = base === undefined ? undefined
+            : discovered >= 0 ? { ...base, tsid: discovered } : base;
           if (network !== null && tuning !== undefined) {
             this.#collect(found, programs, services, network, eit, tuning);
           }
@@ -283,6 +307,7 @@ export class ChannelScan {
       module.HEAPU8.fill(0, firmwarePointer, firmwarePointer + firmware.length);
       module._free(firmwarePointer);
       module._free(listPointer);
+      module._free(slotPointer);
       module._free(drainPointer);
       module._free(pollPointer);
     }

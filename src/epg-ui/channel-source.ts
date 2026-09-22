@@ -33,12 +33,36 @@ export function programsSync(channelId: number): ProgramItem[] {
     .sort((left, right) => left.startAt - right.startAt);
 }
 
+/** 波の並び順。リモコンの順に合わせるのは波の中だけなので、先に分ける。 */
+const WAVE_ORDER: Record<string, number> = { GR: 0, BS: 1, CS: 2 };
+
+/**
+ * リモコンの物理ボタンの順に並べる。
+ *
+ * 保存されている順は走査した順、つまり周波数の低い物理チャンネル順で、
+ * 手元のリモコンの並びとは関係が無い。関東なら 1 NHK総合 / 2 Eテレ /
+ * 4 日テレ / 5 テレ朝 / 6 TBS / 7 テレ東 / 8 フジ / 9 MX の順になる。
+ *
+ * リモコン番号を持たない局（番号の無いサービスや衛星）は後ろに回す。
+ * 同じ番号の中はサービス番号順。NHK E の枝番のような枝はこれで並ぶ。
+ */
+export function sortChannels(channels: readonly ChannelItem[]): ChannelItem[] {
+  return [...channels].sort((left, right) => {
+    const wave = (WAVE_ORDER[left.channelType] ?? 9) - (WAVE_ORDER[right.channelType] ?? 9);
+    if (wave !== 0) return wave;
+    const key = (left.remoteControlKeyId ?? Number.MAX_SAFE_INTEGER)
+      - (right.remoteControlKeyId ?? Number.MAX_SAFE_INTEGER);
+    if (key !== 0) return key;
+    return left.serviceId - right.serviceId;
+  });
+}
+
 function applyEnabled(channels: readonly ChannelItem[], onlyEnabled: boolean): ChannelItem[] {
-  if (!onlyEnabled) return [...channels];
+  if (!onlyEnabled) return sortChannels(channels);
   const enabled = getEnabledChannelIds();
   const filtered = channels.filter((channel) => enabled.has(channel.id));
   // 有効判定が空なら、絞り込みが効いていないだけなので全部見せる。
-  return filtered.length > 0 ? filtered : [...channels];
+  return sortChannels(filtered.length > 0 ? filtered : channels);
 }
 
 export function channelsSync(onlyEnabled = true): ChannelItem[] {

@@ -14,8 +14,16 @@ export type WaveType = 'GR' | 'BS' | 'CS';
 export interface Tuning {
   readonly wave: WaveType;
   readonly frequencyKhz: number;
-  /** 衛星の TS 選択。地上波は null。 */
+  /**
+   * 衛星の TS を指す識別子。地上波は null。
+   * 中継器をまたいでも変わらないので、保存にはこちらを使う。
+   */
   readonly tsid: number | null;
+  /**
+   * TMCC の相対 TS 番号 (0〜11)。走査で TS を1つずつ当たるのに使う。
+   * 放送側の編成で変わりうるので、選局の拠り所にはしない。
+   */
+  readonly slot: number | null;
   /** 表示と保存に使う短い名前。地上波は "27"、衛星は "BS15" / "ND4"。 */
   readonly label: string;
 }
@@ -46,28 +54,56 @@ export function grTuning(physicalChannel: number): Tuning {
     wave: 'GR',
     frequencyKhz: grFrequencyKhz(physicalChannel),
     tsid: null,
+    slot: null,
     label: String(physicalChannel),
   };
 }
 
 /** BS 中継器。番号は奇数。TSID はスキャンで判明するまで null。 */
-export function bsTuning(transponder: number, tsid: number | null = null): Tuning {
+export function bsTuning(
+  transponder: number, tsid: number | null = null, slot: number | null = null,
+): Tuning {
   return {
     wave: 'BS',
     frequencyKhz: BS_BASE_KHZ + ((transponder - 1) / 2) * BS_STEP_KHZ,
     tsid,
-    label: `BS${transponder}`,
+    slot,
+    label: slot === null ? `BS${transponder}` : `BS${transponder}/${slot}`,
   };
 }
 
 /** CS110 の ND 番号。番号は偶数。 */
-export function csTuning(nd: number, tsid: number | null = null): Tuning {
+export function csTuning(
+  nd: number, tsid: number | null = null, slot: number | null = null,
+): Tuning {
   return {
     wave: 'CS',
     frequencyKhz: CS_BASE_KHZ + ((nd - CS_MIN) / 2) * CS_STEP_KHZ,
     tsid,
-    label: `ND${nd}`,
+    slot,
+    label: slot === null ? `ND${nd}` : `ND${nd}/${slot}`,
   };
+}
+
+/** TMCC の相対 TS 番号の数。上流が 12 以上を弾く。 */
+export const MAX_SLOTS = 12;
+
+/**
+ * 衛星の走査で回る先。
+ *
+ * **どのスロットが埋まっているかは合わせてみるまで分からない。**中継器ごとに
+ * スロットを総当たりし、選べたものだけが TS として残る。空きは上流が
+ * 弾くので速い。
+ */
+export function satelliteScanTunings(transponders: readonly Tuning[]): Tuning[] {
+  const list: Tuning[] = [];
+  for (const transponder of transponders) {
+    for (let slot = 0; slot < MAX_SLOTS; slot += 1) {
+      list.push({ ...transponder, slot,
+        label: `${transponder.label}/${slot}` });
+    }
+  }
+  return list;
 }
 
 /** 地上デジタルの全物理チャンネル。 */
@@ -102,6 +138,10 @@ export function sameTuning(left: Tuning, right: Tuning): boolean {
     && left.tsid === right.tsid;
 }
 
+/**
+ * 同じ TS を指すものを畳むための鍵。
+ * **スロットは含めない。**編成で変わりうるので、同じ TS が別物になる。
+ */
 export function tuningKey(tuning: Tuning): string {
   return `${tuning.wave}:${tuning.frequencyKhz}:${tuning.tsid ?? ''}`;
 }
