@@ -15,7 +15,7 @@ export class OnAirView {
   public readonly element: HTMLElement;
   private tabsContainer: HTMLElement;
   private gridContainer: HTMLElement;
-  private activeTab: BroadcastType = 'ALL';
+  private activeTab: BroadcastType = 'GR';
   private schedules: OnAirScheduleItem[] = [];
   private digestTimer: number | null = null;
   private programDialog: ProgramDialog;
@@ -64,19 +64,29 @@ export class OnAirView {
       this.loadData();
     };
     window.addEventListener('webts-channels-changed', this.onChannelsChanged);
+
+    // **前面に戻った時点で判定し直す。**裏のタブでは取りに行かないので、
+    // 戻ってきたときに 30 秒待たせる理由が無い。
+    this.onVisible = () => {
+      if (document.visibilityState !== 'visible') return;
+      this.lastAutoCheck = 0;
+      this.keepCurrent();
+    };
+    document.addEventListener('visibilitychange', this.onVisible);
   }
 
   private onChannelsChanged: () => void;
+  private onVisible: () => void;
   private statusLine!: HTMLElement;
   /** 自動更新の判定をした時刻。毎秒やる必要は無い。 */
   private lastAutoCheck = 0;
   private reloading = false;
+  private lastReload = 0;
 
   private renderTabs(): void {
     this.tabsContainer.replaceChildren();
 
     const tabs: { type: BroadcastType; label: string }[] = [
-      { type: 'ALL', label: 'すべて' },
       { type: 'GR', label: '地上波 (GR)' },
       { type: 'BS', label: 'BS放送' },
       { type: 'CS', label: 'CS放送' },
@@ -220,20 +230,27 @@ export class OnAirView {
    */
   private keepCurrent(): void {
     const now = Date.now();
+
+    // **出している番組が終わったときだけ読み直す。**読み直せば保存済みの
+    // 「次」が繰り上がる。
+    //
+    // 番組が分からない局を「繰り上げが要る」と見なしてはいけない。読み直しても
+    // 分からないままなので、毎秒読み直し続けたうえ、この下の取り直しに
+    // 一度も辿り着かない。実測で、16:00 の番組を「次」として抱えたまま
+    // 21:19 まで放置された（受信機は空いていた）。
     const passed = this.schedules.some((item) => {
       const current = item.currentProgram;
-      if (current !== null) {
-        // 終了時刻が未定のものは繰り上げの判断に使えない。
-        return current.endAt > current.startAt && current.endAt <= now;
-      }
-      return item.nextProgram !== null && item.nextProgram.startAt <= now;
+      if (current === null) return false;
+      // 終了時刻が未定のものは繰り上げの判断に使えない。
+      return current.endAt > current.startAt && current.endAt <= now;
     });
-    if (passed) {
+    if (passed && now - this.lastReload > 5_000) {
+      this.lastReload = now;
       void this.reload();
-      return;
     }
 
-    // 判定は 30 秒に1回で足りる。
+    // **繰り上げの有無とは切り離して判定する。**繰り上げで戻ってしまうと、
+    // 番組が尽きている局があっても取りに行けない。
     if (now - this.lastAutoCheck < 30_000) return;
     this.lastAutoCheck = now;
 
@@ -283,6 +300,7 @@ export class OnAirView {
       this.digestTimer = null;
     }
     window.removeEventListener('webts-channels-changed', this.onChannelsChanged);
+    document.removeEventListener('visibilitychange', this.onVisible);
   }
 }
 

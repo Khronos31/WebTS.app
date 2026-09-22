@@ -10,6 +10,7 @@
 // 先まで尽きたときだけでよい。
 
 import { ChannelScan, type ScanProgress } from './channel-scan';
+import type { ProgramItem } from './types';
 import { mergeChannels, mergePrograms } from './channel-store';
 import { channelsSync, primeChannels } from './channel-source';
 import {
@@ -53,18 +54,33 @@ export async function refreshPrograms(
   if (tunings.length === 0) {
     throw new Error('局が登録されていません。先にスキャンを実行してください。');
   }
-  const scan = new ChannelScan();
-  running = scan;
+  // **波ごとに分けて回す。**1回の走査に地上波と衛星を混ぜられない。
+  // 受信機の割り当ても選局の手順も違う。BS を登録した時点で、混ぜたまま
+  // 渡していた番組情報の更新が丸ごと失敗するようになっていた。
+  const byWave = new Map<WaveType, Tuning[]>();
+  for (const tuning of tunings) {
+    const list = byWave.get(tuning.wave);
+    if (list === undefined) byWave.set(tuning.wave, [tuning]);
+    else list.push(tuning);
+  }
+
   lastAttempt = Date.now();
+  const programs: ProgramItem[] = [];
   try {
-    const result = await scan.run(
-      onProgress === undefined
-        ? { tunings, allowLnb15v: allowLnb15v() }
-        : { tunings, allowLnb15v: allowLnb15v(), onProgress });
+    for (const [, waveTunings] of byWave) {
+      const scan = new ChannelScan();
+      running = scan;
+      const result = await scan.run(
+        onProgress === undefined
+          ? { tunings: waveTunings, allowLnb15v: allowLnb15v() }
+          : { tunings: waveTunings, allowLnb15v: allowLnb15v(), onProgress });
+      programs.push(...result.programs);
+      running = null;
+    }
     // **届いたぶんだけを入れ替える。**回らなかった局の番組を消さない。
-    await mergePrograms(result.programs);
+    await mergePrograms(programs);
     await primeChannels();
-    return result.programs.length;
+    return programs.length;
   } finally {
     running = null;
   }

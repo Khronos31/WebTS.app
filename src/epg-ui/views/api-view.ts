@@ -15,9 +15,9 @@
 //   #/api/lnb                    LNB 給電の許可を読む
 //   #/api/lnb?allow=1|0          LNB 給電の許可を書く
 
-import { channelsSync, primeChannels, programsSync } from '../channel-source';
+import { channelsSync, primeChannels } from '../channel-source';
 import { readChannels, readPrograms } from '../channel-store';
-import { isRefreshing, refreshPrograms, scanWave } from '../epg-refresh';
+import { isRefreshing, refreshPrograms, scanWave, stopRefresh } from '../epg-refresh';
 import { allowLnb15v, setAllowLnb15v } from '../lnb-setting';
 import { ChannelScan, type ScanProgress } from '../channel-scan';
 import { LiveSession } from '../live-session';
@@ -112,7 +112,9 @@ export class ApiView {
           refreshing: isRefreshing(),
           lnb15v: allowLnb15v(),
           channels: channelsSync(false).length,
-          programs: programsSync(0).length,
+          // **局で絞らない。**`programsSync(0)` と書いてしまい、存在しない
+          // チャンネル 0 の番組を数えて常に 0 になっていた。
+          programs: (await readPrograms()).length,
         };
 
       case 'api/lnb': {
@@ -153,6 +155,8 @@ export class ApiView {
   }
 
   public destroy(): void {
-    // 走査中に離れても受信機は解放する。
+    // **走査中に離れたら止める。**画面が消えても走り続けると、受信機を
+    // 握ったまま誰も結果を受け取らない状態になる。
+    stopRefresh();
   }
 }

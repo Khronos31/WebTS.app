@@ -100,8 +100,10 @@ export async function loadSchedules(
     const current = list.find(
       (program) => program.startAt <= now && (program.endAt > now || program.endAt === program.startAt))
       ?? null;
-    const next = list.find((program) => program.startAt > now)
-      ?? (current === null ? list[0] ?? null : null);
+    // **終わった番組を「次」として出さない。**現在が分からないときに一覧の
+    // 先頭へ落としていたため、5時間前に終わった番組が「次: 16:00」として
+    // 出ていた。将来の番組が無ければ空にする。
+    const next = list.find((program) => program.startAt > now) ?? null;
     const total = current === null ? 0 : Math.max(1, current.endAt - current.startAt);
     const digestibility = current === null
       ? 0
