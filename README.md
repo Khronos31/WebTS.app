@@ -39,6 +39,25 @@ EMSCRIPTEN_ROOT="$HOME/scoop/apps/emscripten/current/upstream/emscripten" npm ru
 `npm run check`（vendor 検査・型・テスト・Vite ビルド）に WASM のビルドは
 含まれない。`native/` を触ったときは対応する `build:*` を明示的に走らせる。
 
+## `#/api/` の操作口
+
+画面を持たない操作はハッシュから叩く。サーバーは無いので HTTP の
+エンドポイントではなく、ページ内で実行して JSON を表示するだけである。
+
+```
+#/api/                    使える操作の一覧
+#/api/channels            保存済みの局
+#/api/programs            保存済みの番組
+#/api/status              いま受信機を使っているか
+#/api/scan?wave=GR|BS|CS  その波を走査して保存する
+#/api/epg/refresh         既知の中継器から番組情報を取り直す
+#/api/lnb                 LNB 給電の許可を読む
+#/api/lnb?allow=1|0       LNB 給電の許可を書く
+```
+
+受信機は1本しか開けないので、視聴中や走査中は重ねて呼ばない。
+`#/api/status` で誰が握っているかを確認できる。
+
 ## ドキュメント
 
 | | |

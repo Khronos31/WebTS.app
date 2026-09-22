@@ -1,12 +1,10 @@
 // EPGStationスタイルの「設定 (Settings)」ビュー
 
 import {
-  MOCK_CHANNELS,
-  FULL_SCAN_PHYSICAL_CHANNELS,
+  defaultEnabledChannelIds,
   getEnabledChannelIds,
   saveEnabledChannelIds,
-  getDefaultEnabledChannelIds,
-} from '../mock-data';
+} from '../enabled-channels';
 import {
   FIRMWARE_SOURCE,
   cacheFirmware,
@@ -18,6 +16,8 @@ import { readSetupState } from '../../ui/setup-state';
 import { ChannelScan } from '../channel-scan';
 import { saveChannels } from '../channel-store';
 import { knownTunings, refreshPrograms } from '../epg-refresh';
+import type { ChannelItem } from '../types';
+import { channelsSync } from '../channel-source';
 import { loadQ3U4Identifiers } from '../../usb/px4-identity';
 import { getTheme, setTheme, type ThemeMode } from '../theme-manager';
 
@@ -258,12 +258,16 @@ export class SettingsView {
     const card = document.createElement('div');
     card.className = 'settings-card';
 
+    // **走査で見つかった局を出す。**固定の一覧を出すと、受信できない局が
+    // 並び、有効/無効の選択も実際の局と対応しなくなる。
+    const known = (): ChannelItem[] => channelsSync(false);
     let enabledIds = getEnabledChannelIds();
+    if (enabledIds.size === 0) enabledIds = defaultEnabledChannelIds(known());
 
     const updateStatusBadge = () => {
       const badge = card.querySelector<HTMLElement>('#scan-status-badge');
       if (badge) {
-        badge.textContent = `有効: ${enabledIds.size} / 全${MOCK_CHANNELS.length}局`;
+        badge.textContent = `有効: ${enabledIds.size} / 全${known().length}局`;
       }
     };
 
@@ -275,7 +279,7 @@ export class SettingsView {
           </svg>
           <span>チャンネルスキャン</span>
         </div>
-        <span class="status-badge ok" id="scan-status-badge">有効: ${enabledIds.size} / 全${MOCK_CHANNELS.length}局</span>
+        <span class="status-badge ok" id="scan-status-badge">有効: ${enabledIds.size} / 全${known().length}局</span>
       </div>
 
       <p class="settings-card-desc">
@@ -361,7 +365,7 @@ export class SettingsView {
     const renderTable = () => {
       tbody.replaceChildren();
 
-      for (const ch of MOCK_CHANNELS) {
+      for (const ch of known()) {
         const tr = document.createElement('tr');
         if (ch.isSubChannel) tr.classList.add('sub-row');
 
@@ -404,7 +408,7 @@ export class SettingsView {
 
     // 代表局のみ選択
     btnSelectPrimary.addEventListener('click', () => {
-      enabledIds = getDefaultEnabledChannelIds();
+      enabledIds = defaultEnabledChannelIds(known());
       saveEnabledChannelIds(enabledIds);
       renderTable();
       updateStatusBadge();
@@ -412,7 +416,7 @@ export class SettingsView {
 
     // すべて選択
     btnSelectAll.addEventListener('click', () => {
-      enabledIds = new Set(MOCK_CHANNELS.map((c) => c.id));
+      enabledIds = new Set(known().map((c) => c.id));
       saveEnabledChannelIds(enabledIds);
       renderTable();
       updateStatusBadge();
@@ -465,7 +469,7 @@ export class SettingsView {
         },
       }).then(async (result) => {
         await saveChannels(result.channels, result.programs);
-        enabledIds = new Set(result.channels.map((c) => c.id));
+        enabledIds = defaultEnabledChannelIds(result.channels);
         saveEnabledChannelIds(enabledIds);
         scanBar.style.width = '100%';
         scanPctText.textContent = '100%';

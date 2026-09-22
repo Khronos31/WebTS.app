@@ -2,6 +2,7 @@
 
 import './theme.css';
 import type { RouteType } from './types';
+import { channelIdFromHash, hashForRoute, routeFromHash } from './routes';
 import { AppBar } from './components/app-bar';
 import { NavDrawer } from './components/drawer';
 import { ProgramDialog } from './components/program-dialog';
@@ -10,32 +11,12 @@ import { OnAirView } from './views/onair-view';
 import { WatchView } from './views/watch-view';
 import { SettingsView } from './views/settings-view';
 import { AboutView } from './views/about-view';
+import { ApiView } from './views/api-view';
 import { initTheme } from './theme-manager';
 import { readSetupState } from '../ui/setup-state';
 import { primeChannels } from './channel-source';
 
 initTheme();
-
-export function routeFromHash(hash: string): RouteType {
-  const clean = hash.replace(/^#\/?/, '');
-  if (clean === 'settings') return 'settings';
-  if (clean === 'about') return 'about';
-  if (clean === 'watch' || clean.startsWith('watch?') || clean.startsWith('watch/')) return 'watch';
-  return 'onair';
-}
-
-export function channelIdFromHash(hash: string): number {
-  const clean = hash.replace(/^#\/?/, '');
-  const match = /[?&]channel=(\d+)/.exec(clean);
-  if (match && match[1]) {
-    return Number(match[1]);
-  }
-  return 1040;
-}
-
-export function hashForRoute(route: RouteType): string {
-  return route === 'onair' ? '#/' : `#/${route}`;
-}
 
 export class EpgApp {
   private container: HTMLElement;
@@ -44,7 +25,8 @@ export class EpgApp {
   private programDialog: ProgramDialog;
   private streamDialog: StreamDialog;
   private mainContent: HTMLElement;
-  private currentView: OnAirView | WatchView | SettingsView | AboutView | null = null;
+  private currentView:
+    OnAirView | WatchView | SettingsView | AboutView | ApiView | null = null;
 
   constructor(container: HTMLElement) {
     this.container = container;
@@ -110,6 +92,8 @@ export class EpgApp {
         return '設定';
       case 'about':
         return 'About';
+      case 'api':
+        return 'API';
     }
   }
 
@@ -142,6 +126,10 @@ export class EpgApp {
 
     // 新規ビューの生成
     switch (route) {
+      case 'api': {
+        this.currentView = new ApiView(location.hash);
+        break;
+      }
       case 'onair': {
         this.currentView = new OnAirView({
           programDialog: this.programDialog,
@@ -176,7 +164,7 @@ export class EpgApp {
       }
     }
 
-    this.mainContent.append(this.currentView.element);
+    if (this.currentView !== null) this.mainContent.append(this.currentView.element);
     window.scrollTo(0, 0);
   }
 
@@ -191,3 +179,5 @@ const root = document.querySelector<HTMLElement>('#app');
 if (root) {
   new EpgApp(root);
 }
+
+export { channelIdFromHash, hashForRoute, routeFromHash };

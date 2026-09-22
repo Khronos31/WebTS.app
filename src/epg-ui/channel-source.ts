@@ -11,7 +11,7 @@
 
 import type { ChannelItem, OnAirScheduleItem, ProgramItem } from './types';
 import { readChannels, readPrograms } from './channel-store';
-import { getEnabledChannelIds } from './mock-data';
+import { getEnabledChannelIds } from './enabled-channels';
 
 /**
  * 同期に読みたい画面のための控え。視聴画面は DOM を組み立てる時点で
@@ -60,8 +60,9 @@ export function sortChannels(channels: readonly ChannelItem[]): ChannelItem[] {
 function applyEnabled(channels: readonly ChannelItem[], onlyEnabled: boolean): ChannelItem[] {
   if (!onlyEnabled) return sortChannels(channels);
   const enabled = getEnabledChannelIds();
+  // 選択が無いときは絞り込まない。選択が消えたときに一覧まで空にしない。
+  if (enabled.size === 0) return sortChannels(channels);
   const filtered = channels.filter((channel) => enabled.has(channel.id));
-  // 有効判定が空なら、絞り込みが効いていないだけなので全部見せる。
   return sortChannels(filtered.length > 0 ? filtered : channels);
 }
 
