@@ -72,8 +72,6 @@ export interface ScanOptions {
    * 別の機器が給電している線へ重ねて出すと競合する。
    */
   readonly allowLnb15v?: boolean | undefined;
-  /** 一時的な計測用。取り出した TS をそのまま渡す。コミットしない。 */
-  readonly onBytes?: ((bytes: Uint8Array) => void) | undefined;
   readonly onProgress?: ((progress: ScanProgress) => void) | undefined;
 }
 
@@ -249,7 +247,6 @@ export class ChannelScan {
             [drainPointer, DRAIN_BYTES]) as number;
           if (size <= 0) break;
           const bytes = module.HEAPU8.subarray(drainPointer, drainPointer + size);
-          options.onBytes?.(bytes);
           reader?.push(bytes);
           eit?.push(bytes);
         }

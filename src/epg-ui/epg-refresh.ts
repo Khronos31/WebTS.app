@@ -1,4 +1,4 @@
-// 放映中の番組情報を取り直す。手押しの更新と自動更新の両方がここを通る。
+// 局と番組情報の取得をまとめる。手押しの更新も自動更新も局の走査もここを通る。
 //
 // **EIT[p/f] は選局した TS の局しか載っていない。**全局の「いま放送中」を
 // 知るには、局のある物理チャンネルへ順に合わせ直すしかない。EIT[p/f] は
@@ -10,9 +10,12 @@
 // 先まで尽きたときだけでよい。
 
 import { ChannelScan, type ScanProgress } from './channel-scan';
-import { mergePrograms } from './channel-store';
+import { mergeChannels, mergePrograms } from './channel-store';
 import { channelsSync, primeChannels } from './channel-source';
-import { tuningForChannel, tuningKey, type Tuning } from './tuning';
+import {
+  bsTunings, csTunings, grTunings, satelliteScanTunings, tuningForChannel, tuningKey,
+  type Tuning, type WaveType,
+} from './tuning';
 import { LiveSession } from './live-session';
 import { allowLnb15v } from './lnb-setting';
 
@@ -93,5 +96,41 @@ export async function maybeAutoRefresh(
     return { ran: true, programs: await refreshPrograms(onProgress) };
   } catch (error) {
     return { ran: true, error: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+export interface WaveScanResult {
+  readonly channels: number;
+  readonly programs: number;
+}
+
+/**
+ * 波を1つ走査して、見つかった局と番組を保存する。
+ *
+ * **波ごとに別の走査になる。**受信機の割り当ても選局の手順も違い、衛星は
+ * 中継器の中から TS を選ぶ手順が要る。保存は差し替えではなく併合なので、
+ * BS を走査しても地上波の局は残る。
+ */
+export async function scanWave(
+  wave: WaveType,
+  onProgress?: (progress: ScanProgress) => void,
+): Promise<WaveScanResult> {
+  if (running !== null) throw new Error('すでに走査が動いています。');
+  const tunings = wave === 'GR' ? grTunings()
+    : satelliteScanTunings(wave === 'BS' ? bsTunings() : csTunings());
+  const scan = new ChannelScan();
+  running = scan;
+  lastAttempt = Date.now();
+  try {
+    const result = await scan.run(
+      onProgress === undefined
+        ? { tunings, allowLnb15v: allowLnb15v() }
+        : { tunings, allowLnb15v: allowLnb15v(), onProgress });
+    await mergeChannels(result.channels);
+    await mergePrograms(result.programs);
+    await primeChannels();
+    return { channels: result.channels.length, programs: result.programs.length };
+  } finally {
+    running = null;
   }
 }
