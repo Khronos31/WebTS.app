@@ -86,6 +86,25 @@ export async function mergePrograms(programs: readonly ProgramItem[]): Promise<P
   return list;
 }
 
+/**
+ * 見つかった局だけを入れ替える。
+ *
+ * **波ごとに走査するので、丸ごと書き換えてはいけない。**BS を走査したときに
+ * 地上波の局が消える。id が同じものは新しいほうで置き換え、触れなかった
+ * 局はそのまま残す。
+ */
+export async function mergeChannels(
+  channels: readonly ChannelItem[],
+): Promise<ChannelItem[]> {
+  const existing = (await readChannels())?.channels ?? [];
+  const merged = new Map(existing.map((channel) => [channel.id, channel]));
+  for (const channel of channels) merged.set(channel.id, channel);
+  const list = [...merged.values()];
+  await transact(STORE, 'readwrite', (store) => store.put(list, 'list'));
+  await transact(META, 'readwrite', (store) => store.put(Date.now(), 'scannedAt'));
+  return list;
+}
+
 export async function readPrograms(): Promise<ProgramItem[]> {
   try {
     const programs = await transact<ProgramItem[] | undefined>(

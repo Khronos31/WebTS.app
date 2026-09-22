@@ -49,6 +49,17 @@ export interface NetworkEntry {
 }
 
 export interface ServiceInfoHandlers {
+  /**
+   * NIT actual を待つか。
+   *
+   * **衛星では待たない。**BS の NIT は巨大で送出間隔が長く、1局あたりの
+   * 走査時間では届かない。実測で SDT actual が 23 回届くあいだ NIT actual は
+   * 0 回だった。待つと、サービスは読めているのに何も残らない。
+   *
+   * NIT から取っているのはリモコン番号と TS 名だけで、局の識別に要る
+   * network_id と transport_stream_id は SDT のセクションにも入っている。
+   */
+  readonly requireNetwork?: boolean | undefined;
   readonly onServices?: ((services: readonly ServiceEntry[]) => void) | undefined;
   readonly onNetwork?: ((network: NetworkEntry) => void) | undefined;
   /** ARIB の8単位符号系を文字列にする。呼び出し側が aribb24.js を渡す。 */
@@ -136,7 +147,8 @@ export class ServiceInfoReader {
 
   /** 揃ったかどうか。スキャンはこれが立った時点で次の物理チャンネルへ進める。 */
   get complete(): boolean {
-    return this.#services.size > 0 && this.#network !== null;
+    if (this.#services.size === 0) return false;
+    return this.#handlers.requireNetwork === false || this.#network !== null;
   }
 
   push(chunk: Uint8Array): void {

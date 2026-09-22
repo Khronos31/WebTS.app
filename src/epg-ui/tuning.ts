@@ -85,8 +85,17 @@ export function csTuning(
   };
 }
 
-/** TMCC の相対 TS 番号の数。上流が 12 以上を弾く。 */
+/** TMCC の相対 TS 番号の上限。上流が 12 以上を弾く。 */
 export const MAX_SLOTS = 12;
+/**
+ * 走査で当たる相対 TS 番号の数。
+ *
+ * **12 まで舐める必要は無い。**Mirakurun は BS の副チャンネルを 0〜3 で
+ * 走査している。実測でも BS15 に載っていたのは 0〜2 の3本だけで、3 以降は
+ * TSID が 0xFFFF（空き）だった。空きでも1本あたり数秒読んでしまうので、
+ * 範囲を絞るだけで走査時間が3分の1になる。
+ */
+export const SCAN_SLOTS = 4;
 
 /**
  * 衛星の走査で回る先。
@@ -98,7 +107,7 @@ export const MAX_SLOTS = 12;
 export function satelliteScanTunings(transponders: readonly Tuning[]): Tuning[] {
   const list: Tuning[] = [];
   for (const transponder of transponders) {
-    for (let slot = 0; slot < MAX_SLOTS; slot += 1) {
+    for (let slot = 0; slot < SCAN_SLOTS; slot += 1) {
       list.push({ ...transponder, slot,
         label: `${transponder.label}/${slot}` });
     }

@@ -28,11 +28,25 @@ const WAVE_TERRESTRIAL = 0;
 const WAVE_SATELLITE = 1;
 
 /**
- * サービス形式種別のうち、視聴できるものだけを残す。
- * 0x01 がデジタルTV、0xA5 が臨時映像。データ放送とワンセグは対象外。
+ * サービス形式種別のうち、この再生経路で映せるものだけを残す。
+ *
+ * Mirakurun は走査で `[0x01, 0x02, 0xA1, 0xA4, 0xA5, 0xAD, 0xC0]` を残す。
+ * こちらはそれより狭く、**映像が MPEG-2、音声が AAC のものだけ**にする。
+ *
+ *   0x01 デジタルTV        映せる
+ *   0xA1 臨時映像          映せる
+ *   0xA5 プロモーション映像 映せる
+ *
+ * 外すもの:
+ *   0x02 デジタル音声    映像が無い。音声だけの画面を用意していない
+ *   0xAD 超高精細度4K    HEVC。libmpeg2 でも WebCodecs でも復号できない
+ *   0xC0 データ          データ放送は 0.1.0 の対象外
+ *   0xA4 エンジニアリング 視聴対象ではない
  */
 function isWatchable(service: ServiceEntry): boolean {
-  return service.serviceType === 0x01 || service.serviceType === 0xa5;
+  return service.serviceType === 0x01
+    || service.serviceType === 0xa1
+    || service.serviceType === 0xa5;
 }
 
 export interface ScanProgress {
@@ -40,6 +54,8 @@ export interface ScanProgress {
   readonly tuning: Tuning;
   /** 表示用の短い名前。"27" や "BS15"。 */
   readonly label: string;
+  /** 衛星で実際に掴んだ TS 識別子。地上波と未取得は null。 */
+  readonly tsid: number | null;
   readonly index: number;
   readonly total: number;
   /** 直前のチャンネルでロックしたか。まだなら null。 */
@@ -56,6 +72,8 @@ export interface ScanOptions {
    * 別の機器が給電している線へ重ねて出すと競合する。
    */
   readonly allowLnb15v?: boolean | undefined;
+  /** 一時的な計測用。取り出した TS をそのまま渡す。コミットしない。 */
+  readonly onBytes?: ((bytes: Uint8Array) => void) | undefined;
   readonly onProgress?: ((progress: ScanProgress) => void) | undefined;
 }
 
@@ -95,11 +113,11 @@ function sleep(milliseconds: number): Promise<void> {
 /** サービスと局情報から、UI が使う形の1行を作る。 */
 function toChannelItem(
   service: ServiceEntry,
-  network: NetworkEntry,
+  network: NetworkEntry | null,
   tuning: Tuning,
   primary: boolean,
 ): ChannelItem {
-  const name = service.serviceName !== '' ? service.serviceName : network.tsName;
+  const name = service.serviceName !== '' ? service.serviceName : (network?.tsName ?? '');
   return {
     // EPGStation と同じ組み立て方。networkId と serviceId から一意に決まる。
     id: service.networkId * 100_000 + service.serviceId,
@@ -112,7 +130,7 @@ function toChannelItem(
     // **選局に要るものをそのまま持たせる。**衛星は周波数だけでは
     // TS が決まらず、名前から組み立て直すこともできない。
     tuning,
-    remoteControlKeyId: network.remoteControlKeyId ?? undefined,
+    remoteControlKeyId: network?.remoteControlKeyId ?? undefined,
     hasLogoData: false,
     isPrimary: primary,
     isSubChannel: !primary,
@@ -217,6 +235,8 @@ export class ChannelScan {
           network = null;
           reader = new ServiceInfoReader({
             decodeText: decodeAribText,
+            // 衛星は NIT actual を待たない。届かないまま時間切れになる。
+            requireNetwork: !satellite,
             onServices: (list) => { services = [...list]; },
             onNetwork: (entry) => { network = entry; },
           });
@@ -229,6 +249,7 @@ export class ChannelScan {
             [drainPointer, DRAIN_BYTES]) as number;
           if (size <= 0) break;
           const bytes = module.HEAPU8.subarray(drainPointer, drainPointer + size);
+          options.onBytes?.(bytes);
           reader?.push(bytes);
           eit?.push(bytes);
         }
@@ -251,7 +272,9 @@ export class ChannelScan {
           const discovered = tsidAt(index);
           const tuning = base === undefined ? undefined
             : discovered >= 0 ? { ...base, tsid: discovered } : base;
-          if (network !== null && tuning !== undefined) {
+          // 衛星では network が無いまま確定することがある。局の識別に
+          // 要るものは SDT にも入っているので、それで組み立てる。
+          if (tuning !== undefined && (network !== null || satellite)) {
             this.#collect(found, programs, services, network, eit, tuning);
           }
           const locked = lockedAt(index) === 1;
@@ -260,6 +283,7 @@ export class ChannelScan {
             options.onProgress?.({
               tuning,
               label,
+              tsid: discovered >= 0 ? discovered : null,
               index,
               total: tunings.length,
               locked,
@@ -298,7 +322,7 @@ export class ChannelScan {
         eit?.push(bytes);
       }
       const last = tunings[index];
-      if (network !== null && acknowledged < index && last !== undefined) {
+      if (acknowledged < index && last !== undefined && (network !== null || satellite)) {
         this.#collect(found, programs, services, network, eit, last);
       }
 
@@ -318,7 +342,7 @@ export class ChannelScan {
     found: ChannelItem[],
     programs: ProgramItem[],
     services: readonly ServiceEntry[],
-    network: NetworkEntry,
+    network: NetworkEntry | null,
     eit: EitReader | null,
     tuning: Tuning,
   ): void {

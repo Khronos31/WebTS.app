@@ -317,7 +317,7 @@ void* worker_main(void* argument) noexcept {
             continue;
         }
 
-        // 中継器の中から TS を1つ選ぶ。空きスロットはここで弾かれる。
+        // 中継器の中から TS を1つ選ぶ。
         if (satellite) {
             const auto selected = frontend.select_satellite_slot(
                 static_cast<std::uint8_t>(slot));
@@ -326,7 +326,17 @@ void* worker_main(void* argument) noexcept {
                 await_acknowledge(job, static_cast<int>(i));
                 continue;
             }
-            job.tsid[i].store(static_cast<int>(frontend.selected_tsid()));
+            // **空きスロットは選べてしまう。**TMCC は使っていない相対 TS 番号に
+            // 0xFFFF を返す。実測で BS15 は 0〜2 が実在し、3 以降が 0xFFFF
+            // だった。ここで弾かないと、中身の無いスロットを1本あたり数秒
+            // 読んでしまう。
+            const auto tsid = frontend.selected_tsid();
+            if (tsid == 0xFFFFU || tsid == 0U) {
+                job.locked[i].store(0);
+                await_acknowledge(job, static_cast<int>(i));
+                continue;
+            }
+            job.tsid[i].store(static_cast<int>(tsid));
         }
         job.locked[i].store(1);
 
