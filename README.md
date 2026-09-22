@@ -24,6 +24,21 @@ Siano と PX4 のチューナー処理を TypeScript で書き直さず、上流
 ただし公式 WebUSB backend は**無改変のままでは保留中の転送を安全に止められない**ことが
 測定済みで、backend と core の双方に修正が要る。[docs/FINDINGS.md](docs/FINDINGS.md) の1章。
 
+## ビルド
+
+WASM の各モジュールは Emscripten を要る。`emcc` と `em++` を PATH に置くか、
+`EMSCRIPTEN_ROOT` にそれらのあるディレクトリを渡す。
+
+このリポジトリの開発機では scoop で入れており、shim が PATH に出ないので
+環境変数で渡す。
+
+```sh
+EMSCRIPTEN_ROOT="$HOME/scoop/apps/emscripten/current/upstream/emscripten" npm run build:q3u4-scan
+```
+
+`npm run check`（vendor 検査・型・テスト・Vite ビルド）に WASM のビルドは
+含まれない。`native/` を触ったときは対応する `build:*` を明示的に走らせる。
+
 ## ドキュメント
 
 | | |
