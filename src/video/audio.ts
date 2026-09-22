@@ -105,6 +105,8 @@ export class AudioPlayer {
   #gain: GainNode | null = null;
   #volume = 1;
   #muted = false;
+  /** 一時停止による無音。利用者のミュートとは別に持つ。 */
+  #paused = false;
   #decoder: AudioDecoder | null = null;
   #configured = false;
   /** ctx.currentTime と PTS を結び付ける点。 */
@@ -140,7 +142,7 @@ export class AudioPlayer {
     const context = new AudioContext({ sampleRate: SAMPLE_RATE, latencyHint: 'playback' });
     void context.resume();
     const gain = context.createGain();
-    gain.gain.value = this.#muted ? 0 : this.#volume;
+    gain.gain.value = this.#level();
     gain.connect(context.destination);
     this.#gain = gain;
     this.#context = context;
@@ -237,12 +239,30 @@ export class AudioPlayer {
 
   setVolume(volume: number): void {
     this.#volume = Math.max(0, Math.min(1, volume));
-    if (this.#gain !== null) this.#gain.gain.value = this.#muted ? 0 : this.#volume;
+    this.#applyLevel();
   }
 
   setMuted(muted: boolean): void {
     this.#muted = muted;
-    if (this.#gain !== null) this.#gain.gain.value = muted ? 0 : this.#volume;
+    this.#applyLevel();
+  }
+
+  /**
+   * 一時停止中の無音。**復号も再生の予約も止めない。**止めるとクロックが
+   * 進まなくなり、映像の歩調を合わせる相手が消える。復帰したときに
+   * ライブの位置へ戻すための作り直しも要らなくなる。
+   */
+  setPaused(paused: boolean): void {
+    this.#paused = paused;
+    this.#applyLevel();
+  }
+
+  #level(): number {
+    return this.#muted || this.#paused ? 0 : this.#volume;
+  }
+
+  #applyLevel(): void {
+    if (this.#gain !== null) this.#gain.gain.value = this.#level();
   }
 
   /** いま鳴っている位置を PTS で返す。未再生なら null。 */

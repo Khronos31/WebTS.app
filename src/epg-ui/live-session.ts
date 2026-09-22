@@ -117,6 +117,7 @@ export class LiveSession {
   #clock = 0;
   #ended = false;
   #stopped = false;
+  #paused = false;
   #frames = 0;
   #stats: LiveStats | null = null;
 
@@ -135,7 +136,11 @@ export class LiveSession {
     this.#drainPointer = module._malloc(DRAIN_BYTES);
     this.#pollPointer = module._malloc(POLL_WORDS * 4);
     this.#audio = new AudioPlayer();
-    this.#captions = new CaptionText((text) => { options.onCaption?.(text); });
+    // 一時停止中は字幕も更新しない。絵が止まっているのに字幕だけ進むと、
+    // 画面の中で言っていることと出ている字が合わなくなる。
+    this.#captions = new CaptionText((text) => {
+      if (!this.#paused) options.onCaption?.(text);
+    });
   }
 
   static isActive(): boolean {
@@ -174,6 +179,27 @@ export class LiveSession {
 
   setMuted(muted: boolean): void {
     this.#audio.setMuted(muted);
+  }
+
+  get paused(): boolean {
+    return this.#paused;
+  }
+
+  /**
+   * 一時停止。**受信は止めない。**
+   *
+   * 止めてしまうと次に再生するとき選局からやり直しになり、復調ロックを
+   * 数秒待たされる。live で数秒の間が空くのは一時停止として使い物にならない。
+   * 代わりに、描画と音だけを止める。音声は無音のまま鳴らし続けるので
+   * 時計が進み続け、復帰した瞬間からライブの位置で再生が続く。滞留も
+   * 増えない（消費を止めないため）。
+   */
+  setPaused(paused: boolean): void {
+    if (this.#stopped || this.#paused === paused) return;
+    this.#paused = paused;
+    this.#audio.setPaused(paused);
+    const request: PlayerRequest = { kind: 'paused', value: paused };
+    this.#worker.postMessage(request);
   }
 
   get stats(): LiveStats | null {

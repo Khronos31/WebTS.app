@@ -124,7 +124,9 @@ export class VideoPlayer {
     this.volumeSlider.min = '0';
     this.volumeSlider.max = '1';
     this.volumeSlider.step = '0.05';
-    this.volumeSlider.value = '0'; // 初期ミュートに合わせる
+    // **実際の音量を入れる。**固定で '0' を入れていたため、音は出ているのに
+    // つまみだけ左端に張り付いていた。
+    this.volumeSlider.value = String(this.volume);
 
     leftGroup.append(this.playBtn, liveBadge, this.volumeBtn, this.volumeSlider);
 
@@ -342,6 +344,11 @@ export class VideoPlayer {
     // PiP 中なら、流しているストリームも新しい canvas のものへ繋ぎ直す。
     if (this.pipVideo !== null) this.pipVideo.srcObject = next.captureStream();
     return next.transferControlToOffscreen();
+  }
+
+  /** いまの音量とミュート。受信を開き直したときに鳴らし直す側へ渡す。 */
+  public get audioState(): { volume: number; muted: boolean } {
+    return { volume: this.volume, muted: this.muted };
   }
 
   /** 受信の状況とエラーを出す。空文字で消える。 */

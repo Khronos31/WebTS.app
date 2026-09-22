@@ -232,11 +232,16 @@ export class EitReader {
   } {
     let name = '';
     let description = '';
-    const extended: Record<string, string> = {};
     let genre: number | null = null;
     let subGenre: number | null = null;
     // 拡張形式イベント記述子は複数に分かれて届き、項目名が空なら前の続き。
     let lastItem = '';
+    // **断片は復号せずにバイトのまま溜める。**1文字が断片の境目で分かれて
+    // 届くため、断片ごとに復号すると、切れた側は2バイト目を待って EOF で
+    // 落ち、続く側は文字の後半から読み始めて無関係な字になる。実測で
+    // 「番組内容２」の本文が丸ごと落ち、続きが「跛る思い出を…」になっていた。
+    // 符号集合の指示も断片をまたいで効くので、連結してから一度だけ解く。
+    const parts = new Map<string, Uint8Array[]>();
 
     let offset = 0;
     while (offset + 2 <= descriptors.length) {
@@ -252,21 +257,34 @@ export class EitReader {
         const textLength = body[4 + nameLength] ?? 0;
         description = this.#handlers.decodeText(
           body.subarray(5 + nameLength, 5 + nameLength + textLength));
-      } else if (tag === 0x4e && body.length >= 6) {
+      } else if (tag === 0x4e && body.length >= 5) {
         // 拡張形式イベント記述子。
-        const itemsLength = body[5] ?? 0;
-        let item = 6;
-        const itemsEnd = 6 + itemsLength;
+        //
+        //   body[0]     descriptor_number | last_descriptor_number
+        //   body[1..3]  ISO_639_language_code
+        //   body[4]     length_of_items
+        //   body[5..]   items
+        //
+        // **ここを1バイトずらして読んでいた。**length_of_items として最初の
+        // 項目名の長さを読み、項目の開始も1バイト後ろにしていたため、項目名と
+        // 項目値が1つの文字列に混ざり（「【メインキャスター】榎並大二郎…」）、
+        // 続く項目では符号の途中から読み始めて復号が例外で落ちていた。
+        const itemsLength = body[4] ?? 0;
+        let item = 5;
+        const itemsEnd = 5 + itemsLength;
         while (item + 1 <= itemsEnd && item < body.length) {
           const itemNameLength = body[item] ?? 0;
           const itemName = this.#handlers.decodeText(
             body.subarray(item + 1, item + 1 + itemNameLength));
           const itemTextLength = body[item + 1 + itemNameLength] ?? 0;
-          const itemText = this.#handlers.decodeText(
-            body.subarray(item + 2 + itemNameLength,
-              item + 2 + itemNameLength + itemTextLength));
+          const itemText = body.subarray(item + 2 + itemNameLength,
+            item + 2 + itemNameLength + itemTextLength);
           const key = itemName !== '' ? itemName : lastItem;
-          if (key !== '') extended[key] = (extended[key] ?? '') + itemText;
+          if (key !== '') {
+            const collected = parts.get(key) ?? [];
+            collected.push(itemText);
+            parts.set(key, collected);
+          }
           if (itemName !== '') lastItem = itemName;
           item += 2 + itemNameLength + itemTextLength;
         }
@@ -275,6 +293,17 @@ export class EitReader {
         genre = ((body[0] ?? 0) >> 4) & 0x0f;
         subGenre = (body[0] ?? 0) & 0x0f;
       }
+    }
+    const extended: Record<string, string> = {};
+    for (const [key, collected] of parts) {
+      const total = collected.reduce((sum, piece) => sum + piece.length, 0);
+      const joined = new Uint8Array(total);
+      let offset = 0;
+      for (const piece of collected) {
+        joined.set(piece, offset);
+        offset += piece.length;
+      }
+      extended[key] = this.#handlers.decodeText(joined);
     }
     return { name, description, extended, genre, subGenre };
   }

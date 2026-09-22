@@ -6,6 +6,7 @@
 // 使える（字幕本文と同じ符号系であるため）。
 
 import { ARIBB24JapaneseJIS8Tokenizer } from 'aribb24.js';
+import { installAribDictionaries } from './arib-dictionary';
 
 /**
  * SI の文字列の初期状態を明示する指示列。
@@ -35,17 +36,21 @@ let tokenizer: ARIBB24JapaneseJIS8Tokenizer | null = null;
 export function decodeAribText(bytes: Uint8Array): string {
   if (bytes.length === 0) return '';
   // 外字を私用領域へ回すと表示できない環境で豆腐になる。既定のままにする。
+  installAribDictionaries();
   tokenizer ??= new ARIBB24JapaneseJIS8Tokenizer({ usePUA: false });
   const prefixed = new Uint8Array(SI_INITIAL_STATE.length + bytes.length);
   prefixed.set(SI_INITIAL_STATE);
   prefixed.set(bytes, SI_INITIAL_STATE.length);
+  // **落ちても、そこまで解けたぶんは返す。**末尾が2バイト文字の途中で
+  // 切れていると EOF で落ちる。全部捨てると1文字のために文章が丸ごと
+  // 消えるので、読めたところまでを出す。
+  let text = '';
   try {
-    let text = '';
     for (const token of tokenizer.tokenizeStatement(prefixed)) {
       if (token.tag === 'Character') text += token.character;
     }
-    return text;
   } catch {
-    return '';
+    return text;
   }
+  return text;
 }

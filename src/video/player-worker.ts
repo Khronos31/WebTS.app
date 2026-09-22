@@ -82,6 +82,7 @@ export type PlayerRequest =
   | { readonly kind: 'chunk'; readonly bytes: ArrayBuffer; readonly backlogBytes?: number }
   /** 音声の時計。これが来ている間は映像はこれに追随する。 */
   | { readonly kind: 'clock'; readonly pts: number }
+  | { readonly kind: 'paused'; readonly value: boolean }
   | { readonly kind: 'end' };
 
 const post = (message: PlayerMessage): void => { self.postMessage(message); };
@@ -141,6 +142,8 @@ class Player {
   #trim = 0;
   #sequence: Mpeg2Sequence | null = null;
   #sized = false;
+  /** 一時停止。描画だけを止める。受信と復号は続ける。 */
+  #paused = false;
 
   constructor(canvas: OffscreenCanvas, wantedProgram: number | null) {
     this.#canvas = canvas;
@@ -303,36 +306,49 @@ class Player {
     const frame = decoder.frame();
     if (sequence === null || frame === null) return;
 
-    // VideoFrame は1本の連続したバッファを要求するので、3面をまとめて
-    // 1回だけ写す。ここが表示経路で唯一のコピーである。
     const lumaSize = sequence.codedWidth * sequence.codedHeight;
     const chromaSize = sequence.chromaWidth * sequence.chromaHeight;
-    const planes = new Uint8Array(lumaSize + chromaSize * 2);
-    planes.set(frame.y.subarray(0, lumaSize), 0);
-    planes.set(frame.u.subarray(0, chromaSize), lumaSize);
-    planes.set(frame.v.subarray(0, chromaSize), lumaSize + chromaSize);
+
+    // 一時停止中は描かない。**分離も復号も歩調合わせも止めない。**止めると
+    // 受信を手放すことになり、復帰のたびに復調ロックを待つことになる。
+    // 描かないぶん、止めているあいだは表示経路のコピーも起きない。
+    let planes: Uint8Array | null = null;
+    if (!this.#paused) {
+      // VideoFrame は1本の連続したバッファを要求するので、3面をまとめて
+      // 1回だけ写す。ここが表示経路で唯一のコピーである。
+      // **待つ前に写す。**待っているあいだに復号が進むと、frame の指す先は
+      // WASM の同じ場所で書き換わる。
+      planes = new Uint8Array(lumaSize + chromaSize * 2);
+      planes.set(frame.y.subarray(0, lumaSize), 0);
+      planes.set(frame.u.subarray(0, chromaSize), lumaSize);
+      planes.set(frame.v.subarray(0, chromaSize), lumaSize + chromaSize);
+    }
 
     const wait = this.#schedule(frame);
     if (wait > 1 && this.#esBytes < HIGH_WATER_BYTES) await sleep(wait);
 
-    const picture = new VideoFrame(planes, {
-      format: 'I420',
-      codedWidth: sequence.codedWidth,
-      codedHeight: sequence.codedHeight,
-      layout: [
-        { offset: 0, stride: sequence.codedWidth },
-        { offset: lumaSize, stride: sequence.chromaWidth },
-        { offset: lumaSize + chromaSize, stride: sequence.chromaWidth },
-      ],
-      // 符号化は 1440x1088 でも見せるのは 1440x1080。
-      visibleRect: { x: 0, y: 0, width: sequence.pictureWidth, height: sequence.pictureHeight },
-      // 標本比 4:3 の 1440x1080 は 1920x1080 として見せる。
-      displayWidth: displaySize(sequence).width,
-      displayHeight: displaySize(sequence).height,
-      timestamp: Math.round(this.#frames * this.#periodMs * 1000),
-    });
-    this.#context.drawImage(picture, 0, 0, this.#canvas.width, this.#canvas.height);
-    picture.close();
+    if (planes !== null) {
+      const picture = new VideoFrame(planes, {
+        format: 'I420',
+        codedWidth: sequence.codedWidth,
+        codedHeight: sequence.codedHeight,
+        layout: [
+          { offset: 0, stride: sequence.codedWidth },
+          { offset: lumaSize, stride: sequence.chromaWidth },
+          { offset: lumaSize + chromaSize, stride: sequence.chromaWidth },
+        ],
+        // 符号化は 1440x1088 でも見せるのは 1440x1080。
+        visibleRect: {
+          x: 0, y: 0, width: sequence.pictureWidth, height: sequence.pictureHeight,
+        },
+        // 標本比 4:3 の 1440x1080 は 1920x1080 として見せる。
+        displayWidth: displaySize(sequence).width,
+        displayHeight: displaySize(sequence).height,
+        timestamp: Math.round(this.#frames * this.#periodMs * 1000),
+      });
+      this.#context.drawImage(picture, 0, 0, this.#canvas.width, this.#canvas.height);
+      picture.close();
+    }
 
     this.#frames += 1;
     if (this.#frames % 30 === 0) {
@@ -348,6 +364,10 @@ class Player {
         counters: { ...this.#demuxer.counters },
       });
     }
+  }
+
+  setPaused(paused: boolean): void {
+    this.#paused = paused;
   }
 
   /**
@@ -424,6 +444,7 @@ self.addEventListener('message', (event: MessageEvent<PlayerRequest>) => {
       return;
     }
     if (request.kind === 'clock') { player?.clock(request.pts); return; }
+    if (request.kind === 'paused') { player?.setPaused(request.value); return; }
     player?.end();
   } catch (error) {
     post({ kind: 'failed', message: error instanceof Error ? error.message : String(error) });

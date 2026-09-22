@@ -72,9 +72,11 @@ export class WatchView {
       autoplay: true,
       programTitle: this.currentProgram?.name,
       onPlayPause: (playing) => {
-        // live なので「一時停止」は受信の停止、「再生」は開き直しになる。
-        if (playing) void this.startLive();
-        else this.stopLive();
+        // **一時停止でも受信は手放さない。**手放すと再生のたびに選局と
+        // 復調ロックをやり直すことになり、復帰まで数秒待たされる。
+        // 受信が無いとき（開始に失敗した後など）だけ開き直す。
+        if (this.session !== null) this.session.setPaused(!playing);
+        else if (playing) void this.startLive();
       },
       onVolumeChange: (volume, muted) => {
         this.session?.setVolume(volume);
@@ -232,6 +234,11 @@ export class WatchView {
         onCaption: (text) => { this.player.setSubtitleText(text); },
         onEnded: (reason) => { if (reason !== '') this.showStatus(reason); },
       });
+      // 開き直したときは音量が既定へ戻る。つまみの位置と鳴り方がずれるので、
+      // いま表示されている値をそのまま入れ直す。
+      const audio = this.player.audioState;
+      this.session.setVolume(audio.volume);
+      this.session.setMuted(audio.muted);
     } catch (error) {
       this.showStatus(error instanceof Error ? error.message : String(error));
     }

@@ -12,6 +12,7 @@
 // 字幕の中身は放送内容である。保存も送信もしない。
 
 import { MPEGTSFeeder, TextRenderer } from 'aribb24.js';
+import { installAribDictionaries } from '../ts/arib-dictionary';
 
 export interface CaptionTextStats {
   readonly fed: number;
@@ -40,6 +41,8 @@ export class CaptionText {
   #destroyed = false;
 
   constructor(onText: (text: string) => void = () => {}) {
+    // 字幕も SI と同じ文字集合の穴を踏む。作る前に埋める。
+    installAribDictionaries();
     // PartialFeederOption は3つの枝すべてを要求する（中身は任意）。
     this.#feeder = new MPEGTSFeeder({
       recieve: { type: 'Caption', language: 0 },
