@@ -58,6 +58,11 @@ EMSCRIPTEN_ROOT="$HOME/scoop/apps/emscripten/current/upstream/emscripten" npm ru
 受信機は1本しか開けないので、視聴中や走査中は重ねて呼ばない。
 `#/api/status` で誰が握っているかを確認できる。
 
+## 受け入れ結果
+
+M0〜M4 の条件と実測を1対1で並べたものが [受け入れ結果](docs/ACCEPTANCE.md)。
+**「たぶん通る」は通っていないものとして扱っている。**
+
 ## 動作環境
 
 対応 OS・ブラウザ・前提条件は [動作環境](docs/COMPATIBILITY.md) にまとめてある。
