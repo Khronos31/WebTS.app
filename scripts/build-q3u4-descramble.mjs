@@ -92,6 +92,7 @@ run(emxx, [
     '"_webts_q3u4_scan_start","_webts_q3u4_scan_poll","_webts_q3u4_scan_drain",' +
     '"_webts_q3u4_scan_advance","_webts_q3u4_scan_acknowledge",' +
     '"_webts_q3u4_scan_stop","_webts_q3u4_scan_join",' +
+    '"_webts_q3u4_scan_error_name",' +
     '"_webts_q3u4_session_keep_open",' +
     '"_webts_q3u4_descramble_join","_webts_q3u4_descramble_error_name",'+
     '"_webts_q3u4_descramble_output","_webts_q3u4_descramble_output_size",'+

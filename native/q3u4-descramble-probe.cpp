@@ -1196,6 +1196,15 @@ const char* webts_q3u4_descramble_error_name(int error) {
     return error_string(static_cast<Error>(error));
 }
 
+/**
+ * 走査の失敗を名前にする。中身は上と同じで、呼ぶ側が別なので名前を分ける。
+ * **失敗したときにしか呼ばれない。**統合のときに移植し忘れており、成功する
+ * かぎり誰も気づかなかった。
+ */
+const char* webts_q3u4_scan_error_name(int error) {
+    return webts_q3u4_descramble_error_name(error);
+}
+
 int webts_q3u4_descramble_join(void) {
     if (g_job == nullptr) return 0;
     if (g_job->state.load() == kRunning) return static_cast<int>(Error::BUSY);

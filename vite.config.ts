@@ -1,6 +1,8 @@
 // Vitest ships its own defineConfig so the `test` block is typed. Importing it
 // from 'vite' leaves `test` unknown and fails the typecheck.
-import { createReadStream, mkdirSync, statSync, writeFileSync } from 'node:fs';
+import {
+  createReadStream, existsSync, mkdirSync, readFileSync, statSync, writeFileSync,
+} from 'node:fs';
 import { join, resolve } from 'node:path';
 import { defineConfig, type Plugin } from 'vitest/config';
 
@@ -8,6 +10,27 @@ import { defineConfig, type Plugin } from 'vitest/config';
 // make the dev and preview servers cross-origin isolated so a SharedArrayBuffer
 // build stays possible. Production hosting must reproduce the same contract;
 // on Cloudflare Pages that is a `_headers` file.
+/**
+ * 別端末から試すための HTTPS。
+ *
+ * **証明書はリポジトリに置かない。**環境変数で渡す。Tailscale の
+ * `tailscale cert` が出す Let's Encrypt の証明書をそのまま使えるので、
+ * 自己署名の警告も CA の導入も要らない。
+ *
+ *   WEBTS_TLS_CERT=~/home-pc.tailXXXX.ts.net.crt  *   WEBTS_TLS_KEY=~/home-pc.tailXXXX.ts.net.key npm run dev
+ *
+ * 指定が無ければ平文のまま。手元の localhost はそれで足りる。
+ */
+function tls() {
+  const cert = process.env['WEBTS_TLS_CERT'];
+  const key = process.env['WEBTS_TLS_KEY'];
+  if (cert === undefined || key === undefined) return {};
+  if (!existsSync(cert) || !existsSync(key)) {
+    throw new Error(`WEBTS_TLS_CERT / WEBTS_TLS_KEY が読めません: ${cert} / ${key}`);
+  }
+  return { https: { cert: readFileSync(cert), key: readFileSync(key) } };
+}
+
 const crossOriginIsolation = {
   'Cross-Origin-Opener-Policy': 'same-origin',
   'Cross-Origin-Embedder-Policy': 'require-corp',
@@ -87,8 +110,13 @@ export default defineConfig({
     outDir: 'dist',
     sourcemap: true,
   },
-  server: { headers: crossOriginIsolation },
-  preview: { headers: crossOriginIsolation },
+  // **LAN へ出す。**既定では localhost にしか bind せず、別の端末から届かない。
+  //
+  // ただし届くだけでは足りない。`http://` の LAN アドレスはセキュア
+  // コンテキストではないので、`navigator.usb` も SharedArrayBuffer も
+  // 生えない。別端末から実機を試すには HTTPS が要る。
+  server: { host: true, headers: crossOriginIsolation, ...tls() },
+  preview: { host: true, headers: crossOriginIsolation, ...tls() },
   test: {
     environment: 'node',
     include: ['test/**/*.test.ts'],

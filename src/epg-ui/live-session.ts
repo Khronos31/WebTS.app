@@ -18,7 +18,7 @@
 import { AudioPlayer } from '../video/audio';
 import type { PlayerMessage, PlayerRequest } from '../video/player-worker';
 import { readCachedFirmware } from '../usb/firmware';
-import { loadQ3U4Module, type Q3U4Module } from './q3u4-module';
+import { ensureTunerAvailable, loadQ3U4Module, type Q3U4Module } from './q3u4-module';
 import { CaptionText } from './caption-text';
 import type { Tuning } from './tuning';
 import { allowLnb15v } from './lnb-setting';
@@ -126,6 +126,7 @@ export class LiveSession {
   static async start(options: LiveSessionOptions): Promise<LiveSession> {
     active?.stop();
 
+    await ensureTunerAvailable();
     const firmware = await readCachedFirmware();
     if (firmware === null) {
       throw new Error('ファームウェアが設定されていません。設定から取得してください。');

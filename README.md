@@ -58,6 +58,11 @@ EMSCRIPTEN_ROOT="$HOME/scoop/apps/emscripten/current/upstream/emscripten" npm ru
 受信機は1本しか開けないので、視聴中や走査中は重ねて呼ばない。
 `#/api/status` で誰が握っているかを確認できる。
 
+## 動作環境
+
+対応 OS・ブラウザ・前提条件は [動作環境](docs/COMPATIBILITY.md) にまとめてある。
+**Linux は udev ルールが要る**点と、**別端末から開くには HTTPS が要る**点に注意。
+
 ## ドキュメント
 
 | | |

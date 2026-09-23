@@ -17,7 +17,7 @@ import { decodeAribText } from '../ts/arib-text';
 import { readCachedFirmware } from '../usb/firmware';
 import { toProgramItem } from './program-item';
 import { grTunings, type Tuning } from './tuning';
-import { loadQ3U4Module } from './q3u4-module';
+import { ensureTunerAvailable, loadQ3U4Module } from './q3u4-module';
 import { LiveSession } from './live-session';
 import type { ChannelItem, ProgramItem } from './types';
 
@@ -185,6 +185,7 @@ export class ChannelScan {
     if (satellite && tunings.some((tuning) => tuning.slot === null)) {
       throw new Error('衛星の走査には相対 TS 番号が要ります。');
     }
+    await ensureTunerAvailable();
     const firmware = await readCachedFirmware();
     if (firmware === null) {
       throw new Error('ファームウェアが設定されていません。設定から取得してください。');
