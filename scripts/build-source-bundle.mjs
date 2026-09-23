@@ -30,7 +30,11 @@ const short = commit.slice(0, 12);
 
 // **汚れた作業ツリーから作らない。**コミットされていない変更が入った
 // バイナリに対して、その変更を含まない bundle を配ることになる。
-const dirty = git(['status', '--porcelain']);
+//
+// 見るのは**追跡対象の変更だけ**にする。未追跡のファイルは bundle に入らない
+// ので、含まれない理由にならない。CI では emsdk のキャッシュがリポジトリ直下に
+// 置かれ、それを汚れと見なして落ちていた。
+const dirty = git(['status', '--porcelain', '--untracked-files=no']);
 if (dirty.length > 0) {
   process.stderr.write(
     'working tree is not clean; commit or stash before building the bundle:\n');
