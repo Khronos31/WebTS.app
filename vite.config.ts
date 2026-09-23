@@ -1,7 +1,8 @@
 // Vitest ships its own defineConfig so the `test` block is typed. Importing it
 // from 'vite' leaves `test` unknown and fails the typecheck.
 import {
-  createReadStream, existsSync, mkdirSync, readFileSync, statSync, writeFileSync,
+  cpSync, createReadStream, existsSync, mkdirSync, readFileSync, readdirSync, rmSync,
+  statSync, writeFileSync,
 } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { defineConfig, type Plugin } from 'vitest/config';
@@ -49,6 +50,54 @@ const crossOriginIsolation = {
 // local/, which is gitignored, and only under a sanitised name. `apply: 'serve'`
 // keeps it out of any build, and the dev server is bound to localhost, so
 // nothing here is reachable from outside this machine.
+/**
+ * WASM の出力を配信物へ入れる。
+ *
+ * **`build/` は Vite の管理外にある。**Emscripten が吐く場所で、`public/` でも
+ * `src/` でもない。dev サーバーはプロジェクト直下を配信するので気づかないが、
+ * `vite build` の出力には入らず、本番では `/build/...` が 404 になって
+ * アプリが何も動かない。
+ *
+ * 出力先を `public/` へ移す手もあるが、ビルドスクリプト側の出力パスを全部
+ * 書き換えることになる。ここで写すほうが変更が1か所で済む。
+ */
+/**
+ * 配信するのはアプリが読むものだけ。
+ *
+ * `build/` には開発用のプローブ（カード単体、TS 取得単体、libusb の所有権
+ * 検査など）も入っている。**それらは公開物ではない。**入口は index.html
+ * だけで、プローブ用の HTML はビルド対象にも入っていない。
+ */
+const SHIPPED_MODULES = ['mpeg2-decoder', 'px4-identity', 'q3u4-descramble'];
+
+function wasmModules(): Plugin {
+  return {
+    name: 'webts-wasm-modules',
+    apply: 'build',
+    closeBundle() {
+      const root = import.meta.dirname;
+      const to = resolve(root, 'dist', 'build');
+      rmSync(to, { recursive: true, force: true });
+      for (const name of SHIPPED_MODULES) {
+        const from = resolve(root, 'build', name);
+        if (!existsSync(from)) {
+          throw new Error(`build/${name} がありません。`
+            + `npm run build:${name === 'mpeg2-decoder' ? 'mpeg2' : name} を先に走らせてください。`);
+        }
+        // **`.mjs` と `.wasm` だけ。**同じ場所に中間生成物が残っている。
+        // `patched/` のオブジェクトファイル（1モジュールあたり 1.4 MB）と、
+        // リンカが残す `.wasm.tmp0` である。前者は配る意味が無く、後者は
+        // 掴めずに copy が失敗する。
+        mkdirSync(resolve(to, name), { recursive: true });
+        for (const file of readdirSync(from)) {
+          if (!file.endsWith('.mjs') && !file.endsWith('.wasm')) continue;
+          cpSync(resolve(from, file), resolve(to, name, file));
+        }
+      }
+    },
+  };
+}
+
 function localCapture(): Plugin {
   const directory = resolve(import.meta.dirname, 'local');
   return {
@@ -104,7 +153,7 @@ function localCapture(): Plugin {
 }
 
 export default defineConfig({
-  plugins: [localCapture()],
+  plugins: [localCapture(), wasmModules()],
   build: {
     target: 'es2022',
     outDir: 'dist',
