@@ -4,16 +4,17 @@ PX-Q3U4 を利用者の端末へ直接つなぎ、WebUSB 対応ブラウザだ�
 ライブ放送を視聴する静的 Web アプリケーション。放送 TS、カード通信、復号、映像音声処理を
 公開クラウドへ送らない。
 
-現在 **0.1.0 に向けた再実装の初期段階**にある。動作するアプリケーションはまだ無い。
+地上波・BS・CS の視聴、字幕、チャンネル走査、番組表の取得が Windows・Linux・
+macOS・Android で動く。M0〜M3 の受け入れ条件は満たしている（[受け入れ結果](docs/ACCEPTANCE.md)）。
+**公開はまだしていない。**
 
 ## 状態
 
-| | |
+| 項目 | 内容 |
 | --- | --- |
 | 配信 | Cloudflare Pages の静的ホスティング、`webts.app`、PWA |
-| ビルド | Linux 上の CI。ビルドスクリプトを PowerShell に依存させない |
+| ビルド | Linux 上の CI |
 | ライセンス | GPL-2.0-only（[LICENSE](LICENSE)） |
-| リポジトリ | private。公開は M4 のゲートを通してから |
 
 ## 方針
 
@@ -33,11 +34,16 @@ WASM の各モジュールは Emscripten を要る。`emcc` と `em++` を PATH 
 環境変数で渡す。
 
 ```sh
-EMSCRIPTEN_ROOT="$HOME/scoop/apps/emscripten/current/upstream/emscripten" npm run build:q3u4-scan
+EMSCRIPTEN_ROOT="$HOME/scoop/apps/emscripten/current/upstream/emscripten" npm run build:q3u4-descramble
 ```
 
+配信するのは `mpeg2-decoder`、`px4-identity`、`q3u4-descramble` の3つ。残りは
+開発用のプローブで、公開物には入らない。
+
 `npm run check`（vendor 検査・型・テスト・Vite ビルド）に WASM のビルドは
-含まれない。`native/` を触ったときは対応する `build:*` を明示的に走らせる。
+含まれない。**ただし `build/` が無いと Vite ビルドは失敗する**（本番で
+`/build/...` が 404 になるより、そこで落ちるほうがよいため）。`native/` を
+触ったときは対応する `build:*` を明示的に走らせる。
 
 ## `#/api/` の操作口
 
@@ -51,12 +57,20 @@ EMSCRIPTEN_ROOT="$HOME/scoop/apps/emscripten/current/upstream/emscripten" npm ru
 #/api/status              いま受信機を使っているか
 #/api/scan?wave=GR|BS|CS  その波を走査して保存する
 #/api/epg/refresh         既知の中継器から番組情報を取り直す
+#/api/epg/schedule        番組表を取る（EIT[schedule]。波と滞在時間を指定できる）
+#/api/epg/coverage        番組情報が何時から何時までを覆っているか
 #/api/lnb                 LNB 給電の許可を読む
 #/api/lnb?allow=1|0       LNB 給電の許可を書く
 ```
 
-受信機は1本しか開けないので、視聴中や走査中は重ねて呼ばない。
-`#/api/status` で誰が握っているかを確認できる。
+受信機は8本あり、走査は視聴が使っているものを避けて残りを使う。**視聴しながら
+番組情報を取り直せる**。走査どうしは同時に走らない。`#/api/status` で誰が
+握っているかを確認できる。
+
+## リリース
+
+開発は `Khronos31/WebTS.app-dev`（private）で行い、まとまったら squash して
+このリポジトリへ出す。手順は [リリース手順](docs/RELEASE.md)。
 
 ## 受け入れ結果
 
@@ -70,21 +84,12 @@ M0〜M4 の条件と実測を1対1で並べたものが [受け入れ結果](doc
 
 ## ドキュメント
 
-| | |
+| 文書 | 内容 |
 | --- | --- |
-| [docs/FINDINGS.md](docs/FINDINGS.md) | 前回実装からの検証結果。測定した事実だけ |
+| [docs/FINDINGS.md](docs/FINDINGS.md) | 実機で測った事実。推測は書かない |
+| [docs/ACCEPTANCE.md](docs/ACCEPTANCE.md) | 受け入れ条件と実測の突き合わせ |
+| [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md) | 動作環境と前提条件 |
+| [docs/RELEASE.md](docs/RELEASE.md) | リポジトリ構成とリリース手順 |
 | [docs/UPSTREAM.md](docs/UPSTREAM.md) | 上流コアの構造メモ |
 
 計画と仕様はリポジトリの外（`.local/SPEC/`）に置いている。
-
-## `archived/`
-
-再実装前の実装一式を退避してある。gitignore 済みで履歴には入らない。**0.1.0 のリリース前に
-ディレクトリごと削除する。**内容は再構成前のコミットにも残っているため、失っても git から
-復元できる。
-
-## 扱わないもの
-
-実機の USB 操作、firmware、選局、放送 TS、B-CAS / カード情報を、serial や raw payload の
-形でログ・表示・送信しない。firmware、放送キャプチャ、カード情報、実行バイナリはコミット
-しない。
