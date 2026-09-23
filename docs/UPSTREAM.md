@@ -26,6 +26,10 @@ vendor 時は `.gitattributes` の `vendor/** -text` を忘れないこと（FIN
 
 ## Khronos31/siano-userland（GPL-2.0-or-later） — PX-S1UD
 
+**取り込んでいない。**PX-S1UD の対応は取り下げた（docs/FINDINGS.md 28章）。
+外付けカードリーダへブラウザから到達する手段が無く、復号できないためである。
+参考として記録だけ残す。
+
 単一チューナー、カードリーダーなし。
 
 | ファイル | 内容 |
