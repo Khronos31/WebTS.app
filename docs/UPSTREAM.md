@@ -26,7 +26,7 @@ vendor 時は `.gitattributes` の `vendor/** -text` を忘れないこと（FIN
 
 ## Khronos31/siano-userland（GPL-2.0-or-later） — PX-S1UD
 
-**取り込んでいない。**PX-S1UD の対応は取り下げた（docs/FINDINGS.md 28章）。
+**取り込んでいない**。PX-S1UD の対応は取り下げた（docs/FINDINGS.md 28章）。
 外付けカードリーダへブラウザから到達する手段が無く、復号できないためである。
 参考として記録だけ残す。
 
@@ -48,7 +48,7 @@ vendor 時は `.gitattributes` の `vendor/** -text` を忘れないこと（FIN
   chunk は 16,384 bytes へ切り詰め、`ts_pop` は最大 100ms 待機する。UI 側で別に持つ
   bounded queue とは統計の意味が異なるので混同しないこと。
 - **`stop_streaming()` は cancel 後、active transfer が 0 になるまで event thread を
-  回して `pthread_join()` する。**保留 promise が残ると停止時間を保証できない。
+  回して `pthread_join()` する**。保留 promise が残ると停止時間を保証できない。
   これが FINDINGS 1章の欠陥が実害になる場所である。
 - firmware は `isdbt_rio.inp` を `set_device_mode()` で送る。`sms_parse_firmware_header()`
   は 12 byte ヘッダと宣言長しか見ず、**checksum も真正性も検証しない。**
@@ -73,14 +73,14 @@ vendor 時は `.gitattributes` の `vendor/** -text` を忘れないこと（FIN
 
 ### 押さえるべき点
 
-- **1台の Q3U4 は USB 上で複数デバイスとして見える。**`group_q3u4_devices()` が serial を
+- **1台の Q3U4 は USB 上で複数デバイスとして見える**。`group_q3u4_devices()` が serial を
   基に4チューナーを1台へまとめる。chooser の行数と物理台数は一致しない。
 - tagged TS の wire tag は `0x17 / 0x27 / 0x37 / 0x47`。demux が 4連続 packet で同期し、
   188 byte 境界を跨ぐ入力を扱い、invalid tag と TEI で sync loss を検出する。
   sink へ渡す前に sync byte を `0x47` へ正規化する。
 - `Q3U4StreamDataPlane::attach()` は worker `std::thread` を開始し、`detach()` /
   `shutdown()` は `cancel_stream()` 後に join する。**ブラウザの main thread から join を
-  呼ばないこと。**Dedicated Worker か、専用 pthread 上で使う。
+  呼ばないこと**。Dedicated Worker か、専用 pthread 上で使う。
 - **pump は bridge ごとに1本**（`kBridgeCount = 2`）。ドライバ用の1本と合わせて3本
   同時に動くので、Emscripten では `PTHREAD_POOL_SIZE` をそれ以上にする。
 - **開始と停止の順序は `TunerService::attach_stream` / `detach_stream` が正**。
