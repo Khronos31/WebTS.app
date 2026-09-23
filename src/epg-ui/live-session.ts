@@ -93,6 +93,24 @@ export interface LiveSessionOptions {
  */
 let active: LiveSession | null = null;
 
+/**
+ * 受信機が解放されるまで待つ。
+ *
+ * **デバイスが閉じたことを直接見る。**C 側の状態が「実行中でない」に変わるのは
+ * 後始末の途中で、そこから attachment を外し、受信機を閉じ、セッションを畳む
+ * までにさらに時間がかかる。BUSY を避けたいなら、その最後まで待つ必要がある。
+ */
+async function settleDevices(timeoutMs = 10_000): Promise<void> {
+  if (typeof navigator === 'undefined' || !('usb' in navigator)) return;
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const devices = await navigator.usb.getDevices();
+    if (devices.every((device) => !device.opened)) return;
+    if (Date.now() > deadline) return;
+    await new Promise((resolve) => { setTimeout(resolve, 100); });
+  }
+}
+
 export class LiveSession {
   readonly #module: Q3U4Module;
   readonly #worker: Worker;
@@ -146,6 +164,12 @@ export class LiveSession {
    */
   static async start(options: LiveSessionOptions): Promise<LiveSession> {
     active?.stop();
+    // **前のセッションが畳み終わるのを待つ。**`stop()` は停止を頼むだけで、
+    // 受信機を手放すのは driver スレッドが後始末を終えてからである。待たずに
+    // 次を開くと同じ受信機を取りに行って上流が BUSY を返す。実測で、
+    // チャンネルを続けて切り替えると2回目が必ず失敗していた。
+    options.onStatus?.('前のチャンネルを片付けています…');
+    await settleDevices();
 
     await ensureTunerAvailable();
     const firmware = await readCachedFirmware();
