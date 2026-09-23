@@ -18,11 +18,11 @@
 import { AudioPlayer } from '../video/audio';
 import type { PlayerMessage, PlayerRequest } from '../video/player-worker';
 import { readCachedFirmware } from '../usb/firmware';
+import { loadQ3U4Module, type Q3U4Module } from './q3u4-module';
 import { CaptionText } from './caption-text';
 import type { Tuning } from './tuning';
 import { allowLnb15v } from './lnb-setting';
 
-const MODULE_URL = '/build/q3u4-descramble/q3u4-descramble.mjs';
 const POLL_WORDS = 17;
 /** 1回の drain で取り出す上限。live は 2 MB/s 程度なので十分余る。 */
 const DRAIN_BYTES = 1024 * 1024;
@@ -66,39 +66,14 @@ export interface LiveSessionOptions {
   readonly onEnded?: ((reason: string) => void) | undefined;
 }
 
-interface DescrambleModule {
-  ccall(
-    name: string,
-    returnType: string | null,
-    argumentTypes: string[],
-    args: unknown[],
-  ): number | string;
-  _malloc(size: number): number;
-  _free(pointer: number): void;
-  HEAPU8: Uint8Array;
-  HEAP32: Int32Array;
-}
-
-let modulePromise: Promise<DescrambleModule> | null = null;
-async function loadModule(): Promise<DescrambleModule> {
-  modulePromise ??= (async () => {
-    const factory = (await import(/* @vite-ignore */ MODULE_URL)) as {
-      default: () => Promise<DescrambleModule>;
-    };
-    return factory.default();
-  })();
-  return modulePromise;
-}
-
 /**
- * 受信機が1本しかない前提で、同時に開けるのは1つだけにする。前のセッションを
- * 止めずに次を開くと、上流が BUSY を返すか、悪くすると片方のデバイスが
- * 列挙から消える（FINDINGS 12章の事故）。
+ * 視聴は同時に1つだけ。カードが1枚しかないので、復号できるのも1つである。
+ * **走査とは同時に走ってよい。**別の受信機を使い、同じセッションを共有する。
  */
 let active: LiveSession | null = null;
 
 export class LiveSession {
-  readonly #module: DescrambleModule;
+  readonly #module: Q3U4Module;
   readonly #worker: Worker;
   readonly #audio: AudioPlayer;
   readonly #captions: CaptionText;
@@ -119,7 +94,7 @@ export class LiveSession {
   #stats: LiveStats | null = null;
 
   private constructor(
-    module: DescrambleModule,
+    module: Q3U4Module,
     worker: Worker,
     options: LiveSessionOptions,
     firmwarePointer: number,
@@ -156,7 +131,7 @@ export class LiveSession {
       throw new Error('ファームウェアが設定されていません。設定から取得してください。');
     }
     options.onStatus?.('モジュールを読み込んでいます…');
-    const module = await loadModule();
+    const module = await loadQ3U4Module();
 
     const firmwarePointer = module._malloc(firmware.length);
     module.HEAPU8.set(firmware, firmwarePointer);

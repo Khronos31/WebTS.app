@@ -15,8 +15,23 @@ import { ApiView } from './views/api-view';
 import { initTheme } from './theme-manager';
 import { readSetupState } from '../ui/setup-state';
 import { primeChannels } from './channel-source';
+import { tickAutoRefresh } from './epg-refresh';
 
 initTheme();
+
+// 番組情報の自動更新。
+//
+// **画面ではなくアプリが回す。**受信機は8本あり、走査は視聴が使っている
+// ものを避けて残りを使うので、視聴中でも取りに行ける。放映中の画面に
+// 置いていたころは、視聴中はその画面が外れていて一度も判定されなかった。
+//
+// 裏のタブでは見送る（絞られたタイマーの上で選局すると極端に遅くなる）。
+// 前面に戻った時点でもう一度判定する。
+const AUTO_REFRESH_INTERVAL_MS = 30_000;
+setInterval(() => { void tickAutoRefresh(); }, AUTO_REFRESH_INTERVAL_MS);
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') void tickAutoRefresh();
+});
 
 export class EpgApp {
   private container: HTMLElement;

@@ -17,15 +17,41 @@ import { decodeAribText } from '../ts/arib-text';
 import { readCachedFirmware } from '../usb/firmware';
 import { toProgramItem } from './program-item';
 import { grTunings, type Tuning } from './tuning';
+import { loadQ3U4Module } from './q3u4-module';
+import { LiveSession } from './live-session';
 import type { ChannelItem, ProgramItem } from './types';
 
-const MODULE_URL = '/build/q3u4-scan/q3u4-scan.mjs';
 const DRAIN_BYTES = 512 * 1024;
-const POLL_BASE_WORDS = 7;
-/** 基本の 7 語のあと、locked[] と tsid[] が件数ぶんずつ並ぶ。 */
-const POLL_ARRAYS = 2;
+/** state, stage, error, cursor, workers, entries。 */
+const POLL_BASE_WORDS = 6;
+/** 作業者ごとに index, waiting, pending。 */
+const WORKER_WORDS = 3;
 const WAVE_TERRESTRIAL = 0;
 const WAVE_SATELLITE = 1;
+/** C 側が立てられる作業者の上限。 */
+const MAX_WORKERS = 4;
+/** 上流の global 受信機番号。各ブリッジの下2つが ISDB-S、上2つが ISDB-T。 */
+const TERRESTRIAL_RECEIVERS = [2, 3, 6, 7];
+const SATELLITE_RECEIVERS = [0, 1, 4, 5];
+
+interface WorkerState {
+  index: number;
+  reader: ServiceInfoReader | null;
+  eit: EitReader | null;
+  services: ServiceEntry[];
+  network: NetworkEntry | null;
+  acknowledged: number;
+}
+
+/**
+ * 衛星は中継器に複数の TS が載る。**どれを掴んだかは SDT が知っている。**
+ * 復調器から読む口がエンクロージャに無く、放送側の申告のほうが正である。
+ */
+function withDiscoveredTsid(tuning: Tuning, services: readonly ServiceEntry[]): Tuning {
+  if (tuning.wave === 'GR') return tuning;
+  const discovered = services[0]?.transportStreamId;
+  return discovered === undefined ? tuning : { ...tuning, tsid: discovered };
+}
 
 /**
  * サービス形式種別のうち、この再生経路で映せるものだけを残す。
@@ -78,30 +104,6 @@ export interface ScanOptions {
 export interface ScanResult {
   readonly channels: readonly ChannelItem[];
   readonly programs: readonly ProgramItem[];
-}
-
-interface ScanModule {
-  ccall(
-    name: string,
-    returnType: string | null,
-    argumentTypes: string[],
-    args: unknown[],
-  ): number | string;
-  _malloc(size: number): number;
-  _free(pointer: number): void;
-  HEAPU8: Uint8Array;
-  HEAP32: Int32Array;
-}
-
-let modulePromise: Promise<ScanModule> | null = null;
-async function loadModule(): Promise<ScanModule> {
-  modulePromise ??= (async () => {
-    const factory = (await import(/* @vite-ignore */ MODULE_URL)) as {
-      default: () => Promise<ScanModule>;
-    };
-    return factory.default();
-  })();
-  return modulePromise;
 }
 
 function sleep(milliseconds: number): Promise<void> {
@@ -177,7 +179,15 @@ export class ChannelScan {
     if (firmware === null) {
       throw new Error('ファームウェアが設定されていません。設定から取得してください。');
     }
-    const module = await loadModule();
+    const module = await loadQ3U4Module();
+
+    // **視聴が使っている受信機は避ける。**残りを人数分の作業者へ配る。
+    const pool = satellite ? SATELLITE_RECEIVERS : TERRESTRIAL_RECEIVERS;
+    const receivers = (LiveSession.isActive() ? pool.slice(1) : [...pool])
+      .slice(0, Math.min(MAX_WORKERS, tunings.length));
+    if (receivers.length === 0) {
+      throw new Error('空いている受信機がありません。');
+    }
 
     const firmwarePointer = module._malloc(firmware.length);
     module.HEAPU8.set(firmware, firmwarePointer);
@@ -185,20 +195,22 @@ export class ChannelScan {
     module.HEAP32.set(tunings.map((tuning) => tuning.frequencyKhz), listPointer / 4);
     const slotPointer = module._malloc(tunings.length * 4);
     module.HEAP32.set(tunings.map((tuning) => tuning.slot ?? 0), slotPointer / 4);
+    const receiverPointer = module._malloc(receivers.length * 4);
+    module.HEAP32.set(receivers, receiverPointer / 4);
     const drainPointer = module._malloc(DRAIN_BYTES);
-    const pollWords = POLL_BASE_WORDS + tunings.length * POLL_ARRAYS;
+    const pollWords = POLL_BASE_WORDS + receivers.length * WORKER_WORDS + tunings.length;
     const pollPointer = module._malloc(pollWords * 4);
 
     const found: ChannelItem[] = [];
     const programs: ProgramItem[] = [];
+    let completed = 0;
     try {
-      // 受信機は波で決まる。dev1 の local 0 が ISDB-S、2 が ISDB-T。
-      // スキャン中は1本しか使わない。
       const started = module.ccall('webts_q3u4_scan_start', 'number',
         ['number', 'number', 'number', 'number', 'number',
-          'number', 'number', 'number'],
-        [firmwarePointer, firmware.length, satellite ? 0 : 2, listPointer, tunings.length,
-          satellite ? WAVE_SATELLITE : WAVE_TERRESTRIAL, slotPointer,
+          'number', 'number', 'number', 'number'],
+        [firmwarePointer, firmware.length, satellite ? WAVE_SATELLITE : WAVE_TERRESTRIAL,
+          listPointer, slotPointer, tunings.length,
+          receiverPointer, receivers.length,
           options.allowLnb15v === true ? 1 : 0]) as number;
       if (started !== 0) {
         const name = String(module.ccall(
@@ -206,121 +218,120 @@ export class ChannelScan {
         throw new Error(`スキャンを開始できません: ${name} (${started})`);
       }
 
-      let index = -1;
-      let reader: ServiceInfoReader | null = null;
-      let eit: EitReader | null = null;
-      let services: ServiceEntry[] = [];
-      let network: NetworkEntry | null = null;
-      let acknowledged = -1;
+      const workers: WorkerState[] = receivers.map(() => ({
+        index: -1, reader: null, eit: null, services: [], network: null, acknowledged: -1,
+      }));
+
+      const drainInto = (worker: number, state: WorkerState): void => {
+        for (;;) {
+          const size = module.ccall('webts_q3u4_scan_drain', 'number',
+            ['number', 'number', 'number'], [worker, drainPointer, DRAIN_BYTES]) as number;
+          if (size <= 0) break;
+          const bytes = module.HEAPU8.subarray(drainPointer, drainPointer + size);
+          state.reader?.push(bytes);
+          state.eit?.push(bytes);
+        }
+      };
 
       for (;;) {
-        if (this.#stopped) {
-          module.ccall('webts_q3u4_scan_stop', null, [], []);
-        }
+        if (this.#stopped) module.ccall('webts_q3u4_scan_stop', null, [], []);
         module.ccall('webts_q3u4_scan_poll', 'number', ['number', 'number'],
           [pollPointer, pollWords]);
         const words = module.HEAP32.subarray(pollPointer / 4, pollPointer / 4 + pollWords);
         const state = words[0] ?? 0;
-        const current = words[3] ?? 0;
-        const waiting = (words[6] ?? 0) === 1;
-        const lockedAt = (at: number): number => words[POLL_BASE_WORDS + at] ?? -1;
-        const tsidAt = (at: number): number =>
-          words[POLL_BASE_WORDS + tunings.length + at] ?? -1;
+        const lockedAt = (at: number): number =>
+          words[POLL_BASE_WORDS + receivers.length * WORKER_WORDS + at] ?? -1;
 
-        if (current !== index) {
-          index = current;
-          services = [];
-          network = null;
-          reader = new ServiceInfoReader({
-            decodeText: decodeAribText,
-            // 衛星は NIT actual を待たない。届かないまま時間切れになる。
-            requireNetwork: !satellite,
-            onServices: (list) => { services = [...list]; },
-            onNetwork: (entry) => { network = entry; },
-          });
-          eit = new EitReader({ decodeText: decodeAribText });
-        }
+        for (let w = 0; w < workers.length; w += 1) {
+          const slot = workers[w];
+          if (slot === undefined) continue;
+          const base = POLL_BASE_WORDS + w * WORKER_WORDS;
+          const index = words[base] ?? -1;
+          const waiting = (words[base + 1] ?? 0) === 1;
 
-        // 溜まっているぶんを読む。
-        for (;;) {
-          const size = module.ccall('webts_q3u4_scan_drain', 'number', ['number', 'number'],
-            [drainPointer, DRAIN_BYTES]) as number;
-          if (size <= 0) break;
-          const bytes = module.HEAPU8.subarray(drainPointer, drainPointer + size);
-          reader?.push(bytes);
-          eit?.push(bytes);
-        }
-
-        // SDT/NIT に加えて、見つかったサービスぶんの EIT[p/f] が揃うまで待つ。
-        // p/f は数秒周期で繰り返されるので、待ち切れなければ C 側の上限で
-        // 打ち切られる。番組情報が無いチャンネルでも止まらない。
-        const wantServices = services.filter(isWatchable).length;
-        const haveEvents = eit?.serviceCount ?? 0;
-        const satisfied = reader !== null && reader.complete
-          && (wantServices === 0 || haveEvents >= wantServices);
-        if (satisfied) module.ccall('webts_q3u4_scan_advance', null, [], []);
-
-        // C が応答待ちに入っていれば、このチャンネルは読み切っている。
-        // 結果を確定させて応答を返す。返すまで C は次へ進まない。
-        if (waiting && acknowledged < index) {
-          const base = tunings[index];
-          // 実際に掴んだ TS を控える。**スロットではなく TSID で保存する。**
-          // 次に視聴するときはこれを指定して選び直す。
-          const discovered = tsidAt(index);
-          const tuning = base === undefined ? undefined
-            : discovered >= 0 ? { ...base, tsid: discovered } : base;
-          // 衛星では network が無いまま確定することがある。局の識別に
-          // 要るものは SDT にも入っているので、それで組み立てる。
-          if (tuning !== undefined && (network !== null || satellite)) {
-            this.#collect(found, programs, services, network, eit, tuning);
-          }
-          const locked = lockedAt(index) === 1;
-          const label = tuning?.label ?? '?';
-          if (tuning !== undefined) {
-            options.onProgress?.({
-              tuning,
-              label,
-              tsid: discovered >= 0 ? discovered : null,
-              index,
-              total: tunings.length,
-              locked,
-              found: found.length,
-              message: locked ? `${label} ロック成功` : `${label} 信号なし`,
+          if (index !== slot.index) {
+            slot.index = index;
+            slot.services = [];
+            slot.network = null;
+            slot.reader = new ServiceInfoReader({
+              decodeText: decodeAribText,
+              // 衛星は NIT actual を待たない。届かないまま時間切れになる。
+              requireNetwork: !satellite,
+              onServices: (list) => { slot.services = [...list]; },
+              onNetwork: (entry) => { slot.network = entry; },
             });
+            slot.eit = new EitReader({ decodeText: decodeAribText });
           }
-          acknowledged = index;
-          module.ccall('webts_q3u4_scan_acknowledge', null, ['number'], [index]);
-          network = null;
+
+          drainInto(w, slot);
+
+          // SDT/NIT に加えて、見つかったサービスぶんの EIT[p/f] が揃うまで待つ。
+          // p/f は数秒周期で繰り返されるので、待ち切れなければ C 側の上限で
+          // 打ち切られる。番組情報が無いチャンネルでも止まらない。
+          const wantServices = slot.services.filter(isWatchable).length;
+          const haveEvents = slot.eit?.serviceCount ?? 0;
+          const satisfied = slot.reader !== null && slot.reader.complete
+            && (wantServices === 0 || haveEvents >= wantServices);
+          if (satisfied) {
+            module.ccall('webts_q3u4_scan_advance', null, ['number'], [w]);
+          }
+
+          // C が応答待ちに入っていれば、この中継器は読み切っている。
+          // 結果を確定させて応答を返す。返すまで C は次へ進まない。
+          if (waiting && index >= 0 && slot.acknowledged < index) {
+            const base_tuning = tunings[index];
+            const tuning = base_tuning === undefined ? undefined
+              : withDiscoveredTsid(base_tuning, slot.services);
+            if (tuning !== undefined && (slot.network !== null || satellite)) {
+              this.#collect(found, programs, slot.services, slot.network, slot.eit, tuning);
+            }
+            completed += 1;
+            const locked = lockedAt(index) === 1;
+            const label = base_tuning?.label ?? '?';
+            if (base_tuning !== undefined) {
+              options.onProgress?.({
+                tuning: tuning ?? base_tuning,
+                label,
+                // **並列に回るので、添字ではなく終わった件数を出す。**
+                index: completed - 1,
+                total: tunings.length,
+                locked,
+                tsid: tuning?.tsid ?? null,
+                found: found.length,
+                message: locked ? `${label} ロック成功` : `${label} 信号なし`,
+              });
+            }
+            slot.acknowledged = index;
+            module.ccall('webts_q3u4_scan_acknowledge', null, ['number', 'number'],
+              [w, index]);
+          }
         }
 
         if (state !== 1) {
-          // 失敗をそのまま握り潰すと、途中で止まったスキャンが成功に見える。
+          // 失敗をそのまま握り潰すと、途中で止まった走査が成功に見える。
           if (state === 3) {
             const code = words[2] ?? 0;
             const name = String(module.ccall(
               'webts_q3u4_scan_error_name', 'string', ['number'], [code]));
-            const stage = words[1] ?? 0;
-            throw new Error(`スキャンが止まりました: ${name} (${code}) 段階 ${stage} `
-              + `${tunings[current]?.label ?? '?'}`);
+            throw new Error(`スキャンが止まりました: ${name} (${code})`);
           }
           break;
         }
         await sleep(100);
       }
 
-      // 走査が終わった時点でまだ読み残しがあることがある。最後のチャンネルの
-      // SI がそこに入っていると、そのチャンネルだけ丸ごと落ちる。
-      for (;;) {
-        const size = module.ccall('webts_q3u4_scan_drain', 'number', ['number', 'number'],
-          [drainPointer, DRAIN_BYTES]) as number;
-        if (size <= 0) break;
-        const bytes = module.HEAPU8.subarray(drainPointer, drainPointer + size);
-        reader?.push(bytes);
-        eit?.push(bytes);
-      }
-      const last = tunings[index];
-      if (acknowledged < index && last !== undefined && (network !== null || satellite)) {
-        this.#collect(found, programs, services, network, eit, last);
+      // 走査が終わった時点でまだ読み残しがあることがある。最後の中継器の
+      // SI がそこに入っていると、その中継器だけ丸ごと落ちる。
+      for (let w = 0; w < workers.length; w += 1) {
+        const slot = workers[w];
+        if (slot === undefined) continue;
+        drainInto(w, slot);
+        const base_tuning = slot.index >= 0 ? tunings[slot.index] : undefined;
+        if (base_tuning === undefined || slot.acknowledged >= slot.index) continue;
+        const tuning = withDiscoveredTsid(base_tuning, slot.services);
+        if (slot.network !== null || satellite) {
+          this.#collect(found, programs, slot.services, slot.network, slot.eit, tuning);
+        }
       }
 
       module.ccall('webts_q3u4_scan_join', 'number', [], []);
@@ -329,6 +340,7 @@ export class ChannelScan {
       module._free(firmwarePointer);
       module._free(listPointer);
       module._free(slotPointer);
+      module._free(receiverPointer);
       module._free(drainPointer);
       module._free(pollPointer);
     }

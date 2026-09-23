@@ -615,6 +615,277 @@ void* worker_main(void* argument) noexcept {
     return nullptr;
 }
 
+// ---- 走査タスク ----
+//
+// 中継器を順に選局し、そのたびに TS を少しだけ流して JS に SDT/NIT/EIT を
+// 読ませる。**カードも B25 も使わない。**SI はスクランブルされていない。
+//
+// **受信機の数だけ並列に走る。**割り当ては JS が決め、各作業者が共通の
+// カーソルから次の添字を取る。地上波4本なら4倍速く終わる。同じセッションの
+// 上で動くので、視聴と同時に走らせてもよい（別の受信機であること）。
+//
+// **次へ進む前に、JS がその中継器を見たという応答を待つ。**待たずに進むと、
+// ブラウザにタイマーを絞られたときに中継器を丸ごと取りこぼす
+// （docs/FINDINGS.md 18章）。応答は作業者ごとに返る。
+
+constexpr int kMaxScanEntries = 256;
+constexpr int kMaxScanWorkers = 4;
+/** 1中継器あたりの上限。これを過ぎたら諦めて次へ行く。 */
+constexpr int kScanEntryTimeoutMs = 8000;
+/** JS の応答を待つ上限。応答が来なくても走査は止めない。 */
+constexpr int kScanAcknowledgeTimeoutMs = 30000;
+/** 1バイトも来ないまま過ぎたら見切る時間。衛星の空きスロット対策。 */
+constexpr int kScanSilenceMs = 2000;
+/** 読み手が遅れたときの上限。超えたら古いほうから捨てる。 */
+constexpr std::size_t kScanStreamLimit = 4U * 1024U * 1024U;
+/** TMCC の相対 TS 番号の上限。 */
+constexpr int kMaxSlots = 12;
+
+struct ScanWorker final {
+    std::atomic<int> index{-1};
+    std::atomic<int> waiting{0};
+    std::atomic<int> acknowledged{-1};
+    std::atomic<bool> advance{false};
+    std::atomic<int> receiver{-1};
+    std::mutex mutex;
+    std::vector<std::uint8_t> output;
+    std::size_t consumed = 0U;
+    std::atomic<unsigned long long> pending{0U};
+};
+
+struct ScanJob final {
+    std::vector<std::uint8_t> firmware;
+    bool allow_15v = false;
+    int wave = 0;
+    std::vector<int> frequencies_khz;
+    std::vector<int> slots;
+    std::vector<int> receivers;
+
+    std::atomic<int> state{kIdle};
+    std::atomic<int> stage{kStageStart};
+    std::atomic<int> error{0};
+    std::atomic<int> cursor{0};
+    std::atomic<int> running{0};
+    std::atomic<bool> stop_requested{false};
+
+    std::atomic<int> locked[kMaxScanEntries];
+    ScanWorker workers[kMaxScanWorkers];
+};
+
+ScanJob* g_scan = nullptr;
+pthread_t g_scan_threads[kMaxScanWorkers]{};
+int g_scan_thread_count = 0;
+
+void scan_retain(ScanWorker& worker, const std::uint8_t* data, std::size_t size) noexcept {
+    std::lock_guard<std::mutex> guard(worker.mutex);
+    if (worker.consumed > 0U && worker.consumed == worker.output.size()) {
+        worker.output.clear();
+        worker.consumed = 0U;
+    }
+    worker.output.insert(worker.output.end(), data, data + size);
+    if (worker.output.size() - worker.consumed > kScanStreamLimit) {
+        // 読み手が遅れている。古いほうから捨てる。走査は止めない。
+        const std::size_t keep = kScanStreamLimit / 2U;
+        const std::size_t from = worker.output.size() - keep;
+        worker.output.erase(worker.output.begin(),
+                            worker.output.begin() + static_cast<std::ptrdiff_t>(from));
+        worker.consumed = 0U;
+    }
+    worker.pending.store(worker.output.size() - worker.consumed);
+}
+
+void scan_discard(ScanWorker& worker) noexcept {
+    std::lock_guard<std::mutex> guard(worker.mutex);
+    worker.output.clear();
+    worker.consumed = 0U;
+    worker.pending.store(0U);
+}
+
+/** JS がこの添字を見終えるまで待つ。返らなくても上限で打ち切る。 */
+void scan_await_acknowledge(ScanJob& job, ScanWorker& worker, int index) noexcept {
+    worker.waiting.store(1);
+    const auto deadline = std::chrono::steady_clock::now()
+        + std::chrono::milliseconds(kScanAcknowledgeTimeoutMs);
+    while (worker.acknowledged.load() < index && !job.stop_requested.load()
+           && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    worker.waiting.store(0);
+}
+
+struct ScanWorkerArgument final {
+    ScanJob* job;
+    int slot;
+};
+
+void* scan_worker_main(void* argument) noexcept {
+    const ScanWorkerArgument arg = *static_cast<ScanWorkerArgument*>(argument);
+    delete static_cast<ScanWorkerArgument*>(argument);
+    ScanJob& job = *arg.job;
+    ScanWorker& worker = job.workers[arg.slot];
+
+    Session* session_ptr = nullptr;
+    const Error acquired =
+        acquire_session(job.firmware, job.allow_15v, job.stage, &session_ptr);
+    if (acquired != Error::OK || session_ptr == nullptr) {
+        job.error.store(static_cast<int>(acquired));
+        job.state.store(kFailed);
+        release_session(nullptr);
+        if (job.running.fetch_sub(1) == 1) job.state.store(kFailed);
+        return nullptr;
+    }
+    Session& session = *session_ptr;
+    Q3U4FrontendEnclosure& enclosure = *session.enclosure;
+    Q3U4LnbPowerCoordinator& lnb = *session.lnb;
+
+    const bool satellite = job.wave == kWaveSatellite;
+    const auto receiver = static_cast<std::uint8_t>(worker.receiver.load());
+    const auto lnb_voltage = static_cast<std::uint8_t>(
+        satellite && job.allow_15v ? 15U : 0U);
+
+    Error result = Error::OK;
+    bool frontend_open = false;
+
+    const auto opened = satellite ? enclosure.open_satellite(receiver)
+                                  : enclosure.open_terrestrial(receiver);
+    if (!opened) {
+        result = opened.error();
+    } else {
+        frontend_open = true;
+    }
+
+    std::vector<std::uint8_t> buffer(kReadBytes);
+    TunerAttachment attachment{};
+    attachment.owner_client_id = 1U;
+    attachment.lease_id = 1U;
+    attachment.receiver = receiver;
+    attachment.system = satellite ? ipc::System::ISDB_S : ipc::System::ISDB_T;
+
+    // 直前に合わせた周波数。同じ中継器のあいだは選局し直さない。
+    int tuned_khz = -1;
+    bool tuned_locked = false;
+
+    while (frontend_open && result == Error::OK && !job.stop_requested.load()) {
+        const int i = job.cursor.fetch_add(1);
+        if (i >= static_cast<int>(job.frequencies_khz.size())) break;
+
+        worker.index.store(i);
+        worker.advance.store(false);
+        scan_discard(worker);
+
+        const int frequency = job.frequencies_khz[static_cast<std::size_t>(i)];
+        const int slot = satellite ? job.slots[static_cast<std::size_t>(i)] : -1;
+
+        if (frequency != tuned_khz) {
+            tuned_khz = frequency;
+            tuned_locked = false;
+            if (satellite) {
+                const auto begun = lnb.begin_tune(receiver, lnb_voltage);
+                if (!begun) { job.locked[i].store(0); continue; }
+            }
+            const auto tuned = satellite
+                ? enclosure.tune_satellite(receiver, static_cast<std::uint32_t>(frequency))
+                : enclosure.tune_terrestrial(receiver, static_cast<std::uint32_t>(frequency));
+            if (!tuned) {
+                if (satellite) lnb.rollback_tune(receiver);
+                job.locked[i].store(0);
+                scan_await_acknowledge(job, worker, i);
+                continue;
+            }
+            if (satellite) lnb.commit_tune(receiver);
+
+            LockContext lock_context{&enclosure, receiver,
+                                     std::chrono::steady_clock::now(), nullptr, satellite};
+            std::atomic<int> discard_elapsed{0};
+            lock_context.elapsed_ms = &discard_elapsed;
+            const ProbeLockPollResult lock =
+                poll_frontend_probe_lock(demod_lock, &lock_context, session.delay);
+            tuned_locked = lock.locked;
+        }
+
+        if (!tuned_locked) {
+            job.locked[i].store(0);
+            scan_await_acknowledge(job, worker, i);
+            continue;
+        }
+
+        if (satellite) {
+            const auto selected =
+                enclosure.select_satellite_slot(receiver, static_cast<std::uint8_t>(slot));
+            if (!selected) {
+                job.locked[i].store(0);
+                scan_await_acknowledge(job, worker, i);
+                continue;
+            }
+            // **空きスロットでも選択自体は通る。**エンクロージャからは
+            // TMCC の TSID を読めないので、ここでは弾けない。中身が無い
+            // ことは「データが来ない」ことで分かるので、下の読み出しで
+            // 打ち切る。TS 識別子は SDT から取る（放送側の申告が正）。
+        }
+        job.locked[i].store(1);
+
+        const auto capture = satellite ? enclosure.start_satellite_capture(receiver)
+                                       : enclosure.start_terrestrial_capture(receiver);
+        if (!capture) { result = capture.error(); break; }
+        attachment.attachment_id = session.next_attachment.fetch_add(1U);
+        const auto attach = session.plane->attach(attachment);
+        if (!attach) {
+            if (satellite) enclosure.stop_satellite_capture(receiver);
+            else enclosure.stop_terrestrial_capture(receiver);
+            result = attach.error();
+            break;
+        }
+
+        const auto entry_started = std::chrono::steady_clock::now();
+        const auto deadline = entry_started + std::chrono::milliseconds(kScanEntryTimeoutMs);
+        // **何も来ないものは早く見切る。**衛星の空きスロットは選択が通って
+        // しまい、TS が1バイトも流れない。上限まで待つと1本あたり数秒を
+        // 無駄にする。
+        const auto silent_deadline =
+            entry_started + std::chrono::milliseconds(kScanSilenceMs);
+        bool any_bytes = false;
+        while (!worker.advance.load() && !job.stop_requested.load()
+               && std::chrono::steady_clock::now() < deadline) {
+            const auto read = session.plane->read(
+                attachment, MutableByteView{buffer.data(), buffer.size()}, Timeout{500U});
+            if (!read) break;
+            if (read.value().bytes > 0U) {
+                any_bytes = true;
+                scan_retain(worker, buffer.data(), read.value().bytes);
+            } else if (!any_bytes
+                       && std::chrono::steady_clock::now() > silent_deadline) {
+                break;
+            }
+            if (read.value().terminal != TunerStreamTerminal::none || read.value().eof) break;
+        }
+        if (!any_bytes) job.locked[i].store(0);
+
+        session.plane->detach(attachment);
+        // 保持されている最終値を返しておく。溜め続けない。
+        session.plane->release_final(attachment);
+        const auto stopped = satellite ? enclosure.stop_satellite_capture(receiver)
+                                       : enclosure.stop_terrestrial_capture(receiver);
+        if (!stopped && result == Error::OK) result = stopped.error();
+        scan_await_acknowledge(job, worker, i);
+    }
+
+    if (frontend_open) {
+        if (satellite) lnb.release_receiver(receiver);
+        const auto closed = enclosure.close_receiver(receiver);
+        if (!closed && result == Error::OK) result = closed.error();
+    }
+    if (result != Error::OK && job.error.load() == 0) {
+        job.error.store(static_cast<int>(result));
+    }
+    release_session(&session);
+
+    if (job.running.fetch_sub(1) == 1) {
+        job.stage.store(kStageDone);
+        job.state.store(job.error.load() == 0 ? kFinished : kFailed);
+    }
+    return nullptr;
+}
+
 }  // namespace
 
 extern "C" {
@@ -693,6 +964,14 @@ int webts_q3u4_descramble_poll(std::int32_t* output, int output_words) {
 }
 
 /** 実行中のジョブに停止を要求する。戻るのを待たない。 */
+/**
+ * セッションを閉じる要求。仕事が残っていれば、最後の1つが終わった時点で畳む。
+ * 0 を渡すと開いたままにする（視聴と走査を続けて行うとき）。
+ */
+void webts_q3u4_session_keep_open(int keep) {
+    g_session_close_requested.store(keep == 0);
+}
+
 void webts_q3u4_descramble_stop(void) {
     if (g_job != nullptr) g_job->stop_requested.store(true);
 }
@@ -749,6 +1028,157 @@ void webts_q3u4_descramble_discard(void) {
     g_job->output.clear();
     g_job->output.shrink_to_fit();
     g_job->output_bytes.store(0U);
+}
+
+
+/**
+ * 走査を始める。受信機は JS が割り当てる。
+ *
+ * **視聴と同時に呼んでよい。**同じセッションを共有するので、別の受信機を
+ * 渡すかぎり衝突しない。同じ受信機を渡した場合は上流が弾く。
+ */
+int webts_q3u4_scan_start(const std::uint8_t* firmware, int firmware_size, int wave,
+                          const std::int32_t* frequencies, const std::int32_t* slots,
+                          int count, const std::int32_t* receivers, int receiver_count,
+                          int allow_15v) {
+    if (g_scan != nullptr && g_scan->state.load() == kRunning) {
+        return static_cast<int>(Error::BUSY);
+    }
+    if (firmware == nullptr || firmware_size <= 0 || frequencies == nullptr ||
+        count <= 0 || count > kMaxScanEntries || receivers == nullptr ||
+        receiver_count <= 0 || receiver_count > kMaxScanWorkers) {
+        return static_cast<int>(Error::INVALID_ARGUMENT);
+    }
+    if (wave != kWaveTerrestrial && wave != kWaveSatellite) {
+        return static_cast<int>(Error::INVALID_ARGUMENT);
+    }
+    const bool satellite = wave == kWaveSatellite;
+    for (int w = 0; w < receiver_count; ++w) {
+        const int receiver = receivers[w];
+        if (receiver < 0 || receiver > 7) return static_cast<int>(Error::INVALID_ARGUMENT);
+        // global 受信機は dev1 が 0..3、dev2 が 4..7。各ブリッジの下2つが
+        // ISDB-S、上2つが ISDB-T。
+        const bool terrestrial = (receiver >= 2 && receiver < 4) || receiver >= 6;
+        if (satellite ? terrestrial : !terrestrial) {
+            return static_cast<int>(Error::INVALID_ARGUMENT);
+        }
+        for (int o = 0; o < w; ++o) {
+            if (receivers[o] == receiver) return static_cast<int>(Error::INVALID_ARGUMENT);
+        }
+    }
+    // 衛星は相対 TS 番号が要る。周波数だけで合わせると、中継器に載っている
+    // どの TS が出るか決まらない。
+    if (satellite) {
+        if (slots == nullptr) return static_cast<int>(Error::INVALID_ARGUMENT);
+        for (int i = 0; i < count; ++i) {
+            if (slots[i] < 0 || slots[i] >= kMaxSlots) {
+                return static_cast<int>(Error::INVALID_ARGUMENT);
+            }
+        }
+    }
+
+    for (int w = 0; w < g_scan_thread_count; ++w) pthread_join(g_scan_threads[w], nullptr);
+    g_scan_thread_count = 0;
+    delete g_scan;
+    g_scan = new ScanJob();
+    g_scan->firmware.assign(firmware, firmware + firmware_size);
+    g_scan->allow_15v = allow_15v != 0;
+    g_scan->wave = wave;
+    g_scan->frequencies_khz.assign(frequencies, frequencies + count);
+    if (satellite) g_scan->slots.assign(slots, slots + count);
+    else g_scan->slots.assign(static_cast<std::size_t>(count), -1);
+    g_scan->receivers.assign(receivers, receivers + receiver_count);
+    for (int i = 0; i < kMaxScanEntries; ++i) g_scan->locked[i].store(-1);
+    for (int w = 0; w < receiver_count; ++w) {
+        g_scan->workers[w].receiver.store(receivers[w]);
+        g_scan->workers[w].output.reserve(kScanStreamLimit / 4U);
+    }
+    g_scan->running.store(receiver_count);
+    g_scan->state.store(kRunning);
+
+    for (int w = 0; w < receiver_count; ++w) {
+        auto* argument = new (std::nothrow) ScanWorkerArgument{g_scan, w};
+        if (argument == nullptr ||
+            pthread_create(&g_scan_threads[w], nullptr, scan_worker_main, argument) != 0) {
+            delete argument;
+            // 立てられなかったぶんは数から引く。残りは走り続ける。
+            if (g_scan->running.fetch_sub(1) == 1) {
+                g_scan->error.store(static_cast<int>(Error::INTERNAL));
+                g_scan->state.store(kFailed);
+                return static_cast<int>(Error::INTERNAL);
+            }
+            continue;
+        }
+        g_scan_threads[g_scan_thread_count] = g_scan_threads[w];
+        g_scan_thread_count += 1;
+    }
+    return 0;
+}
+
+/**
+ * 進み具合を読む。ブロックしない。
+ *
+ *   0 state, 1 stage, 2 error, 3 cursor, 4 workers, 5 entries
+ *   6..     作業者ごとに index, waiting, pending
+ *   その後  entries ぶんの locked[]
+ */
+int webts_q3u4_scan_poll(std::int32_t* output, int output_words) {
+    if (output == nullptr || output_words < 6) return static_cast<int>(Error::INVALID_ARGUMENT);
+    if (g_scan == nullptr) { output[0] = kIdle; return 0; }
+    const ScanJob& job = *g_scan;
+    const int workers = static_cast<int>(job.receivers.size());
+    const int entries = static_cast<int>(job.frequencies_khz.size());
+    output[0] = job.state.load();
+    output[1] = job.stage.load();
+    output[2] = job.error.load();
+    output[3] = job.cursor.load();
+    output[4] = workers;
+    output[5] = entries;
+    int at = 6;
+    for (int w = 0; w < workers && at + 3 <= output_words; ++w) {
+        output[at++] = job.workers[w].index.load();
+        output[at++] = job.workers[w].waiting.load();
+        output[at++] = static_cast<std::int32_t>(job.workers[w].pending.load());
+    }
+    for (int i = 0; i < entries && at < output_words; ++i) output[at++] = job.locked[i].load();
+    return 0;
+}
+
+/** その作業者が溜めたぶんを取り出す。戻り値は写したバイト数。 */
+int webts_q3u4_scan_drain(int worker, std::uint8_t* output, int capacity) {
+    if (g_scan == nullptr || output == nullptr || capacity <= 0) return 0;
+    if (worker < 0 || worker >= kMaxScanWorkers) return 0;
+    ScanWorker& slot = g_scan->workers[worker];
+    std::lock_guard<std::mutex> guard(slot.mutex);
+    const std::size_t available = slot.output.size() - slot.consumed;
+    if (available == 0U) return 0;
+    const std::size_t copied = std::min(available, static_cast<std::size_t>(capacity));
+    std::memcpy(output, slot.output.data() + slot.consumed, copied);
+    slot.consumed += copied;
+    slot.pending.store(slot.output.size() - slot.consumed);
+    return static_cast<int>(copied);
+}
+
+/** その作業者に「この中継器はもう十分」と伝える。 */
+void webts_q3u4_scan_advance(int worker) {
+    if (g_scan == nullptr || worker < 0 || worker >= kMaxScanWorkers) return;
+    g_scan->workers[worker].advance.store(true);
+}
+
+/** その作業者に、この添字を見終えたと伝える。返すまで次へ進まない。 */
+void webts_q3u4_scan_acknowledge(int worker, int index) {
+    if (g_scan == nullptr || worker < 0 || worker >= kMaxScanWorkers) return;
+    g_scan->workers[worker].acknowledged.store(index);
+}
+
+void webts_q3u4_scan_stop(void) {
+    if (g_scan != nullptr) g_scan->stop_requested.store(true);
+}
+
+int webts_q3u4_scan_join(void) {
+    for (int w = 0; w < g_scan_thread_count; ++w) pthread_join(g_scan_threads[w], nullptr);
+    g_scan_thread_count = 0;
+    return g_scan == nullptr ? 0 : g_scan->error.load();
 }
 
 const char* webts_q3u4_descramble_error_name(int error) {

@@ -2,7 +2,7 @@
 
 import type { BroadcastType, OnAirScheduleItem } from '../types';
 import { loadSchedules } from '../channel-source';
-import { isRefreshing, maybeAutoRefresh, stopRefresh } from '../epg-refresh';
+import { onRefreshStatus, stopRefresh } from '../epg-refresh';
 import type { ProgramDialog } from '../components/program-dialog';
 import type { StreamDialog } from '../components/stream-dialog';
 
@@ -65,21 +65,19 @@ export class OnAirView {
     };
     window.addEventListener('webts-channels-changed', this.onChannelsChanged);
 
-    // **前面に戻った時点で判定し直す。**裏のタブでは取りに行かないので、
-    // 戻ってきたときに 30 秒待たせる理由が無い。
-    this.onVisible = () => {
-      if (document.visibilityState !== 'visible') return;
-      this.lastAutoCheck = 0;
-      this.keepCurrent();
-    };
-    document.addEventListener('visibilitychange', this.onVisible);
+    // 取得の状況はアプリ本体から届く。開いているあいだだけ出す。
+    this.unsubscribe = onRefreshStatus((text) => { this.showStatus(text); });
+
+    // 取得が終わったら読み直す。
+    this.onProgramsUpdated = () => { void this.reload(); };
+    window.addEventListener('webts-programs-updated', this.onProgramsUpdated);
   }
 
   private onChannelsChanged: () => void;
-  private onVisible: () => void;
+  private onProgramsUpdated: () => void;
+  private unsubscribe: () => void = () => {};
   private statusLine!: HTMLElement;
   /** 自動更新の判定をした時刻。毎秒やる必要は無い。 */
-  private lastAutoCheck = 0;
   private reloading = false;
   private lastReload = 0;
 
@@ -249,23 +247,8 @@ export class OnAirView {
       void this.reload();
     }
 
-    // **繰り上げの有無とは切り離して判定する。**繰り上げで戻ってしまうと、
-    // 番組が尽きている局があっても取りに行けない。
-    if (now - this.lastAutoCheck < 30_000) return;
-    this.lastAutoCheck = now;
-
-    // 「いま何をやっているか分からない局」が残っているあいだだけ取りに行く。
-    const exhausted = this.schedules.some((item) => item.currentProgram === null);
-    if (!exhausted || isRefreshing()) return;
-
-    void maybeAutoRefresh((progress) => {
-      this.showStatus(`番組情報を取得しています… ${progress.label}`
-        + ` (${progress.index + 1}/${progress.total})`);
-    }).then(async (result) => {
-      if (!result.ran) return;
-      this.showStatus(result.error === undefined ? '' : `番組情報の取得に失敗しました: ${result.error}`);
-      if (result.error === undefined) await this.reload();
-    });
+    // **取りに行く判定はここには置かない。**アプリ本体が持つ。視聴中は
+    // この画面が外れており、ここに置くと一度も判定されない。
   }
 
   private showStatus(text: string): void {
@@ -300,7 +283,8 @@ export class OnAirView {
       this.digestTimer = null;
     }
     window.removeEventListener('webts-channels-changed', this.onChannelsChanged);
-    document.removeEventListener('visibilitychange', this.onVisible);
+    window.removeEventListener('webts-programs-updated', this.onProgramsUpdated);
+    this.unsubscribe();
   }
 }
 

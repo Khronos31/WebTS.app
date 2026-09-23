@@ -12,7 +12,7 @@
 import { ChannelScan, type ScanProgress } from './channel-scan';
 import type { ProgramItem } from './types';
 import { mergeChannels, mergePrograms } from './channel-store';
-import { channelsSync, primeChannels } from './channel-source';
+import { channelsSync, primeChannels, programsSync } from './channel-source';
 import {
   bsTunings, csTunings, grTunings, satelliteScanTunings, tuningForChannel, tuningKey,
   type Tuning, type WaveType,
@@ -96,15 +96,19 @@ export interface AutoRefreshResult {
 /**
  * 条件が揃っていれば取り直す。揃っていなければ何もしない。
  *
- * 受信機は1本しか開けないので、**視聴中とほかの走査中は必ず見送る**。
- * 裏のタブでも見送る。タイマーが絞られた状態で選局を始めると、チャンネルの
- * 切り替わりを取りこぼす（FINDINGS 18章）。
+ * ほかの走査が動いていれば見送る。**視聴中は見送らない。**空いている
+ * 受信機を使う。
+ *
+ * 裏のタブでは見送る。タイマーが絞られた状態で選局を始めると、1中継器
+ * あたり 6 秒が 30〜60 秒に落ちる（FINDINGS 23章）。
  */
 export async function maybeAutoRefresh(
   onProgress?: (progress: ScanProgress) => void,
 ): Promise<AutoRefreshResult> {
   if (running !== null) return { ran: false };
-  if (LiveSession.isActive() || ChannelScan.isActive()) return { ran: false };
+  // **視聴中でも取りに行く。**受信機は8本あり、走査は視聴が使っているものを
+  // 避けて残りを使う。同じセッションを共有するので開き直しも起きない。
+  if (ChannelScan.isActive()) return { ran: false };
   if (document.visibilityState !== 'visible') return { ran: false };
   if (Date.now() - lastAttempt < COOLDOWN_MS) return { ran: false };
   if (knownTunings().length === 0) return { ran: false };
@@ -148,5 +152,46 @@ export async function scanWave(
     return { channels: result.channels.length, programs: result.programs.length };
   } finally {
     running = null;
+  }
+}
+
+/**
+ * いま何を放送しているか分からない局が残っているか。
+ *
+ * **判定は画面ではなくアプリが持つ。**放映中の画面に置いていたころは、
+ * 視聴中はその画面が外れていて一度も判定されなかった。受信機は8本あり
+ * 視聴中でも取りに行けるのに、取りに行く者がいなかった。
+ */
+export function needsPrograms(now: number = Date.now()): boolean {
+  const channels = channelsSync(false);
+  if (channels.length === 0) return false;
+  return channels.some((channel) => !programsSync(channel.id).some(
+    (program) => program.startAt <= now && program.endAt > now));
+}
+
+type RefreshListener = (text: string) => void;
+const listeners = new Set<RefreshListener>();
+
+/** 取得の状況を見たい画面が登録する。戻り値を呼ぶと外れる。 */
+export function onRefreshStatus(listener: RefreshListener): () => void {
+  listeners.add(listener);
+  return () => { listeners.delete(listener); };
+}
+
+function emitStatus(text: string): void {
+  for (const listener of listeners) listener(text);
+}
+
+/** アプリ本体が回す自動更新。画面がどこにあっても判定する。 */
+export async function tickAutoRefresh(): Promise<void> {
+  if (!needsPrograms()) return;
+  const result = await maybeAutoRefresh((progress) => {
+    emitStatus(`番組情報を取得しています… ${progress.label}`
+      + ` (${progress.index + 1}/${progress.total})`);
+  });
+  if (!result.ran) return;
+  emitStatus(result.error === undefined ? '' : `番組情報の取得に失敗しました: ${result.error}`);
+  if (result.error === undefined) {
+    window.dispatchEvent(new CustomEvent('webts-programs-updated'));
   }
 }
