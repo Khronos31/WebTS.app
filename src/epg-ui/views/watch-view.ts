@@ -263,6 +263,10 @@ export class WatchView {
    * 上流の API を通していない。出せない数字を埋めると嘘になるので「—」のままにする。
    */
   private showStats(stats: LiveStats): void {
+    // 受け入れ条件（A/V ずれ、滞留、音声の落ち）は画面に出していない項目まで
+    // 含む。長時間の測定でそれらを読めるよう、最新の値を要素に添えておく。
+    // 表示には影響しない。
+    this.element.dataset['liveStats'] = JSON.stringify(stats);
     const drop = this.element.querySelector<HTMLElement>('#watch-signal-drop');
     if (drop) {
       const continuity = stats.demux['continuityErrors'] ?? 0;
