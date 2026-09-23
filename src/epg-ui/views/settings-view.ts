@@ -458,6 +458,11 @@ export class SettingsView {
           appendLog(progress.locked === true
             ? `✔ ${progress.label} ロック成功 検出: ${gained} サービス`
             : `- ${progress.label}: 信号なし`);
+      }, (label, _stage, elapsedMs) => {
+        // 選局に入るまでの段階。ここを出さないと、ファームウェアの投入や
+        // デバイスを開くところで詰まったときに無言で固まって見える。
+        scanChannelText.textContent = `${label}…`;
+        appendLog(`[FULL-SCAN] ${label}（${(elapsedMs / 1000).toFixed(1)} 秒）`);
       }).then(async (result) => {
         for (const failure of result.failures) {
           appendLog(`[FULL-SCAN] ${failure.wave} は失敗しました: ${failure.error}`);

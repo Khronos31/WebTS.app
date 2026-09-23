@@ -18,6 +18,7 @@ import { readCachedFirmware } from '../usb/firmware';
 import { toProgramItem } from './program-item';
 import { grTunings, type Tuning } from './tuning';
 import { ensureTunerAvailable, loadQ3U4Module } from './q3u4-module';
+import { stageLabel } from './stage-label';
 import { LiveSession } from './live-session';
 import type { ChannelItem, ProgramItem } from './types';
 
@@ -109,6 +110,12 @@ export interface ScanOptions {
    */
   readonly dwellMs?: number | undefined;
   readonly onProgress?: ((progress: ScanProgress) => void) | undefined;
+  /**
+   * 選局に入るまでの段階。**ここを出さないと無言で固まって見える。**
+   * ファームウェアの投入やデバイスを開くところで詰まると、中継器ごとの
+   * 進捗は一度も来ないまま何も表示されない。
+   */
+  readonly onStage?: ((label: string, stage: number, elapsedMs: number) => void) | undefined;
 }
 
 export interface ScanResult {
@@ -230,6 +237,8 @@ export class ChannelScan {
         throw new Error(`スキャンを開始できません: ${name} (${started})`);
       }
 
+      const startedAt = Date.now();
+      let reportedStage = -1;
       const workers: WorkerState[] = receivers.map(() => ({
         index: -1, reader: null, eit: null, services: [], network: null, acknowledged: -1,
       }));
@@ -251,6 +260,12 @@ export class ChannelScan {
           [pollPointer, pollWords]);
         const words = module.HEAP32.subarray(pollPointer / 4, pollPointer / 4 + pollWords);
         const state = words[0] ?? 0;
+        // まだどの作業者も中継器に着いていないあいだは、段階を出す。
+        const stage = words[1] ?? 0;
+        if (stage !== reportedStage) {
+          reportedStage = stage;
+          options.onStage?.(stageLabel(stage), stage, Date.now() - startedAt);
+        }
         const lockedAt = (at: number): number =>
           words[POLL_BASE_WORDS + receivers.length * WORKER_WORDS + at] ?? -1;
 

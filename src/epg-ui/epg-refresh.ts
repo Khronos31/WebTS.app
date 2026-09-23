@@ -276,6 +276,7 @@ export interface FullScanResult {
 export async function scanAllWaves(
   onWave?: (wave: WaveType) => void,
   onProgress?: (progress: ScanProgress) => void,
+  onStage?: (label: string, stage: number, elapsedMs: number) => void,
 ): Promise<FullScanResult> {
   if (running !== null) throw new Error('すでに走査が動いています。');
   const channels: ChannelItem[] = [];
@@ -289,10 +290,12 @@ export async function scanAllWaves(
     const scan = new ChannelScan();
     running = scan;
     try {
-      const result = await scan.run(
-        onProgress === undefined
-          ? { tunings, allowLnb15v: allowLnb15v() }
-          : { tunings, allowLnb15v: allowLnb15v(), onProgress });
+      const result = await scan.run({
+        tunings,
+        allowLnb15v: allowLnb15v(),
+        ...(onProgress === undefined ? {} : { onProgress }),
+        ...(onStage === undefined ? {} : { onStage }),
+      });
       channels.push(...result.channels);
       programs.push(...result.programs);
     } catch (error) {

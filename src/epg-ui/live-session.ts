@@ -21,6 +21,7 @@ import { readCachedFirmware } from '../usb/firmware';
 import { ensureTunerAvailable, loadQ3U4Module, type Q3U4Module } from './q3u4-module';
 import { CaptionText } from './caption-text';
 import type { Tuning } from './tuning';
+import { STAGE_LABEL } from './stage-label';
 import { allowLnb15v } from './lnb-setting';
 
 const POLL_WORDS = 17;
@@ -59,11 +60,6 @@ function describeB25(b25Error: number, unpurchased: number, lastEcmError: number
 /** 受信に入ってから、絵が出ないことを問題として扱うまでの時間。 */
 const kSilentMs = 8000;
 
-const STAGE_LABEL = [
-  '開始', 'ファームウェア', 'デバイスを開く', '初期化', 'カード', 'B25',
-  '受信機を開く', '選局', 'ロック待ち', 'データプレーン', '接続', '受信中',
-  '後始末', '後始末', '完了',
-];
 
 export interface LiveStats {
   readonly frames: number;
