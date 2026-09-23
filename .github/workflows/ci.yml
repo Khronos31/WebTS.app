@@ -10,8 +10,12 @@ permissions:
   contents: read
 
 jobs:
-  check:
-    # Linux only. Build scripts must not depend on PowerShell.
+  # WASM は一度だけ作って artifact で回す。
+  #
+  # Emscripten の用意はキャッシュが効いても数分かかる。check と deploy が
+  # それぞれ作ると同じ時間を二度払うことになるので、作る仕事を分けておく。
+  # 配信するモジュールだけを作る。開発用のプローブは公開物ではない。
+  wasm:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -21,12 +25,70 @@ jobs:
           node-version: '24'
           cache: npm
 
+      - uses: mymindstorm/setup-emsdk@v14
+        with:
+          version: 6.0.9
+          actions-cache-folder: emsdk-cache
+
       - run: npm ci
+
+      - name: Build the shipped WASM modules
+        run: |
+          npm run build:mpeg2
+          npm run build:px4-identity
+          npm run build:q3u4-descramble
+
+      # 中間生成物は渡さない。patched/ のオブジェクトは1モジュール 1.4 MB
+      # あり、配信にも後段の検証にも要らない。
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wasm-modules
+          path: |
+            build/*/*.mjs
+            build/*/*.wasm
+          retention-days: 7
+          if-no-files-found: error
+
+  check:
+    # Linux only. Build scripts must not depend on PowerShell.
+    runs-on: ubuntu-latest
+    needs: wasm
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # 履歴の検査は全 ref の全オブジェクトを見る。浅い clone では通らない。
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+
+      - run: npm ci
+
+      # vite build は WASM を dist へ写す。無ければ失敗する（本番で
+      # /build/... が 404 になるより、ここで落ちるほうがよい）。
+      - uses: actions/download-artifact@v4
+        with:
+          name: wasm-modules
+          path: build
 
       # npm run check starts with the vendor hash verification, so a tampered
       # or out-of-date vendor tree fails before anything is built.
       - name: Verify vendor, typecheck, test and build
         run: npm run check
+
+      # 配信物に実体が入っているか。プラグインが黙って何もしなくても、
+      # ここで気づける。
+      - name: The shipped output must contain the WASM
+        run: |
+          for module in mpeg2-decoder px4-identity q3u4-descramble; do
+            test -f "dist/build/$module/$module.mjs" || { echo "::error::missing $module.mjs"; exit 1; }
+            test -f "dist/build/$module/$module.wasm" || { echo "::error::missing $module.wasm"; exit 1; }
+          done
+
+      - name: No binaries anywhere in history
+        run: npm run history:check
 
       # The build must run on Linux CI. This guard covers package.json and
       # scripts/; this workflow file is excluded so the pattern cannot match

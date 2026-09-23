@@ -4,3 +4,14 @@
 /*
   Cross-Origin-Opener-Policy: same-origin
   Cross-Origin-Embedder-Policy: require-corp
+
+# **WASM はファイル名が変わらない。**Vite が吐く assets/ はハッシュ付きなので
+# 長く持たせてよいが、/build/ の中身は Emscripten の出力をそのまま置いており、
+# 内容が変わっても名前は同じである。長期キャッシュにすると、更新したのに
+# 古いモジュールが配られ続ける。毎回問い合わせさせる。
+/build/*
+  Cache-Control: no-cache
+
+# 内容で名前が決まるものは、いくら持たせてもよい。
+/assets/*
+  Cache-Control: public, max-age=31536000, immutable

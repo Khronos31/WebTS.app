@@ -1,0 +1,97 @@
+name: Deploy
+
+# **自動では動かさない。**push で勝手に公開されるのは、まだ非公開の
+# プロジェクトにとって取り返しがつかない。公開すると決めた人が押す。
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'production へ出すか、preview に留めるか'
+        required: true
+        default: preview
+        type: choice
+        options: [preview, production]
+
+permissions:
+  contents: read
+
+concurrency:
+  # 同じ宛先へ同時に投げない。
+  group: deploy-${{ inputs.environment }}
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+
+      - uses: mymindstorm/setup-emsdk@v14
+        with:
+          version: 6.0.9
+          actions-cache-folder: emsdk-cache
+
+      - run: npm ci
+
+      - name: Build the shipped WASM modules
+        run: |
+          npm run build:mpeg2
+          npm run build:px4-identity
+          npm run build:q3u4-descramble
+
+      # 配る前に全部通す。ここを省くと、壊れたものを公開できてしまう。
+      - name: Verify vendor, typecheck, test and build
+        run: npm run check
+
+      - name: No binaries anywhere in history
+        run: npm run history:check
+
+      - name: The shipped output must contain the WASM
+        run: |
+          for module in mpeg2-decoder px4-identity q3u4-descramble; do
+            test -f "dist/build/$module/$module.mjs" || { echo "::error::missing $module.mjs"; exit 1; }
+            test -f "dist/build/$module/$module.wasm" || { echo "::error::missing $module.wasm"; exit 1; }
+          done
+
+      # 交差オリジン分離が無いと SharedArrayBuffer が使えず、pthread が動かず、
+      # アプリは起動すらしない。**配信物にヘッダ設定が入っていることを確かめる。**
+      - name: The cross-origin isolation headers must ship
+        run: |
+          grep -q 'Cross-Origin-Opener-Policy: same-origin' dist/_headers
+          grep -q 'Cross-Origin-Embedder-Policy: require-corp' dist/_headers
+
+      # GPL のソース提供義務と、何を配ったかの記録。
+      - name: SBOM and corresponding source
+        run: |
+          npm run sbom
+          npm run source-bundle
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ github.sha }}
+          path: |
+            dist/sbom.spdx.json
+            dist/*-src.tar.gz
+          retention-days: 90
+          if-no-files-found: error
+
+      # SBOM とソース bundle は記録として残すもので、配信物ではない。
+      - name: Keep the release artefacts out of the upload
+        run: rm -f dist/sbom.spdx.json dist/*-src.tar.gz
+
+      - name: Publish to Cloudflare Pages
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: >-
+            pages deploy dist
+            --project-name=webts-app
+            --branch=${{ inputs.environment == 'production' && 'main' || github.ref_name }}
