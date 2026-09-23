@@ -6,7 +6,7 @@
 
 | OS | ブラウザ | チューナー | 確認できたところ |
 | --- | --- | --- | --- |
-| Windows 11 Pro 26220 | Chrome 152 | PX-Q3U4 | 視聴・字幕・音声、走査（地上波・BS）、番組表、31分の連続視聴、切断と再接続 |
+| Windows 11 Pro 26220 | Chrome 152 | PX-Q3U4 | 視聴・字幕・音声、走査（地上波・BS・CS）、番組表、31分の連続視聴、切断と再接続 |
 | AnduinOS 2.0.2（kernel 7.0.0-31） | Chromium 152.0.7977.82（Flatpak） | PX-Q3U4 | **走査のみ。**視聴は未確認 |
 
 ブラウザは Chromium 系に限る。WebUSB が Firefox と Safari に無い。

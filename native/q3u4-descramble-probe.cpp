@@ -577,11 +577,21 @@ void* worker_main(void* argument) noexcept {
             count_packets(buffer.data(), chunk.bytes, job.in_packets, job.in_scrambled,
                           nullptr);
             ARIB_STD_B25_BUFFER input{buffer.data(), static_cast<std::int32_t>(chunk.bytes)};
+            // **負だけが異常。正は警告で、処理は続く。**libaribb25 の約束で
+            // あり、ライブラリ自身も未契約 ECM を異常扱いしていない
+            // (`r > 0 && r != WARN_UNPURCHASED_ECM` のときだけ捨てる)。
+            //
+            // 非0を全部落としていたため、未契約の ECM が1つ来た時点で
+            // セッションごと終わっていた。契約の無い局で「一瞬映って止まる」
+            // のはこれである。一時的な section の壊れ (WARN 2, 3) でも同じ
+            // ことが起きるので、契約に関係なく直す必要がある。
             const int put = b25->put(b25, &input);
-            if (put != 0) { job.b25_error.store(put); result = Error::PROTOCOL_ERROR; break; }
+            if (put < 0) { job.b25_error.store(put); result = Error::PROTOCOL_ERROR; break; }
+            if (put > 0) job.b25_error.store(put);
             ARIB_STD_B25_BUFFER output{nullptr, 0};
             const int got = b25->get(b25, &output);
-            if (got != 0) { job.b25_error.store(got); result = Error::PROTOCOL_ERROR; break; }
+            if (got < 0) { job.b25_error.store(got); result = Error::PROTOCOL_ERROR; break; }
+            if (got > 0) job.b25_error.store(got);
             if (output.data != nullptr && output.size > 0) {
                 count_packets(output.data, static_cast<std::size_t>(output.size),
                               job.out_packets, job.out_scrambled, &job.out_bad_sync);

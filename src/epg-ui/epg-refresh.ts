@@ -10,7 +10,7 @@
 // 先まで尽きたときだけでよい。
 
 import { ChannelScan, type ScanProgress } from './channel-scan';
-import type { ProgramItem } from './types';
+import type { ChannelItem, ProgramItem } from './types';
 import { mergeChannels, mergePrograms } from './channel-store';
 import { channelsSync, primeChannels, programsSync } from './channel-source';
 import {
@@ -252,4 +252,56 @@ export async function fetchSchedule(options: ScheduleOptions = {}): Promise<numb
   } finally {
     running = null;
   }
+}
+
+/** 走査する波の順。地上波が最初なのは、アンテナがある可能性が一番高いため。 */
+const ALL_WAVES: readonly WaveType[] = ['GR', 'BS', 'CS'];
+
+export interface FullScanResult {
+  readonly channels: readonly ChannelItem[];
+  readonly programs: readonly ProgramItem[];
+  /** 波ごとの失敗。空なら全部通った。 */
+  readonly failures: readonly { wave: WaveType; error: string }[];
+}
+
+/**
+ * 全部の波を順に走査する。設定の「スキャン開始」がこれを呼ぶ。
+ *
+ * **1つの波で失敗しても続ける。**衛星アンテナが無い環境では BS/CS が
+ * 何も見つからないのが普通で、それを理由に地上波の結果まで捨てるのは
+ * おかしい。信号が無いだけなら失敗ですらない（ロックしないまま次へ進む）。
+ *
+ * 保存は呼び出し側に任せる。全部の波を集め終えてから1回で書きたいため。
+ */
+export async function scanAllWaves(
+  onWave?: (wave: WaveType) => void,
+  onProgress?: (progress: ScanProgress) => void,
+): Promise<FullScanResult> {
+  if (running !== null) throw new Error('すでに走査が動いています。');
+  const channels: ChannelItem[] = [];
+  const programs: ProgramItem[] = [];
+  const failures: { wave: WaveType; error: string }[] = [];
+
+  for (const wave of ALL_WAVES) {
+    onWave?.(wave);
+    const tunings = wave === 'GR' ? grTunings()
+      : satelliteScanTunings(wave === 'BS' ? bsTunings() : csTunings());
+    const scan = new ChannelScan();
+    running = scan;
+    try {
+      const result = await scan.run(
+        onProgress === undefined
+          ? { tunings, allowLnb15v: allowLnb15v() }
+          : { tunings, allowLnb15v: allowLnb15v(), onProgress });
+      channels.push(...result.channels);
+      programs.push(...result.programs);
+    } catch (error) {
+      failures.push({
+        wave, error: error instanceof Error ? error.message : String(error),
+      });
+    } finally {
+      running = null;
+    }
+  }
+  return { channels, programs, failures };
 }

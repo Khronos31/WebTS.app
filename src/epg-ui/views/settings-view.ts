@@ -13,8 +13,8 @@ import {
   type FirmwareStage,
 } from '../../usb/firmware';
 import { readSetupState } from '../../ui/setup-state';
-import { ChannelScan } from '../channel-scan';
 import { saveChannels } from '../channel-store';
+import { scanAllWaves, stopRefresh } from '../epg-refresh';
 import type { ChannelItem } from '../types';
 import { channelsSync } from '../channel-source';
 import { loadQ3U4Identifiers } from '../../usb/px4-identity';
@@ -30,7 +30,6 @@ export class SettingsView {
   private onStateChanged: () => void;
   private isScanning = false;
   private scanTimer: number | null = null;
-  private scan: ChannelScan | null = null;
 
   constructor(options: SettingsViewOptions) {
     this.onStateChanged = options.onStateChanged;
@@ -440,28 +439,29 @@ export class SettingsView {
       scanBox.style.display = 'block';
       scanLog.innerHTML = '';
 
-      appendLog('[FULL-SCAN] 地上デジタル全帯域フルスキャン (13ch〜52ch) を開始します...');
+      appendLog('[FULL-SCAN] 全帯域フルスキャンを開始します（地上波 → BS → CS）...');
 
-      const scan = new ChannelScan();
-      this.scan = scan;
-      // 進捗はチャンネルを読み終えた時点で1回来る。ロックの成否は
+      // 進捗は中継器を読み終えた時点で1回来る。ロックの成否は
       // ドライバが記録したものをそのまま出す。推測しない。
       let previousFound = 0;
 
-      void scan.run({
-        onProgress: (progress) => {
+      void scanAllWaves((wave) => {
+        previousFound = 0;
+        appendLog(`[FULL-SCAN] ${wave} を走査します`);
+      }, (progress) => {
           const pct = Math.round(((progress.index + 1) / progress.total) * 100);
           scanBar.style.width = `${pct}%`;
           scanPctText.textContent = `${pct}%`;
-          scanChannelText.textContent =
-            `物理チャンネル ch${progress.label} を同期・搬送波ロック中...`;
+          scanChannelText.textContent = `${progress.label} を同期・搬送波ロック中...`;
           const gained = progress.found - previousFound;
           previousFound = progress.found;
           appendLog(progress.locked === true
-            ? `✔ ch${progress.label} ロック成功 検出: ${gained} サービス`
-            : `- ch${progress.label}: 信号なし`);
-        },
+            ? `✔ ${progress.label} ロック成功 検出: ${gained} サービス`
+            : `- ${progress.label}: 信号なし`);
       }).then(async (result) => {
+        for (const failure of result.failures) {
+          appendLog(`[FULL-SCAN] ${failure.wave} は失敗しました: ${failure.error}`);
+        }
         await saveChannels(result.channels, result.programs);
         enabledIds = defaultEnabledChannelIds(result.channels);
         saveEnabledChannelIds(enabledIds);
@@ -477,7 +477,6 @@ export class SettingsView {
         appendLog(`[FULL-SCAN] 失敗: ${error instanceof Error ? error.message : String(error)}`);
       }).finally(() => {
         this.isScanning = false;
-        this.scan = null;
         startBtn.disabled = false;
       });
     });
@@ -647,8 +646,7 @@ export class SettingsView {
       this.scanTimer = null;
     }
     // 走査中に画面を離れたら、チューナーを掴んだままにしない。
-    this.scan?.stop();
-    this.scan = null;
+    stopRefresh();
   }
 }
 

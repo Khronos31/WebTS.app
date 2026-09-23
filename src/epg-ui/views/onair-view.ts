@@ -3,6 +3,7 @@
 import type { BroadcastType, OnAirScheduleItem } from '../types';
 import { loadSchedules } from '../channel-source';
 import { onRefreshStatus, stopRefresh } from '../epg-refresh';
+import { readOnAirTab, saveOnAirTab } from '../onair-tab';
 import type { ProgramDialog } from '../components/program-dialog';
 import type { StreamDialog } from '../components/stream-dialog';
 
@@ -15,7 +16,10 @@ export class OnAirView {
   public readonly element: HTMLElement;
   private tabsContainer: HTMLElement;
   private gridContainer: HTMLElement;
-  private activeTab: BroadcastType = 'GR';
+  // **選んだ波は画面をまたいで覚える。**視聴へ移ると放映中のビューは破棄され、
+  // 戻ると作り直される。ここに素の既定を置くと、BS を見ていた人が戻るたびに
+  // 地上波へ放り出される。
+  private activeTab: BroadcastType = readOnAirTab();
   private schedules: OnAirScheduleItem[] = [];
   private digestTimer: number | null = null;
   private programDialog: ProgramDialog;
@@ -98,6 +102,7 @@ export class OnAirView {
       btn.addEventListener('click', () => {
         if (this.activeTab !== tab.type) {
           this.activeTab = tab.type;
+          saveOnAirTab(tab.type);
           this.renderTabs();
           this.renderCards();
         }
@@ -111,6 +116,21 @@ export class OnAirView {
     this.renderCards();
   }
 
+  /**
+   * 覚えていた波に局が無ければ、局のある波へ移す。
+   *
+   * 走査し直して BS の局が消えたときなどに、空の画面で固まるのを避ける。
+   * 利用者が自分で選び直した結果は上書きしない（保存はしない）。
+   */
+  private fallbackTab(): void {
+    if (this.schedules.length === 0) return;
+    const has = (tab: BroadcastType): boolean => tab === 'ALL'
+      || this.schedules.some((item) => item.channel.channelType === tab);
+    if (has(this.activeTab)) return;
+    const available = (['GR', 'BS', 'CS'] as const).find((tab) => has(tab));
+    if (available !== undefined) this.activeTab = available;
+  }
+
   /** 保存済みのスキャン結果を読み直す。まだスキャンしていなければ空になる。 */
   private async reload(): Promise<void> {
     // 毎秒の点検から呼ばれる。読み終わるまでに何度も入ると積み上がる。
@@ -118,6 +138,8 @@ export class OnAirView {
     this.reloading = true;
     try {
       this.schedules = await loadSchedules();
+      this.fallbackTab();
+      this.renderTabs();
       this.renderCards();
     } finally {
       this.reloading = false;

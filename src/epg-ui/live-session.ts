@@ -34,6 +34,31 @@ const SATELLITE_RECEIVERS = [0, 1, 4, 5] as const;
 const WAVE_TERRESTRIAL = 0;
 const WAVE_SATELLITE = 1;
 
+/**
+ * 復号の失敗を人に分かる形にする。
+ *
+ * `PROTOCOL_ERROR` は B25 の `put()` / `get()` が非 0 を返したという意味しか
+ * 持たない。実際の理由は libaribb25 の戻り値と、カードが返した ECM の状況に
+ * ある。**契約が無い場合は ECM が「未購入」を返す**ので、そこを名指しできる。
+ */
+function describeB25(b25Error: number, unpurchased: number, lastEcmError: number): string {
+  const parts: string[] = [];
+  if (b25Error !== 0) parts.push(`B25 ${b25Error}`);
+  if (unpurchased > 0) {
+    parts.push(`未契約の ECM ${unpurchased} 件`);
+  }
+  if (lastEcmError > 0) parts.push(`ECM 応答 0x${lastEcmError.toString(16)}`);
+  if (parts.length === 0) return '';
+  const detail = ` [${parts.join(' / ')}]`;
+  // 未購入が立っていれば、それが理由である可能性が高い。言い切らない。
+  return unpurchased > 0
+    ? `${detail} この局は契約されていない可能性があります。`
+    : detail;
+}
+
+/** 受信に入ってから、絵が出ないことを問題として扱うまでの時間。 */
+const kSilentMs = 8000;
+
 const STAGE_LABEL = [
   '開始', 'ファームウェア', 'デバイスを開く', '初期化', 'カード', 'B25',
   '受信機を開く', '選局', 'ロック待ち', 'データプレーン', '接続', '受信中',
@@ -338,6 +363,20 @@ export class LiveSession {
         ? `${label}… ${(waited / 1000).toFixed(0)} 秒`
         : `${label}…`);
     }
+    // 受信まで進んでいるのに絵が1枚も出ないときだけ、分かっていることを出す。
+    //
+    // **「この局は復号できない」とは言えない。**未契約の ECM の数は TS 全体の
+    // 集計で、こちらは TS を丸ごと B25 に渡しているので、同じ中継器に載って
+    // いる別の番組の ECM も数に入る。見ている局が問題なく映っていても上がる。
+    // 無料放送はカードに既定の視聴権があり、契約が無くても映る。
+    const unpurchased = words[14] ?? -1;
+    const reading = words[5] ?? 0;
+    if (state === 1 && stage >= 11 && this.#frames === 0 && reading > kSilentMs) {
+      this.#options.onStatus?.(unpurchased > 0
+        ? `映像が出ません。この TS には契約対象外の番組が含まれます`
+          + `（未契約の ECM ${unpurchased} 件）。`
+        : '映像が出ません。受信は続いています。');
+    }
     if (state !== 1 && !this.#ended) {
       this.#ended = true;
       const error = words[2] ?? 0;
@@ -347,7 +386,12 @@ export class LiveSession {
       while (this.#drain()) { /* 全部渡す */ }
       const end: PlayerRequest = { kind: 'end' };
       this.#worker.postMessage(end);
-      if (state === 3) this.#options.onEnded?.(`受信が止まりました: ${name} (${error})`);
+      if (state === 3) {
+        // **復号の失敗は番号だけでは何も分からない。**C 側は B25 の戻り値と
+        // ECM の状況を持っているのに、ここで読まずに捨てていた。
+        this.#options.onEnded?.(`受信が止まりました: ${name} (${error})`
+          + describeB25(words[3] ?? 0, words[14] ?? -1, words[15] ?? -1));
+      }
     }
   }
 }
