@@ -603,6 +603,15 @@ export class SettingsView {
     return card;
   }
 
+  /**
+   * 受信状態のカード。
+   *
+   * **値は出せない。**CNR と BER は復調器のレジスタから読むもので、上流の
+   * API を通していない。TS ドロップとレートは受信中でなければ数えようが
+   * ない。ここは雛形として 29.2 dB などの数字が直接書かれており、
+   * チューナーが未接続でも表示されていた。**計測値を名乗って作り話を出す**
+   * ことになるので「—」にした。視聴画面の同じ枠（watch-view）も同じ扱い。
+   */
   private createSignalCard(): HTMLElement {
     const card = document.createElement('div');
     card.className = 'settings-card';
@@ -615,29 +624,30 @@ export class SettingsView {
           </svg>
           <span>受信状態 (Signal Monitor)</span>
         </div>
-        <span class="status-badge ok">正常</span>
+        <span class="status-badge">未計測</span>
       </div>
 
       <p class="settings-card-desc">
         物理チューナーからの復調品質、CNR（Carrier-to-Noise Ratio）、BER（Bit Error Rate）、およびTSパケットのドロップ監視値です。
+        CNR と BER は復調器のレジスタから読む値で、いまの実装では取得していません。TS ドロップは視聴画面に実測が出ます。
       </p>
 
       <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px;">
         <div style="padding: 12px; background: var(--surface-color-variant); border-radius: 6px;">
           <div style="font-size: 0.75rem; color: var(--text-secondary);">CNR (搬送波対雑音比)</div>
-          <div style="font-size: 1.25rem; font-weight: 700; color: var(--success); margin-top: 4px;">29.2 dB</div>
+          <div style="font-size: 1.25rem; font-weight: 700; color: var(--text-secondary); margin-top: 4px;">—</div>
         </div>
         <div style="padding: 12px; background: var(--surface-color-variant); border-radius: 6px;">
           <div style="font-size: 0.75rem; color: var(--text-secondary);">BER (ビットエラーレート)</div>
-          <div style="font-size: 1.25rem; font-weight: 700; color: var(--text-primary); margin-top: 4px;">0.00e+0</div>
+          <div style="font-size: 1.25rem; font-weight: 700; color: var(--text-secondary); margin-top: 4px;">—</div>
         </div>
         <div style="padding: 12px; background: var(--surface-color-variant); border-radius: 6px;">
           <div style="font-size: 0.75rem; color: var(--text-secondary);">TS パケットドロップ</div>
-          <div style="font-size: 1.25rem; font-weight: 700; color: var(--text-primary); margin-top: 4px;">0 packets</div>
+          <div style="font-size: 1.25rem; font-weight: 700; color: var(--text-secondary); margin-top: 4px;">—</div>
         </div>
         <div style="padding: 12px; background: var(--surface-color-variant); border-radius: 6px;">
           <div style="font-size: 0.75rem; color: var(--text-secondary);">ストリームレート</div>
-          <div style="font-size: 1.25rem; font-weight: 700; color: var(--text-primary); margin-top: 4px;">17.4 Mbps</div>
+          <div style="font-size: 1.25rem; font-weight: 700; color: var(--text-secondary); margin-top: 4px;">—</div>
         </div>
       </div>
     `;
