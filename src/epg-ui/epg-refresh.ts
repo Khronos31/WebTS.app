@@ -195,3 +195,61 @@ export async function tickAutoRefresh(): Promise<void> {
     window.dispatchEvent(new CustomEvent('webts-programs-updated'));
   }
 }
+
+/** 1中継器に留まる時間。番組表は section が揃うのを待てないので時間で切る。 */
+const SCHEDULE_DWELL_MS = 60_000;
+
+/**
+ * 番組表を取る。EIT[schedule] を読むので、放映中の更新より桁で時間がかかる。
+ *
+ * **利用者が明示的に始めたときだけ走らせる。**自動更新の経路には載せない。
+ * 1中継器あたり1分留まるので、関東の地上波10波でも受信機4本で3分前後になる。
+ */
+export interface ScheduleOptions {
+  /** 1中継器に留まる時間 (ms)。長いほど取りこぼしが減る。 */
+  readonly dwellMs?: number | undefined;
+  /** 波を絞る。省略すると登録済みの全部。 */
+  readonly wave?: WaveType | undefined;
+  readonly onProgress?: ((progress: ScanProgress) => void) | undefined;
+}
+
+export async function fetchSchedule(options: ScheduleOptions = {}): Promise<number> {
+  if (running !== null) throw new Error('すでに走査が動いています。');
+  const onProgress = options.onProgress;
+  const dwellMs = options.dwellMs ?? SCHEDULE_DWELL_MS;
+  const tunings = knownTunings()
+    .filter((tuning) => options.wave === undefined || tuning.wave === options.wave);
+  if (tunings.length === 0) {
+    throw new Error('局が登録されていません。先にスキャンを実行してください。');
+  }
+  const byWave = new Map<WaveType, Tuning[]>();
+  for (const tuning of tunings) {
+    const list = byWave.get(tuning.wave);
+    if (list === undefined) byWave.set(tuning.wave, [tuning]);
+    else list.push(tuning);
+  }
+
+  lastAttempt = Date.now();
+  const programs: ProgramItem[] = [];
+  try {
+    for (const [, waveTunings] of byWave) {
+      const scan = new ChannelScan();
+      running = scan;
+      const result = await scan.run({
+        tunings: waveTunings,
+        allowLnb15v: allowLnb15v(),
+        schedule: true,
+        dwellMs,
+        ...(onProgress === undefined ? {} : { onProgress }),
+      });
+      programs.push(...result.programs);
+      running = null;
+    }
+    await mergePrograms(programs);
+    await primeChannels();
+    window.dispatchEvent(new CustomEvent('webts-programs-updated'));
+    return programs.length;
+  } finally {
+    running = null;
+  }
+}

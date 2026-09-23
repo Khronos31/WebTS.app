@@ -1,8 +1,12 @@
-// EIT[p/f] を読む。いま放送中の番組と次の番組。
+// EIT を読む。既定は p/f（いま放送中の番組と次の番組）だけ。
 //
-// **EIT[schedule] は読まない。**全期間の番組表は EDCB の実績で15〜30分かかり、
-// 初回起動でそれを待たせるわけにいかない（.local/SPEC/M3_LIVE_UI.md）。
-// p/f は数秒ごとに繰り返されるので、スキャン中に取れる。
+// **EIT[schedule] は既定では読まない。**全期間の番組表は EDCB の実績で
+// 15〜30分かかり、放映中の一覧を出すだけならそこまで要らない
+// （.local/SPEC/M3_LIVE_UI.md）。p/f は数秒ごとに繰り返されるので、
+// 走査のついでに取れる。
+//
+// 番組表を作るときだけ `schedule: true` で有効にする。1つの中継器に
+// 留まる時間を長く取らないと揃わない。
 //
 // 保存の形は「サービスごとのイベント列」にする。p/f と schedule を同じ形で
 // 持てるので、番組表を足すときに UI 側の契約を変えずに済む。
@@ -14,6 +18,12 @@ import { PACKET_SIZE, crc32 } from './demux';
 const EIT_PID = 0x0012;
 /** actual の present/following。other (0x4F) は選局し直さないと信用できない。 */
 const EIT_PF_ACTUAL = 0x4e;
+/**
+ * actual の schedule。0x50〜0x57 が basic（直近8日）、0x58〜0x5F が extended。
+ * other (0x60〜0x6F) は選局し直さないと信用できないので読まない。
+ */
+const EIT_SCHEDULE_ACTUAL_FIRST = 0x50;
+const EIT_SCHEDULE_ACTUAL_LAST = 0x5f;
 
 export interface EventEntry {
   readonly networkId: number;
@@ -31,13 +41,18 @@ export interface EventEntry {
   /** コンテント記述子の大分類。無ければ null。 */
   readonly genre: number | null;
   readonly subGenre: number | null;
-  /** present なら 0、following なら 1。 */
-  readonly section: 0 | 1;
+  /** p/f の present なら 0、following なら 1。schedule は 2。 */
+  readonly section: 0 | 1 | 2;
 }
 
 export interface EitHandlers {
   readonly onEvents?: ((events: readonly EventEntry[]) => void) | undefined;
   readonly decodeText: (bytes: Uint8Array) => string;
+  /**
+   * EIT[schedule] も読むか。既定は読まない。
+   * 読むと件数が2桁増え、揃うまでの滞在時間も桁で伸びる。
+   */
+  readonly schedule?: boolean | undefined;
 }
 
 /** 2桁 BCD。 */
@@ -185,14 +200,18 @@ export class EitReader {
   }
 
   #onSection(section: Uint8Array): void {
-    if (section[0] !== EIT_PF_ACTUAL || section.length < 18) return;
+    if (section.length < 18) return;
+    const table = section[0] ?? 0;
+    const schedule = table >= EIT_SCHEDULE_ACTUAL_FIRST && table <= EIT_SCHEDULE_ACTUAL_LAST;
+    if (table !== EIT_PF_ACTUAL && !(schedule && this.#handlers.schedule === true)) return;
     if (crc32(section) !== 0) return;
     if (((section[5] ?? 0) & 0x01) === 0) return;
 
     const serviceId = ((section[3] ?? 0) << 8) | (section[4] ?? 0);
-    // section_number 0 が present、1 が following。
+    // p/f は section_number 0 が present、1 が following。
+    // schedule は 0〜255 がセグメントに対応するので、番号では切らない。
     const sectionNumber = section[6] ?? 0;
-    if (sectionNumber > 1) return;
+    if (!schedule && sectionNumber > 1) return;
     const transportStreamId = ((section[8] ?? 0) << 8) | (section[9] ?? 0);
     const networkId = ((section[10] ?? 0) << 8) | (section[11] ?? 0);
 
@@ -207,15 +226,26 @@ export class EitReader {
         (((section[offset + 10] ?? 0) & 0x0f) << 8) | (section[offset + 11] ?? 0);
       const descriptors = section.subarray(offset + 12, offset + 12 + loopLength);
       const details = this.#readDescriptors(descriptors);
-      this.#events.set(`${serviceId}:${eventId}`, {
+      // **同じイベントは複数の表に現れる。置き換えずに重ねる。**
+      // EIT[schedule] は basic (0x50〜0x57) が短形式イベント記述子＝番組名を、
+      // extended (0x58〜0x5F) が拡張形式＝詳細を運ぶ。丸ごと置き換えると、
+      // 後から届いたほうが相手の持っていた項目を消す。実測で 10,906 件中
+      // 7,534 件の番組名が消えていた。
+      const key = `${serviceId}:${eventId}`;
+      const previous = this.#events.get(key);
+      this.#events.set(key, {
         networkId, transportStreamId, serviceId, eventId,
         startAt, duration,
-        name: details.name,
-        description: details.description,
-        extended: details.extended,
-        genre: details.genre,
-        subGenre: details.subGenre,
-        section: sectionNumber === 0 ? 0 : 1,
+        name: details.name !== '' ? details.name : (previous?.name ?? ''),
+        description: details.description !== ''
+          ? details.description : (previous?.description ?? ''),
+        extended: Object.keys(details.extended).length > 0
+          ? { ...previous?.extended, ...details.extended } : (previous?.extended ?? {}),
+        genre: details.genre ?? previous?.genre ?? null,
+        subGenre: details.subGenre ?? previous?.subGenre ?? null,
+        // p/f で取れていたものを schedule が上書きしても、区別は p/f を優先する。
+        section: previous !== undefined && previous.section !== 2
+          ? previous.section : (schedule ? 2 : (sectionNumber === 0 ? 0 : 1)),
       });
       added = true;
       offset += 12 + loopLength;

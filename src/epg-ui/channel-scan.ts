@@ -98,6 +98,16 @@ export interface ScanOptions {
    * 別の機器が給電している線へ重ねて出すと競合する。
    */
   readonly allowLnb15v?: boolean | undefined;
+  /**
+   * 番組表（EIT[schedule]）も読むか。既定は読まない。
+   * 読むと1中継器あたりの滞在が桁で伸びる。
+   */
+  readonly schedule?: boolean | undefined;
+  /**
+   * 1中継器に留まる上限 (ms)。省略すると C 側の既定（8 秒）。
+   * 番組表は必要な section が揃うまで待てないので、時間で切る。
+   */
+  readonly dwellMs?: number | undefined;
   readonly onProgress?: ((progress: ScanProgress) => void) | undefined;
 }
 
@@ -207,11 +217,12 @@ export class ChannelScan {
     try {
       const started = module.ccall('webts_q3u4_scan_start', 'number',
         ['number', 'number', 'number', 'number', 'number',
-          'number', 'number', 'number', 'number'],
+          'number', 'number', 'number', 'number', 'number'],
         [firmwarePointer, firmware.length, satellite ? WAVE_SATELLITE : WAVE_TERRESTRIAL,
           listPointer, slotPointer, tunings.length,
           receiverPointer, receivers.length,
-          options.allowLnb15v === true ? 1 : 0]) as number;
+          options.allowLnb15v === true ? 1 : 0,
+          options.dwellMs ?? 0]) as number;
       if (started !== 0) {
         const name = String(module.ccall(
           'webts_q3u4_scan_error_name', 'string', ['number'], [started]));
@@ -260,7 +271,10 @@ export class ChannelScan {
               onServices: (list) => { slot.services = [...list]; },
               onNetwork: (entry) => { slot.network = entry; },
             });
-            slot.eit = new EitReader({ decodeText: decodeAribText });
+            slot.eit = new EitReader({
+              decodeText: decodeAribText,
+              schedule: options.schedule === true,
+            });
           }
 
           drainInto(w, slot);
@@ -268,9 +282,12 @@ export class ChannelScan {
           // SDT/NIT に加えて、見つかったサービスぶんの EIT[p/f] が揃うまで待つ。
           // p/f は数秒周期で繰り返されるので、待ち切れなければ C 側の上限で
           // 打ち切られる。番組情報が無いチャンネルでも止まらない。
+          // **番組表を取るときは「揃った」で切り上げない。**EIT[schedule] は
+          // 何セクションで完結するか事前に分からないので、滞在時間で区切る。
           const wantServices = slot.services.filter(isWatchable).length;
           const haveEvents = slot.eit?.serviceCount ?? 0;
-          const satisfied = slot.reader !== null && slot.reader.complete
+          const satisfied = options.schedule !== true
+            && slot.reader !== null && slot.reader.complete
             && (wantServices === 0 || haveEvents >= wantServices);
           if (satisfied) {
             module.ccall('webts_q3u4_scan_advance', null, ['number'], [w]);

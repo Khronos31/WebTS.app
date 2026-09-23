@@ -630,8 +630,13 @@ void* worker_main(void* argument) noexcept {
 
 constexpr int kMaxScanEntries = 256;
 constexpr int kMaxScanWorkers = 4;
-/** 1中継器あたりの上限。これを過ぎたら諦めて次へ行く。 */
+/**
+ * 1中継器あたりの上限の既定。これを過ぎたら諦めて次へ行く。
+ * 番組表（EIT[schedule]）を取るときは JS が長い値を渡す。
+ */
 constexpr int kScanEntryTimeoutMs = 8000;
+/** JS が渡せる上限。番組表でも1中継器に何分も留まらせない。 */
+constexpr int kScanEntryTimeoutMaxMs = 300000;
 /** JS の応答を待つ上限。応答が来なくても走査は止めない。 */
 constexpr int kScanAcknowledgeTimeoutMs = 30000;
 /** 1バイトも来ないまま過ぎたら見切る時間。衛星の空きスロット対策。 */
@@ -657,6 +662,7 @@ struct ScanJob final {
     std::vector<std::uint8_t> firmware;
     bool allow_15v = false;
     int wave = 0;
+    int dwell_ms = kScanEntryTimeoutMs;
     std::vector<int> frequencies_khz;
     std::vector<int> slots;
     std::vector<int> receivers;
@@ -837,7 +843,7 @@ void* scan_worker_main(void* argument) noexcept {
         }
 
         const auto entry_started = std::chrono::steady_clock::now();
-        const auto deadline = entry_started + std::chrono::milliseconds(kScanEntryTimeoutMs);
+        const auto deadline = entry_started + std::chrono::milliseconds(job.dwell_ms);
         // **何も来ないものは早く見切る。**衛星の空きスロットは選択が通って
         // しまい、TS が1バイトも流れない。上限まで待つと1本あたり数秒を
         // 無駄にする。
@@ -1040,7 +1046,7 @@ void webts_q3u4_descramble_discard(void) {
 int webts_q3u4_scan_start(const std::uint8_t* firmware, int firmware_size, int wave,
                           const std::int32_t* frequencies, const std::int32_t* slots,
                           int count, const std::int32_t* receivers, int receiver_count,
-                          int allow_15v) {
+                          int allow_15v, int dwell_ms) {
     if (g_scan != nullptr && g_scan->state.load() == kRunning) {
         return static_cast<int>(Error::BUSY);
     }
@@ -1050,6 +1056,9 @@ int webts_q3u4_scan_start(const std::uint8_t* firmware, int firmware_size, int w
         return static_cast<int>(Error::INVALID_ARGUMENT);
     }
     if (wave != kWaveTerrestrial && wave != kWaveSatellite) {
+        return static_cast<int>(Error::INVALID_ARGUMENT);
+    }
+    if (dwell_ms < 0 || dwell_ms > kScanEntryTimeoutMaxMs) {
         return static_cast<int>(Error::INVALID_ARGUMENT);
     }
     const bool satellite = wave == kWaveSatellite;
@@ -1084,6 +1093,7 @@ int webts_q3u4_scan_start(const std::uint8_t* firmware, int firmware_size, int w
     g_scan->firmware.assign(firmware, firmware + firmware_size);
     g_scan->allow_15v = allow_15v != 0;
     g_scan->wave = wave;
+    g_scan->dwell_ms = dwell_ms > 0 ? dwell_ms : kScanEntryTimeoutMs;
     g_scan->frequencies_khz.assign(frequencies, frequencies + count);
     if (satellite) g_scan->slots.assign(slots, slots + count);
     else g_scan->slots.assign(static_cast<std::size_t>(count), -1);

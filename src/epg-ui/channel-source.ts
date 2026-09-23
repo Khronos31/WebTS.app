@@ -118,3 +118,52 @@ export async function loadProgramsFor(channelId: number): Promise<ProgramItem[]>
     .sort((left, right) => left.startAt - right.startAt);
 }
 
+
+export interface ChannelSchedule {
+  readonly channel: ChannelItem;
+  readonly programs: readonly ProgramItem[];
+}
+
+/**
+ * 番組表のための読み出し。局ごとに、指定した範囲にかかる番組を時刻順で返す。
+ *
+ * **範囲に「かかる」ものを返す。**始まりが範囲より前でも、終わりが範囲に
+ * 入っていれば番組表の左端に出したい。終了時刻が未定 (endAt === startAt) の
+ * ものは、始まりが範囲内なら入れる。
+ */
+export async function loadScheduleRange(
+  from: number,
+  to: number,
+  onlyEnabled = true,
+): Promise<ChannelSchedule[]> {
+  const channels = await loadChannels(onlyEnabled);
+  const programs = await readPrograms();
+  const byChannel = new Map<number, ProgramItem[]>();
+  for (const program of programs) {
+    const overlaps = program.endAt === program.startAt
+      ? program.startAt >= from && program.startAt < to
+      : program.startAt < to && program.endAt > from;
+    if (!overlaps) continue;
+    const list = byChannel.get(program.channelId);
+    if (list === undefined) byChannel.set(program.channelId, [program]);
+    else list.push(program);
+  }
+  return channels.map((channel) => ({
+    channel,
+    programs: (byChannel.get(channel.id) ?? [])
+      .sort((left, right) => left.startAt - right.startAt),
+  }));
+}
+
+/** 保存している番組情報が何時から何時までを覆っているか。番組表の範囲決めに使う。 */
+export async function programCoverage(): Promise<{ from: number; to: number } | null> {
+  const programs = await readPrograms();
+  if (programs.length === 0) return null;
+  let from = Number.POSITIVE_INFINITY;
+  let to = Number.NEGATIVE_INFINITY;
+  for (const program of programs) {
+    if (program.startAt < from) from = program.startAt;
+    if (program.endAt > to) to = program.endAt;
+  }
+  return { from, to };
+}

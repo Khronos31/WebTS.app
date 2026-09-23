@@ -15,9 +15,11 @@
 //   #/api/lnb                    LNB 給電の許可を読む
 //   #/api/lnb?allow=1|0          LNB 給電の許可を書く
 
-import { channelsSync, primeChannels } from '../channel-source';
+import { channelsSync, primeChannels, programCoverage } from '../channel-source';
 import { readChannels, readPrograms } from '../channel-store';
-import { isRefreshing, refreshPrograms, scanWave, stopRefresh } from '../epg-refresh';
+import {
+  fetchSchedule, isRefreshing, refreshPrograms, scanWave, stopRefresh,
+} from '../epg-refresh';
 import { allowLnb15v, setAllowLnb15v } from '../lnb-setting';
 import { ChannelScan, type ScanProgress } from '../channel-scan';
 import { LiveSession } from '../live-session';
@@ -29,6 +31,8 @@ const ROUTES = [
   '#/api/status',
   '#/api/scan?wave=GR|BS|CS',
   '#/api/epg/refresh',
+  '#/api/epg/schedule?wave=GR|BS|CS&dwell=<ms>',
+  '#/api/epg/coverage',
   '#/api/lnb',
   '#/api/lnb?allow=1|0',
 ];
@@ -138,6 +142,35 @@ export class ApiView {
         });
         await primeChannels();
         return { ok: true, wave, ...result };
+      }
+
+      case 'api/epg/coverage': {
+        const coverage = await programCoverage();
+        return {
+          ok: true,
+          ...(coverage === null ? { coverage: null } : {
+            from: new Date(coverage.from).toISOString(),
+            to: new Date(coverage.to).toISOString(),
+            hours: Math.round((coverage.to - coverage.from) / 3_600_000),
+          }),
+        };
+      }
+
+      case 'api/epg/schedule': {
+        const wave = params.get('wave') ?? '';
+        const dwell = Number(params.get('dwell') ?? '');
+        const seconds = Number.isFinite(dwell) && dwell > 0 ? Math.round(dwell / 1000) : 60;
+        const lines: string[] = [`番組表を取得しています…（1中継器あたり ${seconds} 秒）`];
+        this.#output.textContent = lines[0] ?? '';
+        const programs = await fetchSchedule({
+          ...(isWave(wave) ? { wave } : {}),
+          ...(Number.isFinite(dwell) && dwell > 0 ? { dwellMs: dwell } : {}),
+          onProgress: (progress: ScanProgress) => {
+            this.#progress(lines, `${progress.locked === true ? '✔' : '-'} ${progress.label}`
+              + ` (${progress.index + 1}/${progress.total})`);
+          },
+        });
+        return { ok: true, programs };
       }
 
       case 'api/epg/refresh': {
