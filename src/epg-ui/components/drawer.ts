@@ -3,6 +3,7 @@
 // スマホ(<960px): メニューアイコンを押したときだけオーバーレイ展開
 
 import type { RouteType } from '../types';
+import { APP_VERSION } from '../version';
 
 export interface DrawerItem {
   id: RouteType;
@@ -71,12 +72,17 @@ export class NavDrawer {
     const list = document.createElement('ul');
     list.className = 'drawer-list';
 
-    // トップ階層メニュー定義（番組表は0.2.0以降のため非表示）
+    // トップ階層メニュー定義
     const menuItems: DrawerItem[] = [
       {
         id: 'onair',
         title: '放映中',
         iconSvg: '<path d="M21 3H3c-1.11 0-2 .89-2 2v12c0 1.1.89 2 2 2h5v2h8v-2h5c1.1 0 2-.9 2-2V5c0-1.11-.9-2-2-2zm0 14H3V5h18v12zm-11-2l6-4.5-6-4.5v9z"/>',
+      },
+      {
+        id: 'guide',
+        title: '番組表',
+        iconSvg: '<path d="M3 14h4v-4H3v4zm0 5h4v-4H3v4zM3 9h4V5H3v4zm5 5h13v-4H8v4zm0 5h13v-4H8v4zM8 5v4h13V5H8z"/>',
       },
       {
         id: 'settings',
@@ -126,7 +132,7 @@ export class NavDrawer {
     // ドロワーフッター
     const footer = document.createElement('div');
     footer.className = 'drawer-footer';
-    footer.textContent = 'WebTS.app v0.1.0-dev';
+    footer.textContent = `WebTS.app v${APP_VERSION}`;
 
     this.drawerElement.append(header, list, footer);
 

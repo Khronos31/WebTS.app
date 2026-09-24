@@ -14,9 +14,10 @@ import {
 } from '../../usb/firmware';
 import { readSetupState } from '../../ui/setup-state';
 import { saveChannels } from '../channel-store';
-import { scanAllWaves, stopRefresh } from '../epg-refresh';
+import { scanAllWaves, stopUserScan } from '../epg-refresh';
+import { bsTunings, csTunings, grTunings, satelliteScanTunings } from '../tuning';
 import type { ChannelItem } from '../types';
-import { channelsSync } from '../channel-source';
+import { channelsSync, notifyChannelsChanged } from '../channel-source';
 import { loadQ3U4Identifiers } from '../../usb/px4-identity';
 import { getTheme, setTheme, type ThemeMode } from '../theme-manager';
 import { allowLnb15v, setAllowLnb15v } from '../lnb-setting';
@@ -273,6 +274,10 @@ export class SettingsView {
       }
     };
 
+    const totalGR = grTunings().length;
+    const totalSat = satelliteScanTunings(bsTunings()).length + satelliteScanTunings(csTunings()).length;
+    const totalTunings = totalGR + totalSat;
+
     card.innerHTML = `
       <div class="settings-card-header">
         <div class="settings-card-title">
@@ -285,8 +290,7 @@ export class SettingsView {
       </div>
 
       <p class="settings-card-desc">
-        地上波デジタル放送の全物理チャンネル（UHF 13ch〜52ch）を一括走査して放送局を自動検出します。
-        取得した局一覧から見ない局のチェックを外して放映中リストから除外できます。
+        放送局を自動検出します。取得した局一覧から見ない局のチェックを外して放映中リストから除外できます。
       </p>
 
       <div style="margin-bottom: 16px; display: flex; gap: 12px; align-items: center; flex-wrap: wrap;">
@@ -299,13 +303,50 @@ export class SettingsView {
       </div>
 
       <div class="scan-progress-box" id="scan-box" style="display: none; margin-bottom: 20px;">
-        <div style="display: flex; justify-content: space-between; font-size: 0.8125rem; margin-bottom: 6px;">
-          <span id="scan-current-channel">UHF全帯域走査待機中...</span>
-          <span id="scan-progress-pct">0%</span>
+        <div class="scan-overall-header">
+          <div class="scan-overall-title">
+            <span id="scan-overall-status">スキャン待機中...</span>
+            <span class="scan-overall-count" id="scan-overall-count">0 / ${totalTunings}</span>
+          </div>
+          <span class="scan-overall-pct" id="scan-progress-pct">0%</span>
         </div>
         <div class="progress-track" style="margin-bottom: 12px;">
           <div class="progress-fill" id="scan-progress-bar" style="width: 0%;"></div>
         </div>
+
+        <div class="scan-dual-grid">
+          <!-- 地上波レーン -->
+          <div class="scan-lane-card gr" id="scan-lane-gr">
+            <div class="scan-lane-header">
+              <span class="scan-lane-badge GR">GR 地上波</span>
+              <span class="scan-lane-found" id="scan-gr-found">検出: 0 局</span>
+            </div>
+            <div class="scan-lane-progress">
+              <div class="scan-lane-mini-track">
+                <div class="scan-lane-mini-fill gr" id="scan-gr-bar" style="width: 0%;"></div>
+              </div>
+              <div class="scan-lane-mini-text" id="scan-gr-count">0 / ${totalGR}</div>
+            </div>
+          </div>
+
+          <!-- 衛星レーン (BS/CS) -->
+          <div class="scan-lane-card sat" id="scan-lane-sat">
+            <div class="scan-lane-header">
+              <div style="display: flex; align-items: center; gap: 6px;">
+                <span class="scan-lane-badge sat" id="scan-sat-badge">BS/CS 衛星</span>
+                <span class="scan-wave-pill BS" id="scan-sat-wave-pill" style="display: none;">BS</span>
+              </div>
+              <span class="scan-lane-found" id="scan-sat-found">検出: 0 局</span>
+            </div>
+            <div class="scan-lane-progress">
+              <div class="scan-lane-mini-track">
+                <div class="scan-lane-mini-fill sat" id="scan-sat-bar" style="width: 0%;"></div>
+              </div>
+              <div class="scan-lane-mini-text" id="scan-sat-count">0 / ${totalSat}</div>
+            </div>
+          </div>
+        </div>
+
         <div class="scan-log" id="scan-log-view"></div>
       </div>
 
@@ -346,9 +387,21 @@ export class SettingsView {
 
     const startBtn = card.querySelector<HTMLButtonElement>('#start-scan-btn')!;
     const scanBox = card.querySelector<HTMLElement>('#scan-box')!;
-    const scanChannelText = card.querySelector<HTMLElement>('#scan-current-channel')!;
+    const scanOverallStatus = card.querySelector<HTMLElement>('#scan-overall-status')!;
+    const scanOverallCount = card.querySelector<HTMLElement>('#scan-overall-count')!;
     const scanPctText = card.querySelector<HTMLElement>('#scan-progress-pct')!;
     const scanBar = card.querySelector<HTMLElement>('#scan-progress-bar')!;
+
+    const scanGrFound = card.querySelector<HTMLElement>('#scan-gr-found')!;
+    const scanGrBar = card.querySelector<HTMLElement>('#scan-gr-bar')!;
+    const scanGrCount = card.querySelector<HTMLElement>('#scan-gr-count')!;
+
+    const scanSatBadge = card.querySelector<HTMLElement>('#scan-sat-badge')!;
+    const scanSatWavePill = card.querySelector<HTMLElement>('#scan-sat-wave-pill')!;
+    const scanSatFound = card.querySelector<HTMLElement>('#scan-sat-found')!;
+    const scanSatBar = card.querySelector<HTMLElement>('#scan-sat-bar')!;
+    const scanSatCount = card.querySelector<HTMLElement>('#scan-sat-count')!;
+
     const scanLog = card.querySelector<HTMLElement>('#scan-log-view')!;
     const tbody = card.querySelector<HTMLElement>('#channel-table-body')!;
     const btnSelectPrimary = card.querySelector<HTMLButtonElement>('#btn-select-primary')!;
@@ -439,46 +492,128 @@ export class SettingsView {
       scanBox.style.display = 'block';
       scanLog.innerHTML = '';
 
-      appendLog('[FULL-SCAN] 全帯域フルスキャンを開始します（地上波 → BS → CS）...');
+      // UI初期化
+      scanBar.style.width = '0%';
+      scanPctText.textContent = '0%';
+      scanOverallCount.textContent = `0 / ${totalTunings}`;
+      scanOverallStatus.textContent = '全帯域スキャン準備中...';
+
+      scanGrBar.style.width = '0%';
+      scanGrCount.textContent = `0 / ${totalGR}`;
+      scanGrFound.textContent = '検出: 0 局';
+
+      scanSatBadge.textContent = 'BS/CS 衛星';
+      scanSatBadge.className = 'scan-lane-badge sat';
+      scanSatWavePill.style.display = 'none';
+      scanSatBar.style.width = '0%';
+      scanSatCount.textContent = `0 / ${totalSat}`;
+      scanSatFound.textContent = '検出: 0 局';
+
+      appendLog(`[FULL-SCAN] 全帯域並列フルスキャンを開始します（地上波 ${totalGR}ch / 衛星 ${totalSat}中継器）...`);
 
       // 進捗は中継器を読み終えた時点で1回来る。ロックの成否は
       // ドライバが記録したものをそのまま出す。推測しない。
+      // **検出数は全部の波を通した累計で来る。**地上波と衛星が同時に進む
+      // ので、波ごとに 0 へ戻すと差分が狂う。
       let previousFound = 0;
+      let doneGR = 0;
+      let doneSat = 0;
+      let foundGR = 0;
+      let foundSat = 0;
 
       void scanAllWaves((wave) => {
-        previousFound = 0;
-        appendLog(`[FULL-SCAN] ${wave} を走査します`);
+        if (wave === 'GR') {
+          appendLog(`[FULL-SCAN] 地上波 (GR 13ch〜${13 + totalGR - 1}ch) の並列走査を開始します`);
+        } else if (wave === 'BS') {
+          scanSatWavePill.textContent = 'BS';
+          scanSatWavePill.className = 'scan-wave-pill BS';
+          scanSatWavePill.style.display = 'inline-flex';
+          appendLog('[FULL-SCAN] 衛星 (BS/CS) の並列走査を開始します');
+        } else if (wave === 'CS') {
+          scanSatWavePill.textContent = 'CS';
+          scanSatWavePill.className = 'scan-wave-pill CS';
+          scanSatWavePill.style.display = 'inline-flex';
+          appendLog('[FULL-SCAN] 衛星 CS の走査を開始します');
+        }
       }, (progress) => {
-          const pct = Math.round(((progress.index + 1) / progress.total) * 100);
-          scanBar.style.width = `${pct}%`;
-          scanPctText.textContent = `${pct}%`;
-          scanChannelText.textContent = `${progress.label} を同期・搬送波ロック中...`;
-          const gained = progress.found - previousFound;
-          previousFound = progress.found;
-          appendLog(progress.locked === true
-            ? `✔ ${progress.label} ロック成功 検出: ${gained} サービス`
-            : `- ${progress.label}: 信号なし`);
+        const wave = progress.tuning.wave;
+        const gained = Math.max(0, progress.found - previousFound);
+        previousFound = progress.found;
+
+        // 全体進捗
+        const pct = Math.round(((progress.index + 1) / progress.total) * 100);
+        scanBar.style.width = `${pct}%`;
+        scanPctText.textContent = `${pct}%`;
+        scanOverallCount.textContent = `${progress.index + 1} / ${progress.total}`;
+        scanOverallStatus.textContent = `スキャン中... (検出済み: ${progress.found} 局)`;
+
+        // 各レーン更新
+        if (wave === 'GR') {
+          doneGR = Math.min(totalGR, doneGR + 1);
+          foundGR += gained;
+          const grPct = Math.round((doneGR / totalGR) * 100);
+          scanGrBar.style.width = `${grPct}%`;
+          scanGrCount.textContent = `${doneGR} / ${totalGR}`;
+          scanGrFound.textContent = `検出: ${foundGR} 局`;
+          const chLabel = progress.label.endsWith('ch') ? progress.label : `${progress.label}ch`;
+          if (progress.locked === true) {
+            appendLog(`✔ [GR] ${chLabel} ロック成功 検出: ${gained} サービス`);
+          } else {
+            appendLog(`- [GR] ${chLabel}: 信号なし`);
+          }
+        } else {
+          // BS or CS
+          doneSat = Math.min(totalSat, doneSat + 1);
+          foundSat += gained;
+          const satPct = Math.round((doneSat / totalSat) * 100);
+          scanSatBar.style.width = `${satPct}%`;
+          scanSatCount.textContent = `${doneSat} / ${totalSat}`;
+          scanSatFound.textContent = `検出: ${foundSat} 局`;
+          if (progress.locked === true) {
+            appendLog(`✔ [${wave}] ${progress.label} ロック成功 検出: ${gained} サービス`);
+          } else {
+            appendLog(`- [${wave}] ${progress.label}: 信号なし`);
+          }
+        }
       }, (label, _stage, elapsedMs) => {
         // 選局に入るまでの段階。ここを出さないと、ファームウェアの投入や
         // デバイスを開くところで詰まったときに無言で固まって見える。
-        scanChannelText.textContent = `${label}…`;
+        if (doneGR === 0 && doneSat === 0) {
+          scanOverallStatus.textContent = `${label}…`;
+        }
         appendLog(`[FULL-SCAN] ${label}（${(elapsedMs / 1000).toFixed(1)} 秒）`);
       }).then(async (result) => {
         for (const failure of result.failures) {
           appendLog(`[FULL-SCAN] ${failure.wave} は失敗しました: ${failure.error}`);
         }
         await saveChannels(result.channels, result.programs);
+        // **控えを読み直す。**一覧と「全N局」は控え（channelsSync）を読むので、
+        // 保存しただけでは走査前の中身のまま出ていた（初回は0局）。
+        await notifyChannelsChanged();
         enabledIds = defaultEnabledChannelIds(result.channels);
         saveEnabledChannelIds(enabledIds);
+
+        // 完了状態
         scanBar.style.width = '100%';
         scanPctText.textContent = '100%';
-        scanChannelText.textContent = 'フルスキャン完了！';
+        scanOverallCount.textContent = `${totalTunings} / ${totalTunings}`;
+        scanOverallStatus.textContent = 'フルスキャン完了！';
+
+        scanGrBar.style.width = '100%';
+        scanGrCount.textContent = `${totalGR} / ${totalGR}`;
+
+        scanSatWavePill.style.display = 'none';
+        scanSatBar.style.width = '100%';
+        scanSatCount.textContent = `${totalSat} / ${totalSat}`;
+
         appendLog(
-          `[FULL-SCAN] 全帯域スキャンが完了しました。${result.channels.length} 局のサービスを検出しました。`);
+          `[FULL-SCAN] 全帯域スキャンが完了しました。検出: 地上波 ${foundGR} 局 / 衛星(BS/CS) ${foundSat} 局 (合計 ${result.channels.length} 局)`);
         renderTable();
         updateStatusBadge();
         this.onStateChanged();
       }).catch((error: unknown) => {
+        scanSatWavePill.style.display = 'none';
+        scanOverallStatus.textContent = 'エラーが発生しました';
         appendLog(`[FULL-SCAN] 失敗: ${error instanceof Error ? error.message : String(error)}`);
       }).finally(() => {
         this.isScanning = false;
@@ -661,7 +796,7 @@ export class SettingsView {
       this.scanTimer = null;
     }
     // 走査中に画面を離れたら、チューナーを掴んだままにしない。
-    stopRefresh();
+    stopUserScan();
   }
 }
 

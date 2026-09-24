@@ -15,3 +15,11 @@
 # 内容で名前が決まるものは、いくら持たせてもよい。
 /assets/*
   Cache-Control: public, max-age=31536000, immutable
+
+# Service Worker と Manifest は常に最新を問い合わせる。
+/sw.js
+  Cache-Control: no-cache
+
+/manifest.webmanifest
+  Content-Type: application/manifest+json; charset=utf-8
+  Cache-Control: no-cache

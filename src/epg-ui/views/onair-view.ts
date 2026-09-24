@@ -2,7 +2,7 @@
 
 import type { BroadcastType, OnAirScheduleItem } from '../types';
 import { loadSchedules } from '../channel-source';
-import { onRefreshStatus, stopRefresh } from '../epg-refresh';
+import { onRefreshStatus } from '../epg-refresh';
 import { readOnAirTab, saveOnAirTab } from '../onair-tab';
 import type { ProgramDialog } from '../components/program-dialog';
 import type { StreamDialog } from '../components/stream-dialog';
@@ -298,8 +298,6 @@ export class OnAirView {
   }
 
   public destroy(): void {
-    // 受信機を掴んだまま画面を離れない。視聴へ移るときはここで明け渡す。
-    stopRefresh();
     if (this.digestTimer !== null) {
       clearInterval(this.digestTimer);
       this.digestTimer = null;

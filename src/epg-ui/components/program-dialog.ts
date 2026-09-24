@@ -2,11 +2,21 @@
 
 import type { ChannelItem, ProgramItem } from '../types';
 
+export interface ProgramDialogOptions {
+  onWatch?: (channel: ChannelItem, program: ProgramItem) => void;
+}
+
+export function isOnAir(program: ProgramItem, now: number = Date.now()): boolean {
+  return program.startAt <= now && (program.endAt > now || program.endAt === program.startAt);
+}
+
 export class ProgramDialog {
   public readonly overlayElement: HTMLElement;
   private boxElement: HTMLElement;
+  readonly #options: ProgramDialogOptions | undefined;
 
-  constructor() {
+  constructor(options?: ProgramDialogOptions) {
+    this.#options = options;
     this.overlayElement = document.createElement('div');
     this.overlayElement.className = 'dialog-overlay';
 
@@ -29,6 +39,7 @@ export class ProgramDialog {
   }
 
   public open(channel: ChannelItem, program: ProgramItem): void {
+    const onAir = isOnAir(program, Date.now());
     const startDate = new Date(program.startAt);
     const endDate = new Date(program.endAt);
     const formatTime = (d: Date) => `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
@@ -75,12 +86,32 @@ export class ProgramDialog {
         ${extendedHtml}
       </div>
       <div class="dialog-footer">
+        ${onAir ? `
+          <button type="button" class="btn btn-primary watch-btn" id="dialog-watch-btn">
+            <svg viewBox="0 0 24 24" style="width:16px;height:16px;fill:currentColor">
+              <path d="M8 5v14l11-7z"/>
+            </svg>
+            視聴する
+          </button>
+        ` : ''}
         <button type="button" class="btn btn-secondary close-btn">閉じる</button>
       </div>
     `;
 
     const closeButtons = this.boxElement.querySelectorAll('.dialog-close-btn, .close-btn');
     closeButtons.forEach((btn) => btn.addEventListener('click', () => this.close()));
+
+    if (onAir) {
+      const watchBtn = this.boxElement.querySelector<HTMLButtonElement>('#dialog-watch-btn');
+      watchBtn?.addEventListener('click', () => {
+        this.close();
+        if (this.#options?.onWatch) {
+          this.#options.onWatch(channel, program);
+        } else {
+          window.location.hash = `#/watch?channel=${channel.id}`;
+        }
+      });
+    }
 
     this.overlayElement.classList.add('open');
   }

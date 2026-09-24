@@ -9,6 +9,7 @@
 
 import { loadQ3U4Identifiers } from '../usb/px4-identity';
 import { readCachedFirmware } from '../usb/firmware';
+import { readChannels } from '../epg-ui/channel-store';
 
 export interface SetupItemState {
   /** 済んでいれば false。バッジはこれで出す。 */
@@ -61,9 +62,20 @@ async function tunerState(): Promise<SetupItemState> {
   }
 }
 
-// チャンネル一覧はまだ保存する実装が無い。スキャンを作るときにここを差し替える。
+/**
+ * 局が1つでも保存されていれば済み。
+ *
+ * **ここは長いあいだ「常に未取得」を返すスタブだった。**局の保存を実装した
+ * ときに差し替え忘れ、何をしても設定の赤丸が消えなかった。
+ *
+ * 全局を「表示しない」にしていても済みとみなす。非表示は利用者が選んだ
+ * ことで、設定し忘れではない。
+ */
 async function channelState(): Promise<SetupItemState> {
-  return { needed: true, detail: '未取得' };
+  const saved = await readChannels();
+  return saved === null
+    ? { needed: true, detail: '未取得' }
+    : { needed: false, detail: `${saved.channels.length} 局` };
 }
 
 export async function readSetupState(): Promise<SetupState> {

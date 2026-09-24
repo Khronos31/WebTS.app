@@ -13,17 +13,24 @@
 //
 // 文字列は ARIB STD-B24 の8単位符号系。字幕・SDT と同じデコーダに渡す。
 
-import { PACKET_SIZE, crc32 } from './demux';
+import { PacketAligner, PACKET_SIZE, crc32 } from './demux';
+import { ScheduleCompleteness } from './eit-schedule-state';
 
 const EIT_PID = 0x0012;
 /** actual の present/following。other (0x4F) は選局し直さないと信用できない。 */
 const EIT_PF_ACTUAL = 0x4e;
-/**
- * actual の schedule。0x50〜0x57 が basic（直近8日）、0x58〜0x5F が extended。
- * other (0x60〜0x6F) は選局し直さないと信用できないので読まない。
- */
+/** actual の schedule。0x50〜0x57 が basic（直近8日）、0x58〜0x5F が extended。 */
 const EIT_SCHEDULE_ACTUAL_FIRST = 0x50;
 const EIT_SCHEDULE_ACTUAL_LAST = 0x5f;
+/**
+ * other の schedule。同じネットワークの**ほかの TS の局**の番組表。
+ *
+ * BS と CS は1つの TS にネットワーク全局ぶんが載る。Mirakurun も EDCB も
+ * これを前提に、ネットワークごとに1つの TS しか選局しない。p/f の other
+ * (0x4F) は「いま」が選局し直さないと信用できないので、引き続き読まない。
+ */
+const EIT_SCHEDULE_OTHER_FIRST = 0x60;
+const EIT_SCHEDULE_OTHER_LAST = 0x6f;
 
 export interface EventEntry {
   readonly networkId: number;
@@ -53,6 +60,8 @@ export interface EitHandlers {
    * 読むと件数が2桁増え、揃うまでの滞在時間も桁で伸びる。
    */
   readonly schedule?: boolean | undefined;
+  /** schedule に加えて other (0x60〜0x6F) も読むか。 */
+  readonly scheduleOther?: boolean | undefined;
 }
 
 /** 2桁 BCD。 */
@@ -150,7 +159,8 @@ export class EitReader {
   /** `${serviceId}:${eventId}` で1件。 */
   readonly #events = new Map<string, EventEntry>();
   readonly #seenServices = new Set<number>();
-  #remainder = new Uint8Array(0);
+  readonly #completeness = new ScheduleCompleteness();
+  readonly #aligner = new PacketAligner();
 
   constructor(handlers: EitHandlers) {
     this.#handlers = handlers;
@@ -160,25 +170,18 @@ export class EitReader {
     return [...this.#events.values()];
   }
 
+  /** 番組表がどこまで揃ったか。schedule を読むときだけ意味がある。 */
+  get completeness(): ScheduleCompleteness {
+    return this.#completeness;
+  }
+
   /** 何件のサービスについて p/f が取れたか。 */
   get serviceCount(): number {
     return this.#seenServices.size;
   }
 
   push(chunk: Uint8Array): void {
-    let data = chunk;
-    if (this.#remainder.length > 0) {
-      const merged = new Uint8Array(this.#remainder.length + chunk.length);
-      merged.set(this.#remainder);
-      merged.set(chunk, this.#remainder.length);
-      data = merged;
-      this.#remainder = new Uint8Array(0);
-    }
-    let offset = 0;
-    for (; offset + PACKET_SIZE <= data.length; offset += PACKET_SIZE) {
-      this.#packet(data.subarray(offset, offset + PACKET_SIZE));
-    }
-    if (offset < data.length) this.#remainder = data.slice(offset);
+    this.#aligner.push(chunk, (packet) => { this.#packet(packet); });
   }
 
   #packet(packet: Uint8Array): void {
@@ -202,8 +205,11 @@ export class EitReader {
   #onSection(section: Uint8Array): void {
     if (section.length < 18) return;
     const table = section[0] ?? 0;
-    const schedule = table >= EIT_SCHEDULE_ACTUAL_FIRST && table <= EIT_SCHEDULE_ACTUAL_LAST;
-    if (table !== EIT_PF_ACTUAL && !(schedule && this.#handlers.schedule === true)) return;
+    const actual = table >= EIT_SCHEDULE_ACTUAL_FIRST && table <= EIT_SCHEDULE_ACTUAL_LAST;
+    const other = table >= EIT_SCHEDULE_OTHER_FIRST && table <= EIT_SCHEDULE_OTHER_LAST;
+    const schedule = (actual && this.#handlers.schedule === true)
+      || (other && this.#handlers.schedule === true && this.#handlers.scheduleOther === true);
+    if (table !== EIT_PF_ACTUAL && !schedule) return;
     if (crc32(section) !== 0) return;
     if (((section[5] ?? 0) & 0x01) === 0) return;
 
@@ -214,6 +220,19 @@ export class EitReader {
     if (!schedule && sectionNumber > 1) return;
     const transportStreamId = ((section[8] ?? 0) << 8) | (section[9] ?? 0);
     const networkId = ((section[10] ?? 0) << 8) | (section[11] ?? 0);
+
+    // **イベントの無いセクションも数える。**空きのセグメントも1セクションとして
+    // 送られ、それが届かないと「揃った」にならない。
+    if (schedule) {
+      this.#completeness.record({
+        tableId: table, networkId, serviceId,
+        version: ((section[5] ?? 0) >> 1) & 0x1f,
+        sectionNumber,
+        lastSectionNumber: section[7] ?? 0,
+        segmentLastSectionNumber: section[12] ?? 0,
+        lastTableId: section[13] ?? 0,
+      });
+    }
 
     let offset = 14;
     const end = section.length - 4;
