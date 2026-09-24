@@ -19,6 +19,7 @@ import { primeChannels } from './channel-source';
 import {
   emitStatus, fetchSchedule, isRefreshing, onRefreshStatus, tickAutoRefresh,
 } from './epg-refresh';
+import { requestPersistentStorage } from './persist-storage';
 
 initTheme();
 
@@ -257,5 +258,9 @@ if ('serviceWorker' in navigator && location.protocol !== 'file:') {
     });
   }
 }
+
+// 局・番組表・ファームウェアをブラウザに消されないよう、永続化を頼む
+// （persist-storage.ts）。断られても動作は変わらない。
+void requestPersistentStorage();
 
 export { channelIdFromHash, hashForRoute, routeFromHash };

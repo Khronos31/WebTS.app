@@ -59,7 +59,7 @@ const GENRE_LABELS: Record<string, string> = {
 export interface GuideViewOptions {
   readonly hash: string;
   readonly programDialog: ProgramDialog;
-  readonly streamDialog: StreamDialog;
+  readonly streamDialog?: StreamDialog | undefined;
 }
 
 export interface ScheduleBounds {
@@ -695,53 +695,27 @@ export class GuideView {
         ? `${formatTime(program.startAt)}〜`
         : `${formatTime(program.startAt)}〜${formatTime(program.endAt)}`;
 
-      let headerHtml = '';
-      if (isCompact) {
-        headerHtml = `
-          <div class="guide-card-header">
-            <span class="guide-card-time">${timeText}</span>
-            ${onAir ? '<span class="guide-onair-tag"><span class="guide-live-dot"></span>LIVE</span>' : ''}
-            ${onAir ? '<button type="button" class="guide-card-watch-btn" title="視聴">視聴</button>' : ''}
+      const headerHtml = `
+        <div class="guide-card-header">
+          <span class="guide-card-time">${timeText}</span>
+          ${onAir ? '<span class="guide-onair-tag"><span class="guide-live-dot"></span>放送中</span>' : ''}
+        </div>
+        <div class="guide-card-title" title="${escapeHtml(program.name || '（番組名なし）')}">
+          ${escapeHtml(program.name || '（番組名なし）')}
+        </div>
+        ${!isCompact && !isMedium && program.description ? `
+          <div class="guide-card-desc" title="${escapeHtml(program.description)}">
+            ${escapeHtml(program.description)}
           </div>
-          <div class="guide-card-title" title="${escapeHtml(program.name || '（番組名なし）')}">
-            ${escapeHtml(program.name || '（番組名なし）')}
+        ` : ''}
+        ${!isCompact && !isMedium && program.genre && GENRE_LABELS[program.genre] ? `
+          <div class="guide-card-genre">
+            <span class="guide-genre-badge">${GENRE_LABELS[program.genre]}</span>
           </div>
-        `;
-      } else {
-        headerHtml = `
-          <div class="guide-card-header">
-            <span class="guide-card-time">${timeText}</span>
-            ${onAir ? '<span class="guide-onair-tag"><span class="guide-live-dot"></span>放送中</span>' : ''}
-            ${onAir ? '<button type="button" class="guide-card-watch-btn" title="この番組を視聴">視聴</button>' : ''}
-          </div>
-          <div class="guide-card-title" title="${escapeHtml(program.name || '（番組名なし）')}">
-            ${escapeHtml(program.name || '（番組名なし）')}
-          </div>
-          ${!isMedium && program.description ? `
-            <div class="guide-card-desc" title="${escapeHtml(program.description)}">
-              ${escapeHtml(program.description)}
-            </div>
-          ` : ''}
-          ${!isMedium && program.genre && GENRE_LABELS[program.genre] ? `
-            <div class="guide-card-genre">
-              <span class="guide-genre-badge">${GENRE_LABELS[program.genre]}</span>
-            </div>
-          ` : ''}
-        `;
-      }
+        ` : ''}
+      `;
 
       card.innerHTML = headerHtml;
-
-      // 放送中番組の選局ボタンクリックハンドラー（stopPropagationで詳細ダイアログの重複開きを防止）
-      if (onAir) {
-        const watchBtn = card.querySelector<HTMLButtonElement>('.guide-card-watch-btn');
-        if (watchBtn) {
-          watchBtn.addEventListener('click', (e) => {
-            e.stopPropagation();
-            this.#options.streamDialog.open(schedule.channel, program);
-          });
-        }
-      }
 
       // 番組カードクリックハンドラー（詳細ダイアログを開く）
       card.addEventListener('click', () => {

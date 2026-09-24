@@ -65,8 +65,9 @@ export class ProgramDialog {
         </button>
       </div>
       <div class="dialog-body">
-        <div style="font-size: 0.8125rem; color: var(--text-secondary); margin-bottom: 8px;">
-          ${timeStr}
+        <div style="font-size: 0.8125rem; color: var(--text-secondary); margin-bottom: 8px; display: flex; align-items: center; gap: 8px;">
+          <span>${timeStr}</span>
+          ${onAir ? '<span class="guide-onair-tag"><span class="guide-live-dot"></span>放送中</span>' : ''}
         </div>
         <h2 style="font-size: 1.125rem; font-weight: 700; line-height: 1.4; margin-bottom: 12px; color: var(--text-primary);">
           ${escapeHtml(program.name)}
@@ -85,7 +86,8 @@ export class ProgramDialog {
         </div>
         ${extendedHtml}
       </div>
-      <div class="dialog-footer">
+      <div class="dialog-footer program-dialog-footer">
+        <button type="button" class="btn btn-secondary close-btn">閉じる</button>
         ${onAir ? `
           <button type="button" class="btn btn-primary watch-btn" id="dialog-watch-btn">
             <svg viewBox="0 0 24 24" style="width:16px;height:16px;fill:currentColor">
@@ -94,7 +96,6 @@ export class ProgramDialog {
             視聴する
           </button>
         ` : ''}
-        <button type="button" class="btn btn-secondary close-btn">閉じる</button>
       </div>
     `;
 
