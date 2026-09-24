@@ -8,6 +8,7 @@ import { NavDrawer } from './components/drawer';
 import { ProgramDialog } from './components/program-dialog';
 import { StreamDialog } from './components/stream-dialog';
 import { OnAirView } from './views/onair-view';
+import { GuideView } from './views/guide-view';
 import { WatchView } from './views/watch-view';
 import { SettingsView } from './views/settings-view';
 import { AboutView } from './views/about-view';
@@ -15,7 +16,9 @@ import { ApiView } from './views/api-view';
 import { initTheme } from './theme-manager';
 import { readSetupState } from '../ui/setup-state';
 import { primeChannels } from './channel-source';
-import { tickAutoRefresh } from './epg-refresh';
+import {
+  emitStatus, fetchSchedule, isRefreshing, onRefreshStatus, tickAutoRefresh,
+} from './epg-refresh';
 
 initTheme();
 
@@ -25,8 +28,9 @@ initTheme();
 // ものを避けて残りを使うので、視聴中でも取りに行ける。放映中の画面に
 // 置いていたころは、視聴中はその画面が外れていて一度も判定されなかった。
 //
-// 裏のタブでは見送る（絞られたタイマーの上で選局すると極端に遅くなる）。
-// 前面に戻った時点でもう一度判定する。
+// **裏のタブでも回す。**走査の待ちは Worker で数えるので絞られない
+// （FINDINGS 33章）。判定のこのタイマーは裏では1分おきに絞られるが、
+// 30分おきの取得を決めるには十分。前面に戻った時点でもすぐ判定する。
 const AUTO_REFRESH_INTERVAL_MS = 30_000;
 setInterval(() => { void tickAutoRefresh(); }, AUTO_REFRESH_INTERVAL_MS);
 document.addEventListener('visibilitychange', () => {
@@ -41,15 +45,19 @@ export class EpgApp {
   private streamDialog: StreamDialog;
   private mainContent: HTMLElement;
   private currentView:
-    OnAirView | WatchView | SettingsView | AboutView | ApiView | null = null;
+    OnAirView | GuideView | WatchView | SettingsView | AboutView | ApiView | null = null;
 
   constructor(container: HTMLElement) {
     this.container = container;
     this.container.classList.add('app-container');
 
     // ダイアログの初期化
-    this.programDialog = new ProgramDialog();
     this.streamDialog = new StreamDialog();
+    this.programDialog = new ProgramDialog({
+      onWatch: (channel, program) => {
+        this.streamDialog.open(channel, program);
+      },
+    });
 
     // 初期ルート
     const initialRoute = routeFromHash(location.hash);
@@ -69,9 +77,11 @@ export class EpgApp {
       onToggleDrawer: () => {
         this.navDrawer.toggle();
       },
-      onRefresh: () => {
-        void this.renderCurrentRoute();
-      },
+    });
+
+    // 走査・取得ステータスと AppBar の更新ボタンの回転状態を同期
+    onRefreshStatus((text) => {
+      this.appBar.setRefreshing(text !== '');
     });
 
     // メインコンテンツ領域
@@ -101,6 +111,8 @@ export class EpgApp {
     switch (route) {
       case 'onair':
         return '放映中';
+      case 'guide':
+        return '番組表';
       case 'watch':
         return '視聴';
       case 'settings':
@@ -120,6 +132,29 @@ export class EpgApp {
     this.appBar.setTitle(title);
     this.navDrawer.setActive(route);
     document.title = route === 'onair' ? '放映中 — WebTS.app' : `${title} — WebTS.app`;
+
+    // 番組表ページでのみ右上に「番組表を更新」ボタンを表示し、他ページでは非表示
+    if (route === 'guide') {
+      this.appBar.setRefreshAction(async () => {
+        if (isRefreshing()) return;
+        emitStatus('番組表を取得しています…');
+        try {
+          await fetchSchedule({
+            byUser: true,
+            onProgress: (progress) => {
+              emitStatus(`番組表を取得しています… ${progress.label} (${progress.index + 1}/${progress.total})`);
+            },
+          });
+          emitStatus('');
+        } catch (error) {
+          emitStatus(`番組表の取得に失敗しました: ${error instanceof Error ? error.message : String(error)}`);
+          setTimeout(() => { emitStatus(''); }, 5000);
+        }
+      }, '番組表を更新');
+      this.appBar.setRefreshing(isRefreshing());
+    } else {
+      this.appBar.setRefreshAction(null);
+    }
 
     // 保存済みのチャンネルを読んでおく。視聴画面は DOM を組み立てる時点で要る。
     await primeChannels();
@@ -147,6 +182,14 @@ export class EpgApp {
       }
       case 'onair': {
         this.currentView = new OnAirView({
+          programDialog: this.programDialog,
+          streamDialog: this.streamDialog,
+        });
+        break;
+      }
+      case 'guide': {
+        this.currentView = new GuideView({
+          hash: location.hash,
           programDialog: this.programDialog,
           streamDialog: this.streamDialog,
         });
@@ -193,6 +236,26 @@ export class EpgApp {
 const root = document.querySelector<HTMLElement>('#app');
 if (root) {
   new EpgApp(root);
+}
+
+// Service Worker の登録（PWA対応）
+//
+// **配信物でだけ登録する。**開発サーバーで登録すると、/assets と /build 以外を
+// stale-while-revalidate で返すので、コードを直した直後の読み直しで古い
+// モジュールが動く。実機で測るときに、どの版を測ったのか分からなくなる。
+// 開発サーバーで以前に登録されたものは外しておく。
+if ('serviceWorker' in navigator && location.protocol !== 'file:') {
+  if (import.meta.env.PROD) {
+    window.addEventListener('load', () => {
+      navigator.serviceWorker.register('/sw.js').catch((err) => {
+        console.warn('[PWA] Service Worker registration failed:', err);
+      });
+    });
+  } else {
+    void navigator.serviceWorker.getRegistrations().then((registrations) => {
+      for (const registration of registrations) void registration.unregister();
+    });
+  }
 }
 
 export { channelIdFromHash, hashForRoute, routeFromHash };

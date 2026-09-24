@@ -21,7 +21,7 @@
 // 文字列は ARIB STD-B24 の8単位符号系で入っている。JIS X 0208 と外字を含むので
 // 自前で変換せず、字幕と同じ `aribb24.js` に解かせる。
 
-import { PACKET_SIZE, crc32 } from './demux';
+import { PacketAligner, PACKET_SIZE, crc32 } from './demux';
 
 const SDT_PID = 0x0011;
 const NIT_PID = 0x0010;
@@ -129,9 +129,14 @@ export class ServiceInfoReader {
   readonly #nit = new SectionAssembler();
   readonly #services = new Map<number, ServiceEntry>();
   #network: NetworkEntry | null = null;
-  #remainder = new Uint8Array(0);
+  readonly #aligner = new PacketAligner();
   #sdtVersion = -1;
   #nitVersion = -1;
+  /** 計測用。どこで読み捨てているかを数える。 */
+  readonly stats = {
+    bytes: 0, packets: 0, noSync: 0, tei: 0, sdtPackets: 0, sdtSections: 0, notActual: 0, crcErrors: 0,
+    sameVersion: 0, decodeErrors: 0,
+  };
 
   constructor(handlers: ServiceInfoHandlers) {
     this.#handlers = handlers;
@@ -152,25 +157,15 @@ export class ServiceInfoReader {
   }
 
   push(chunk: Uint8Array): void {
-    let data = chunk;
-    if (this.#remainder.length > 0) {
-      const merged = new Uint8Array(this.#remainder.length + chunk.length);
-      merged.set(this.#remainder);
-      merged.set(chunk, this.#remainder.length);
-      data = merged;
-      this.#remainder = new Uint8Array(0);
-    }
-    let offset = 0;
-    for (; offset + PACKET_SIZE <= data.length; offset += PACKET_SIZE) {
-      this.#packet(data.subarray(offset, offset + PACKET_SIZE));
-    }
-    if (offset < data.length) this.#remainder = data.slice(offset);
+    this.stats.bytes += chunk.length;
+    this.#aligner.push(chunk, (packet) => { this.#packet(packet); });
   }
 
   #packet(packet: Uint8Array): void {
-    if (packet[0] !== 0x47) return;
+    this.stats.packets += 1;
+    if (packet[0] !== 0x47) { this.stats.noSync += 1; return; }
     const second = packet[1] ?? 0;
-    if ((second & 0x80) !== 0) return;
+    if ((second & 0x80) !== 0) { this.stats.tei += 1; return; }
     const pid = ((second & 0x1f) << 8) | (packet[2] ?? 0);
     if (pid !== SDT_PID && pid !== NIT_PID) return;
     const third = packet[3] ?? 0;
@@ -185,6 +180,7 @@ export class ServiceInfoReader {
     const payload = packet.subarray(start);
     const unitStart = (second & 0x40) !== 0;
     const assembler = pid === SDT_PID ? this.#sdt : this.#nit;
+    if (pid === SDT_PID) this.stats.sdtPackets += 1;
     for (const section of assembler.feed(payload, unitStart)) {
       if (pid === SDT_PID) this.#onSdt(section);
       else this.#onNit(section);
@@ -192,11 +188,12 @@ export class ServiceInfoReader {
   }
 
   #onSdt(section: Uint8Array): void {
-    if (section[0] !== SDT_ACTUAL || section.length < 15) return;
-    if (crc32(section) !== 0) return;
+    this.stats.sdtSections += 1;
+    if (section[0] !== SDT_ACTUAL || section.length < 15) { this.stats.notActual += 1; return; }
+    if (crc32(section) !== 0) { this.stats.crcErrors += 1; return; }
     if (((section[5] ?? 0) & 0x01) === 0) return;
     const version = ((section[5] ?? 0) >> 1) & 0x1f;
-    if (version === this.#sdtVersion) return;
+    if (version === this.#sdtVersion) { this.stats.sameVersion += 1; return; }
     this.#sdtVersion = version;
 
     const transportStreamId = ((section[3] ?? 0) << 8) | (section[4] ?? 0);

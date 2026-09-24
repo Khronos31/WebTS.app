@@ -19,6 +19,47 @@
 
 export const PACKET_SIZE = 188;
 const SYNC_BYTE = 0x47;
+
+/**
+ * 188 バイトの区切りを保つ。**区切りを見失ったら同期を取り直す。**
+ *
+ * 以前は先頭が揃っている前提で188バイトずつ切っていた。途中で1バイトでも
+ * 抜けると、それ以降は全部が区切りの途中から始まり、何も読めなくなる。
+ * 実測で、走査中にタブが裏へ回って読み手が遅れ、C 側が溢れたぶんを
+ * 188 の倍数でなく捨てたとき、CS の走査が全局0になった（FINDINGS 33章）。
+ *
+ * 同期を取り直すときは、0x47 の次の188バイト先も 0x47 であることを見る。
+ * 本体の途中にたまたま現れた 0x47 に合わせないため。
+ */
+export class PacketAligner {
+  #remainder = new Uint8Array(0);
+  /** 同期を取り直した回数。 */
+  resyncs = 0;
+
+  push(chunk: Uint8Array, onPacket: (packet: Uint8Array) => void): void {
+    let data = chunk;
+    if (this.#remainder.length > 0) {
+      data = new Uint8Array(this.#remainder.length + chunk.length);
+      data.set(this.#remainder);
+      data.set(chunk, this.#remainder.length);
+    }
+    const aligned = (at: number): boolean => data[at] === SYNC_BYTE
+      && (data.length - at < 2 * PACKET_SIZE || data[at + PACKET_SIZE] === SYNC_BYTE);
+    let offset = 0;
+    while (data.length - offset >= PACKET_SIZE) {
+      if (aligned(offset)) {
+        onPacket(data.subarray(offset, offset + PACKET_SIZE));
+        offset += PACKET_SIZE;
+        continue;
+      }
+      this.resyncs += 1;
+      let next = offset + 1;
+      while (next < data.length && !aligned(next)) next += 1;
+      offset = next;
+    }
+    this.#remainder = data.slice(offset);
+  }
+}
 const NULL_PID = 0x1fff;
 const PAT_PID = 0x0000;
 
@@ -232,8 +273,8 @@ export class TsDemuxer {
     packets: 0, badSync: 0, errored: 0, scrambled: 0,
     continuityErrors: 0, badSections: 0, nullPackets: 0,
   };
-  /** 188 の倍数で切れなかった端。次の push の先頭に繋ぐ。 */
-  #remainder = new Uint8Array(0);
+  /** 188 の倍数で切れなかった端を持ち越し、区切りを見失えば取り直す。 */
+  readonly #aligner = new PacketAligner();
 
   constructor(handlers: DemuxerHandlers = {}) {
     this.#handlers = handlers;
@@ -256,19 +297,9 @@ export class TsDemuxer {
   }
 
   push(chunk: Uint8Array): void {
-    let data = chunk;
-    if (this.#remainder.length > 0) {
-      const merged = new Uint8Array(this.#remainder.length + chunk.length);
-      merged.set(this.#remainder);
-      merged.set(chunk, this.#remainder.length);
-      data = merged;
-      this.#remainder = new Uint8Array(0);
-    }
-    let offset = 0;
-    for (; offset + PACKET_SIZE <= data.length; offset += PACKET_SIZE) {
-      this.#packet(data.subarray(offset, offset + PACKET_SIZE));
-    }
-    if (offset < data.length) this.#remainder = data.slice(offset);
+    const before = this.#aligner.resyncs;
+    this.#aligner.push(chunk, (packet) => { this.#packet(packet); });
+    this.#counters.badSync += this.#aligner.resyncs - before;
   }
 
   /** 終端。溜まっている PES を出し切る。 */

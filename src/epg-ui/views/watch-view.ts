@@ -6,7 +6,6 @@ import { channelsSync, findChannelSync, programsSync } from '../channel-source';
 import { VideoPlayer } from '../components/video-player';
 import { LiveSession, type LiveStats } from '../live-session';
 import { tuningForChannel } from '../tuning';
-import { stopRefresh } from '../epg-refresh';
 
 export interface WatchViewOptions {
   channelId: number;
@@ -220,9 +219,7 @@ export class WatchView {
    */
   private async startLive(): Promise<void> {
     this.stopLive();
-    // **走査中なら明け渡してもらう。**走査は視聴が使う受信機を避けて
-    // 始まるが、先に走査が全部を掴んでいると視聴の受信機が残らない。
-    stopRefresh();
+    // 走査は止めない。各系統の1本目は視聴のために空けてある（channel-scan.ts）。
     const tuning = tuningForChannel(this.channel);
     if (tuning === null) {
       this.showStatus('このチャンネルの選局先が分かりません。スキャンし直してください。');

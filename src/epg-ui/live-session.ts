@@ -23,6 +23,7 @@ import { CaptionText } from './caption-text';
 import type { Tuning } from './tuning';
 import { STAGE_LABEL } from './stage-label';
 import { allowLnb15v } from './lnb-setting';
+import { ChannelScan } from './channel-scan';
 
 const POLL_WORDS = 17;
 /** 1回の drain で取り出す上限。live は 2 MB/s 程度なので十分余る。 */
@@ -93,21 +94,59 @@ export interface LiveSessionOptions {
  */
 let active: LiveSession | null = null;
 
+/** C 側の視聴ジョブの状態。1 が実行中。 */
+const JOB_RUNNING = 1;
+
+function sleep(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => { setTimeout(resolve, milliseconds); });
+}
+
+function liveJobRunning(module: Q3U4Module): boolean {
+  const pointer = module._malloc(POLL_WORDS * 4);
+  try {
+    module.ccall('webts_q3u4_descramble_poll', 'number', ['number', 'number'],
+      [pointer, POLL_WORDS]);
+    return (module.HEAP32[pointer / 4] ?? 0) === JOB_RUNNING;
+  } finally {
+    module._free(pointer);
+  }
+}
+
 /**
- * 受信機が解放されるまで待つ。
+ * 前の視聴が受信機を手放すまで待つ。待つ必要が無ければすぐ戻る。
  *
- * **デバイスが閉じたことを直接見る。**C 側の状態が「実行中でない」に変わるのは
- * 後始末の途中で、そこから attachment を外し、受信機を閉じ、セッションを畳む
- * までにさらに時間がかかる。BUSY を避けたいなら、その最後まで待つ必要がある。
+ * 待つものは2つある。
+ *
+ * 1. **C 側の視聴ジョブが終わること。**受信機を閉じてから「実行中でない」に
+ *    変わる（worker_main の finish）。
+ * 2. **セッションが畳み終わること。**ほかに仕事が無ければ、ジョブの後で
+ *    デバイスを閉じる。その途中で開き直すと上流が BUSY を返す。実測で、
+ *    チャンネルを続けて切り替えると2回目が必ず失敗していた。
+ *
+ * **走査が動いていれば 2 は起きない。**走査がセッションを握っているので
+ * 畳まれない。以前は常に「デバイスが全部閉じるまで」待っていたので、
+ * 裏で番組表を取っているあいだは、何も片付けるものが無くても毎回10秒の
+ * 上限まで待たされていた。
  */
-async function settleDevices(timeoutMs = 10_000): Promise<void> {
-  if (typeof navigator === 'undefined' || !('usb' in navigator)) return;
+async function settlePrevious(
+  module: Q3U4Module, onWait: () => void, timeoutMs = 10_000,
+): Promise<void> {
   const deadline = Date.now() + timeoutMs;
+  let told = false;
+  const tell = (): void => { if (!told) { told = true; onWait(); } };
+
+  while (liveJobRunning(module) && Date.now() < deadline) {
+    tell();
+    await sleep(100);
+  }
+  if (ChannelScan.isActive()) return;
+  if (typeof navigator === 'undefined' || !('usb' in navigator)) return;
   for (;;) {
     const devices = await navigator.usb.getDevices();
     if (devices.every((device) => !device.opened)) return;
-    if (Date.now() > deadline) return;
-    await new Promise((resolve) => { setTimeout(resolve, 100); });
+    if (ChannelScan.isActive() || Date.now() > deadline) return;
+    tell();
+    await sleep(100);
   }
 }
 
@@ -164,12 +203,6 @@ export class LiveSession {
    */
   static async start(options: LiveSessionOptions): Promise<LiveSession> {
     active?.stop();
-    // **前のセッションが畳み終わるのを待つ。**`stop()` は停止を頼むだけで、
-    // 受信機を手放すのは driver スレッドが後始末を終えてからである。待たずに
-    // 次を開くと同じ受信機を取りに行って上流が BUSY を返す。実測で、
-    // チャンネルを続けて切り替えると2回目が必ず失敗していた。
-    options.onStatus?.('前のチャンネルを片付けています…');
-    await settleDevices();
 
     await ensureTunerAvailable();
     const firmware = await readCachedFirmware();
@@ -178,6 +211,12 @@ export class LiveSession {
     }
     options.onStatus?.('モジュールを読み込んでいます…');
     const module = await loadQ3U4Module();
+
+    // **前の視聴が受信機を手放すまで待つ。**`stop()` は停止を頼むだけで、
+    // 手放すのは driver スレッドが後始末を終えてからである。
+    await settlePrevious(module, () => {
+      options.onStatus?.('前のチャンネルを片付けています…');
+    });
 
     const firmwarePointer = module._malloc(firmware.length);
     module.HEAPU8.set(firmware, firmwarePointer);

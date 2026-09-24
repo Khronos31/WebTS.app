@@ -26,6 +26,12 @@ isdbt_rio.inp
 *.mts
 *.mp4
 
+# PWA のアイコン。**画像は履歴に入れない**（scripts/check-history.mjs）。
+# scripts/generate-pwa-icons.mjs が決定的に作るので、dev と build の前に
+# 毎回作る。favicon.svg はテキストなのでコミットしてある。
+public/*.png
+public/favicon.ico
+
 # UI のモック用動画。実 live 経路へ繋ぐまでの仮置きで、成果物には載せない。
 public/mock-stream.mp4
 

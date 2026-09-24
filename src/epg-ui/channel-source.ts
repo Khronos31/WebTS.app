@@ -27,6 +27,18 @@ export async function primeChannels(): Promise<void> {
   programCache = await readPrograms();
 }
 
+/**
+ * 局の一覧が変わったことを知らせる。**控えを読み直してから**知らせるので、
+ * 受け取った画面は `channelsSync()` をそのまま読んでよい。
+ *
+ * 放映中と番組表の画面が `webts-channels-changed` を待っているのに、以前は
+ * どこからも送っていなかった。
+ */
+export async function notifyChannelsChanged(): Promise<void> {
+  await primeChannels();
+  window.dispatchEvent(new CustomEvent('webts-channels-changed'));
+}
+
 /** 同期に読みたい画面のための控え。視聴画面が DOM を組み立てる時点で要る。 */
 export function programsSync(channelId: number): ProgramItem[] {
   return programCache.filter((program) => program.channelId === channelId)

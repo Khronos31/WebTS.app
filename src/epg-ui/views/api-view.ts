@@ -18,7 +18,7 @@
 import { channelsSync, primeChannels, programCoverage } from '../channel-source';
 import { readChannels, readPrograms } from '../channel-store';
 import {
-  fetchSchedule, isRefreshing, refreshPrograms, scanWave, stopRefresh,
+  fetchSchedule, isRefreshing, refreshPrograms, scanWave, stopUserScan,
 } from '../epg-refresh';
 import { allowLnb15v, setAllowLnb15v } from '../lnb-setting';
 import { ChannelScan, type ScanProgress } from '../channel-scan';
@@ -159,10 +159,9 @@ export class ApiView {
       case 'api/epg/schedule': {
         const wave = params.get('wave') ?? '';
         const dwell = Number(params.get('dwell') ?? '');
-        const seconds = Number.isFinite(dwell) && dwell > 0 ? Math.round(dwell / 1000) : 60;
-        const lines: string[] = [`番組表を取得しています…（1中継器あたり ${seconds} 秒）`];
+        const lines: string[] = ['番組表を取得しています…（揃った中継器から次へ進みます）'];
         this.#output.textContent = lines[0] ?? '';
-        const programs = await fetchSchedule({
+        const result = await fetchSchedule({
           ...(isWave(wave) ? { wave } : {}),
           ...(Number.isFinite(dwell) && dwell > 0 ? { dwellMs: dwell } : {}),
           onProgress: (progress: ScanProgress) => {
@@ -170,7 +169,7 @@ export class ApiView {
               + ` (${progress.index + 1}/${progress.total})`);
           },
         });
-        return { ok: true, programs };
+        return { ok: true, ...result };
       }
 
       case 'api/epg/refresh': {
@@ -188,8 +187,8 @@ export class ApiView {
   }
 
   public destroy(): void {
-    // **走査中に離れたら止める。**画面が消えても走り続けると、受信機を
-    // 握ったまま誰も結果を受け取らない状態になる。
-    stopRefresh();
+    // **ここから始めた走査は、離れたら止める。**画面が消えても走り続けると、
+    // 受信機を握ったまま誰も結果を受け取らない状態になる。裏の取得は止めない。
+    stopUserScan();
   }
 }

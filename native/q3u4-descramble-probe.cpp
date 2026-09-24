@@ -645,8 +645,12 @@ constexpr int kMaxScanWorkers = 4;
  * 番組表（EIT[schedule]）を取るときは JS が長い値を渡す。
  */
 constexpr int kScanEntryTimeoutMs = 8000;
-/** JS が渡せる上限。番組表でも1中継器に何分も留まらせない。 */
-constexpr int kScanEntryTimeoutMaxMs = 300000;
+/**
+ * JS が渡せる上限。Mirakurun の番組表取得の上限 (epgRetrievalTime) と同じ10分。
+ * 実測で、BS の1つの TS から全局の番組表が揃うのに5分では足りなかった
+ * （NHK BS の5〜8日目の表が最後まで残った）。
+ */
+constexpr int kScanEntryTimeoutMaxMs = 600000;
 /** JS の応答を待つ上限。応答が来なくても走査は止めない。 */
 constexpr int kScanAcknowledgeTimeoutMs = 30000;
 /** 1バイトも来ないまま過ぎたら見切る時間。衛星の空きスロット対策。 */
@@ -688,9 +692,28 @@ struct ScanJob final {
     ScanWorker workers[kMaxScanWorkers];
 };
 
-ScanJob* g_scan = nullptr;
-pthread_t g_scan_threads[kMaxScanWorkers]{};
-int g_scan_thread_count = 0;
+/**
+ * 走査のジョブ。**地上波と衛星で1つずつ持つ。**受信機が別なので同時に
+ * 回せる。以前は全体で1つしか持てず、番組表の取得で地上波が終わるまで
+ * 衛星を始められなかった（8本中3本しか使わない）。
+ */
+struct ScanSlot final {
+    ScanJob* job = nullptr;
+    pthread_t threads[kMaxScanWorkers]{};
+    int thread_count = 0;
+};
+
+ScanSlot g_scans[2];
+
+ScanSlot* scan_slot(int wave) noexcept {
+    if (wave != kWaveTerrestrial && wave != kWaveSatellite) return nullptr;
+    return &g_scans[wave];
+}
+
+ScanJob* scan_job(int wave) noexcept {
+    ScanSlot* slot = scan_slot(wave);
+    return slot == nullptr ? nullptr : slot->job;
+}
 
 void scan_retain(ScanWorker& worker, const std::uint8_t* data, std::size_t size) noexcept {
     std::lock_guard<std::mutex> guard(worker.mutex);
@@ -701,8 +724,19 @@ void scan_retain(ScanWorker& worker, const std::uint8_t* data, std::size_t size)
     worker.output.insert(worker.output.end(), data, data + size);
     if (worker.output.size() - worker.consumed > kScanStreamLimit) {
         // 読み手が遅れている。古いほうから捨てる。走査は止めない。
-        const std::size_t keep = kScanStreamLimit / 2U;
-        const std::size_t from = worker.output.size() - keep;
+        //
+        // **パケットの頭で切る。**以前は 2 MiB ちょうどを残していたので、
+        // 捨てたあとの先頭がパケットの途中になり、区切りを取り直さない
+        // 読み手には以降が全部読めなくなっていた（FINDINGS 33章）。1回に
+        // 読める量は 188 の倍数とは限らないので、位置で割らずに同期バイトを
+        // 探す。次の 188 バイト先も 0x47 であることまで見る。
+        constexpr std::size_t kPacket = 188U;
+        std::size_t from = worker.output.size() - kScanStreamLimit / 2U;
+        const std::size_t limit = std::min(worker.output.size(), from + 2U * kPacket);
+        while (from + kPacket < limit
+               && !(worker.output[from] == 0x47U && worker.output[from + kPacket] == 0x47U)) {
+            ++from;
+        }
         worker.output.erase(worker.output.begin(),
                             worker.output.begin() + static_cast<std::ptrdiff_t>(from));
         worker.consumed = 0U;
@@ -1057,7 +1091,9 @@ int webts_q3u4_scan_start(const std::uint8_t* firmware, int firmware_size, int w
                           const std::int32_t* frequencies, const std::int32_t* slots,
                           int count, const std::int32_t* receivers, int receiver_count,
                           int allow_15v, int dwell_ms) {
-    if (g_scan != nullptr && g_scan->state.load() == kRunning) {
+    ScanSlot* const scan = scan_slot(wave);
+    if (scan == nullptr) return static_cast<int>(Error::INVALID_ARGUMENT);
+    if (scan->job != nullptr && scan->job->state.load() == kRunning) {
         return static_cast<int>(Error::BUSY);
     }
     if (firmware == nullptr || firmware_size <= 0 || frequencies == nullptr ||
@@ -1096,41 +1132,43 @@ int webts_q3u4_scan_start(const std::uint8_t* firmware, int firmware_size, int w
         }
     }
 
-    for (int w = 0; w < g_scan_thread_count; ++w) pthread_join(g_scan_threads[w], nullptr);
-    g_scan_thread_count = 0;
-    delete g_scan;
-    g_scan = new ScanJob();
-    g_scan->firmware.assign(firmware, firmware + firmware_size);
-    g_scan->allow_15v = allow_15v != 0;
-    g_scan->wave = wave;
-    g_scan->dwell_ms = dwell_ms > 0 ? dwell_ms : kScanEntryTimeoutMs;
-    g_scan->frequencies_khz.assign(frequencies, frequencies + count);
-    if (satellite) g_scan->slots.assign(slots, slots + count);
-    else g_scan->slots.assign(static_cast<std::size_t>(count), -1);
-    g_scan->receivers.assign(receivers, receivers + receiver_count);
-    for (int i = 0; i < kMaxScanEntries; ++i) g_scan->locked[i].store(-1);
+    for (int w = 0; w < scan->thread_count; ++w) pthread_join(scan->threads[w], nullptr);
+    scan->thread_count = 0;
+    delete scan->job;
+    scan->job = new ScanJob();
+    ScanJob& job = *scan->job;
+    job.firmware.assign(firmware, firmware + firmware_size);
+    job.allow_15v = allow_15v != 0;
+    job.wave = wave;
+    job.dwell_ms = dwell_ms > 0 ? dwell_ms : kScanEntryTimeoutMs;
+    job.frequencies_khz.assign(frequencies, frequencies + count);
+    if (satellite) job.slots.assign(slots, slots + count);
+    else job.slots.assign(static_cast<std::size_t>(count), -1);
+    job.receivers.assign(receivers, receivers + receiver_count);
+    for (int i = 0; i < kMaxScanEntries; ++i) job.locked[i].store(-1);
     for (int w = 0; w < receiver_count; ++w) {
-        g_scan->workers[w].receiver.store(receivers[w]);
-        g_scan->workers[w].output.reserve(kScanStreamLimit / 4U);
+        job.workers[w].receiver.store(receivers[w]);
+        job.workers[w].output.reserve(kScanStreamLimit / 4U);
     }
-    g_scan->running.store(receiver_count);
-    g_scan->state.store(kRunning);
+    job.running.store(receiver_count);
+    job.state.store(kRunning);
 
     for (int w = 0; w < receiver_count; ++w) {
-        auto* argument = new (std::nothrow) ScanWorkerArgument{g_scan, w};
+        auto* argument = new (std::nothrow) ScanWorkerArgument{&job, w};
+        pthread_t thread{};
         if (argument == nullptr ||
-            pthread_create(&g_scan_threads[w], nullptr, scan_worker_main, argument) != 0) {
+            pthread_create(&thread, nullptr, scan_worker_main, argument) != 0) {
             delete argument;
             // 立てられなかったぶんは数から引く。残りは走り続ける。
-            if (g_scan->running.fetch_sub(1) == 1) {
-                g_scan->error.store(static_cast<int>(Error::INTERNAL));
-                g_scan->state.store(kFailed);
+            if (job.running.fetch_sub(1) == 1) {
+                job.error.store(static_cast<int>(Error::INTERNAL));
+                job.state.store(kFailed);
                 return static_cast<int>(Error::INTERNAL);
             }
             continue;
         }
-        g_scan_threads[g_scan_thread_count] = g_scan_threads[w];
-        g_scan_thread_count += 1;
+        scan->threads[scan->thread_count] = thread;
+        scan->thread_count += 1;
     }
     return 0;
 }
@@ -1142,10 +1180,11 @@ int webts_q3u4_scan_start(const std::uint8_t* firmware, int firmware_size, int w
  *   6..     作業者ごとに index, waiting, pending
  *   その後  entries ぶんの locked[]
  */
-int webts_q3u4_scan_poll(std::int32_t* output, int output_words) {
+int webts_q3u4_scan_poll(int wave, std::int32_t* output, int output_words) {
     if (output == nullptr || output_words < 6) return static_cast<int>(Error::INVALID_ARGUMENT);
-    if (g_scan == nullptr) { output[0] = kIdle; return 0; }
-    const ScanJob& job = *g_scan;
+    const ScanJob* const current = scan_job(wave);
+    if (current == nullptr) { output[0] = kIdle; return 0; }
+    const ScanJob& job = *current;
     const int workers = static_cast<int>(job.receivers.size());
     const int entries = static_cast<int>(job.frequencies_khz.size());
     output[0] = job.state.load();
@@ -1165,10 +1204,11 @@ int webts_q3u4_scan_poll(std::int32_t* output, int output_words) {
 }
 
 /** その作業者が溜めたぶんを取り出す。戻り値は写したバイト数。 */
-int webts_q3u4_scan_drain(int worker, std::uint8_t* output, int capacity) {
-    if (g_scan == nullptr || output == nullptr || capacity <= 0) return 0;
+int webts_q3u4_scan_drain(int wave, int worker, std::uint8_t* output, int capacity) {
+    ScanJob* const job = scan_job(wave);
+    if (job == nullptr || output == nullptr || capacity <= 0) return 0;
     if (worker < 0 || worker >= kMaxScanWorkers) return 0;
-    ScanWorker& slot = g_scan->workers[worker];
+    ScanWorker& slot = job->workers[worker];
     std::lock_guard<std::mutex> guard(slot.mutex);
     const std::size_t available = slot.output.size() - slot.consumed;
     if (available == 0U) return 0;
@@ -1180,25 +1220,30 @@ int webts_q3u4_scan_drain(int worker, std::uint8_t* output, int capacity) {
 }
 
 /** その作業者に「この中継器はもう十分」と伝える。 */
-void webts_q3u4_scan_advance(int worker) {
-    if (g_scan == nullptr || worker < 0 || worker >= kMaxScanWorkers) return;
-    g_scan->workers[worker].advance.store(true);
+void webts_q3u4_scan_advance(int wave, int worker) {
+    ScanJob* const job = scan_job(wave);
+    if (job == nullptr || worker < 0 || worker >= kMaxScanWorkers) return;
+    job->workers[worker].advance.store(true);
 }
 
 /** その作業者に、この添字を見終えたと伝える。返すまで次へ進まない。 */
-void webts_q3u4_scan_acknowledge(int worker, int index) {
-    if (g_scan == nullptr || worker < 0 || worker >= kMaxScanWorkers) return;
-    g_scan->workers[worker].acknowledged.store(index);
+void webts_q3u4_scan_acknowledge(int wave, int worker, int index) {
+    ScanJob* const job = scan_job(wave);
+    if (job == nullptr || worker < 0 || worker >= kMaxScanWorkers) return;
+    job->workers[worker].acknowledged.store(index);
 }
 
-void webts_q3u4_scan_stop(void) {
-    if (g_scan != nullptr) g_scan->stop_requested.store(true);
+void webts_q3u4_scan_stop(int wave) {
+    ScanJob* const job = scan_job(wave);
+    if (job != nullptr) job->stop_requested.store(true);
 }
 
-int webts_q3u4_scan_join(void) {
-    for (int w = 0; w < g_scan_thread_count; ++w) pthread_join(g_scan_threads[w], nullptr);
-    g_scan_thread_count = 0;
-    return g_scan == nullptr ? 0 : g_scan->error.load();
+int webts_q3u4_scan_join(int wave) {
+    ScanSlot* const scan = scan_slot(wave);
+    if (scan == nullptr) return static_cast<int>(Error::INVALID_ARGUMENT);
+    for (int w = 0; w < scan->thread_count; ++w) pthread_join(scan->threads[w], nullptr);
+    scan->thread_count = 0;
+    return scan->job == nullptr ? 0 : scan->job->error.load();
 }
 
 const char* webts_q3u4_descramble_error_name(int error) {

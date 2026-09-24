@@ -7,6 +7,7 @@
 // おけば、差し替えても一覧側を書き換えずに済む。
 
 import type { ChannelItem, ProgramItem } from './types';
+import { mergeSchedule } from './schedule-merge';
 
 const DATABASE = 'webts-channels';
 const STORE = 'channels';
@@ -87,6 +88,38 @@ export async function mergePrograms(programs: readonly ProgramItem[]): Promise<P
 }
 
 /**
+ * 番組表を重ねる。揃った局については差し替える（schedule-merge.ts）。
+ */
+export async function applySchedule(
+  programs: readonly ProgramItem[],
+  completeChannels: ReadonlySet<number>,
+  since: number,
+): Promise<ProgramItem[]> {
+  const list = mergeSchedule(await readPrograms(), programs, completeChannels, since, Date.now());
+  await savePrograms(list);
+  return list;
+}
+
+/**
+ * 番組表を最後に取り終えた時刻。無ければ 0。
+ *
+ * **失敗した取得では更新しない。**更新すると、失敗が続いても「新しい」と
+ * みなされ、次の取得が30分先まで延びる。
+ */
+export async function readScheduleFetchedAt(): Promise<number> {
+  try {
+    return (await transact<number | undefined>(
+      META, 'readonly', (store) => store.get('scheduleFetchedAt'))) ?? 0;
+  } catch {
+    return 0;
+  }
+}
+
+export async function writeScheduleFetchedAt(at: number): Promise<void> {
+  await transact(META, 'readwrite', (store) => store.put(at, 'scheduleFetchedAt'));
+}
+
+/**
  * 見つかった局だけを入れ替える。
  *
  * **波ごとに走査するので、丸ごと書き換えてはいけない。**BS を走査したときに
@@ -122,7 +155,15 @@ export async function readChannels(): Promise<ScannedChannels | null> {
     if (channels === undefined || channels.length === 0) return null;
     const scannedAt = await transact<number | undefined>(
       META, 'readonly', (store) => store.get('scannedAt'));
-    return { channels, scannedAt: scannedAt ?? 0 };
+    // **同じ局が何度も保存されていることがある。**衛星の走査で CS の局を
+    // 相対 TS ごとに数えていた版の保存が残っている。読むときに1つにする。
+    const seen = new Set<number>();
+    const unique = channels.filter((channel) => {
+      if (seen.has(channel.id)) return false;
+      seen.add(channel.id);
+      return true;
+    });
+    return { channels: unique, scannedAt: scannedAt ?? 0 };
   } catch {
     return null;
   }

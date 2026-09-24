@@ -2,9 +2,9 @@
 // ※指示により、使い方等の余計な情報は含めず、バージョン情報・ライセンス・環境診断のみを明瞭に表示する。
 
 import { describeEnvironment } from '../../platform/environment';
+import { APP_VERSION } from '../version';
 
 const SOURCE_URL = 'https://github.com/Khronos31/WebTS.app';
-const APP_VERSION = '0.1.0-dev';
 
 export class AboutView {
   public readonly element: HTMLElement;

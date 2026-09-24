@@ -11,28 +11,69 @@
 
 import { ChannelScan, type ScanProgress } from './channel-scan';
 import type { ChannelItem, ProgramItem } from './types';
-import { mergeChannels, mergePrograms } from './channel-store';
-import { channelsSync, primeChannels, programsSync } from './channel-source';
+import {
+  applySchedule, mergeChannels, mergePrograms, readScheduleFetchedAt, writeScheduleFetchedAt,
+} from './channel-store';
+import {
+  channelsSync, notifyChannelsChanged, primeChannels, programsSync,
+} from './channel-source';
 import {
   bsTunings, csTunings, grTunings, satelliteScanTunings, tuningForChannel, tuningKey,
   type Tuning, type WaveType,
 } from './tuning';
 import { LiveSession } from './live-session';
+import { planByNetwork, planRetry, type SchedulePlan } from './schedule-plan';
 import { allowLnb15v } from './lnb-setting';
 
 /** 自動更新の間隔の下限。失敗しても次の試行まではこれだけ空ける。 */
 const COOLDOWN_MS = 10 * 60 * 1000;
 
-let running: ChannelScan | null = null;
+/**
+ * 動いている走査と、それを利用者が始めたか。**地上波と衛星は同時に動く**
+ * ので、1つではなく組で持つ（番組表の取得）。
+ *
+ * **利用者が始めた走査だけを、画面を離れたときに止める。**裏の取得まで
+ * 止めると、画面を移るたびに番組表の取得がやり直しになる。
+ */
+const running = new Map<ChannelScan, boolean>();
 let lastAttempt = 0;
 
 export function isRefreshing(): boolean {
-  return running !== null;
+  return running.size > 0;
 }
 
-/** 視聴を始めるときなど、受信機を明け渡す必要があるときに呼ぶ。 */
-export function stopRefresh(): void {
-  running?.stop();
+/** 利用者が始めた走査だけを止める。画面を離れるときに呼ぶ。 */
+export function stopUserScan(): void {
+  for (const [scan, byUser] of running) if (byUser) scan.stop();
+}
+
+function begin(scan: ChannelScan, byUser: boolean): void {
+  running.set(scan, byUser);
+}
+
+function end(scan: ChannelScan): void {
+  running.delete(scan);
+}
+
+function sleep(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => { setTimeout(resolve, milliseconds); });
+}
+
+/**
+ * 利用者の操作を通すため、裏の取得を止めて終わるのを待つ。**利用者が
+ * 始めた走査は止めない。**そちらは「すでに動いています」で断る。
+ *
+ * ただし**止まりかけている走査は待つ。**画面を移ると前の画面の走査に
+ * 止める指示が出るが、終わるまでには少しかかる。その間に次の画面が
+ * 走査を始めると、断られていた。
+ */
+async function takeOver(): Promise<void> {
+  if (running.size === 0) return;
+  for (const [scan, byUser] of running) {
+    if (byUser && !scan.stopped) throw new Error('すでに走査が動いています。');
+  }
+  for (const scan of running.keys()) scan.stop();
+  while (running.size > 0) await sleep(100);
 }
 
 /** 登録済みの局が乗っている中継器。同じ TS を指すものは畳む。 */
@@ -48,8 +89,10 @@ export function knownTunings(): Tuning[] {
 
 export async function refreshPrograms(
   onProgress?: (progress: ScanProgress) => void,
+  byUser = true,
 ): Promise<number> {
-  if (running !== null) throw new Error('すでに番組情報を取得しています。');
+  if (byUser) await takeOver();
+  if (running.size > 0) throw new Error('すでに番組情報を取得しています。');
   const tunings = knownTunings();
   if (tunings.length === 0) {
     throw new Error('局が登録されていません。先にスキャンを実行してください。');
@@ -66,24 +109,23 @@ export async function refreshPrograms(
 
   lastAttempt = Date.now();
   const programs: ProgramItem[] = [];
-  try {
-    for (const [, waveTunings] of byWave) {
-      const scan = new ChannelScan();
-      running = scan;
+  for (const [, waveTunings] of byWave) {
+    const scan = new ChannelScan();
+    begin(scan, byUser);
+    try {
       const result = await scan.run(
         onProgress === undefined
           ? { tunings: waveTunings, allowLnb15v: allowLnb15v() }
           : { tunings: waveTunings, allowLnb15v: allowLnb15v(), onProgress });
       programs.push(...result.programs);
-      running = null;
+    } finally {
+      end(scan);
     }
-    // **届いたぶんだけを入れ替える。**回らなかった局の番組を消さない。
-    await mergePrograms(programs);
-    await primeChannels();
-    return programs.length;
-  } finally {
-    running = null;
   }
+  // **届いたぶんだけを入れ替える。**回らなかった局の番組を消さない。
+  await mergePrograms(programs);
+  await primeChannels();
+  return programs.length;
 }
 
 export interface AutoRefreshResult {
@@ -99,21 +141,21 @@ export interface AutoRefreshResult {
  * ほかの走査が動いていれば見送る。**視聴中は見送らない。**空いている
  * 受信機を使う。
  *
- * 裏のタブでは見送る。タイマーが絞られた状態で選局を始めると、1中継器
- * あたり 6 秒が 30〜60 秒に落ちる（FINDINGS 23章）。
+ * **裏のタブでも取りに行く。**以前は、絞られたタイマーの上で選局すると
+ * 1中継器あたり 6 秒が 30〜60 秒に落ちるので見送っていた（FINDINGS 23章）。
+ * 走査の待ちを Worker で数えるようにして解消した（33章）。
  */
 export async function maybeAutoRefresh(
   onProgress?: (progress: ScanProgress) => void,
 ): Promise<AutoRefreshResult> {
-  if (running !== null) return { ran: false };
+  if (running.size > 0) return { ran: false };
   // **視聴中でも取りに行く。**受信機は8本あり、走査は視聴が使っているものを
   // 避けて残りを使う。同じセッションを共有するので開き直しも起きない。
   if (ChannelScan.isActive()) return { ran: false };
-  if (document.visibilityState !== 'visible') return { ran: false };
   if (Date.now() - lastAttempt < COOLDOWN_MS) return { ran: false };
   if (knownTunings().length === 0) return { ran: false };
   try {
-    return { ran: true, programs: await refreshPrograms(onProgress) };
+    return { ran: true, programs: await refreshPrograms(onProgress, false) };
   } catch (error) {
     return { ran: true, error: error instanceof Error ? error.message : String(error) };
   }
@@ -135,11 +177,11 @@ export async function scanWave(
   wave: WaveType,
   onProgress?: (progress: ScanProgress) => void,
 ): Promise<WaveScanResult> {
-  if (running !== null) throw new Error('すでに走査が動いています。');
+  await takeOver();
   const tunings = wave === 'GR' ? grTunings()
     : satelliteScanTunings(wave === 'BS' ? bsTunings() : csTunings());
   const scan = new ChannelScan();
-  running = scan;
+  begin(scan, true);
   lastAttempt = Date.now();
   try {
     const result = await scan.run(
@@ -148,10 +190,10 @@ export async function scanWave(
         : { tunings, allowLnb15v: allowLnb15v(), onProgress });
     await mergeChannels(result.channels);
     await mergePrograms(result.programs);
-    await primeChannels();
+    await notifyChannelsChanged();
     return { channels: result.channels.length, programs: result.programs.length };
   } finally {
-    running = null;
+    end(scan);
   }
 }
 
@@ -178,12 +220,56 @@ export function onRefreshStatus(listener: RefreshListener): () => void {
   return () => { listeners.delete(listener); };
 }
 
-function emitStatus(text: string): void {
+export function emitStatus(text: string): void {
   for (const listener of listeners) listener(text);
 }
 
-/** アプリ本体が回す自動更新。画面がどこにあっても判定する。 */
+let ticking = false;
+
+/**
+ * アプリ本体が回す自動更新。画面がどこにあっても判定する。
+ *
+ * 番組表が古ければ番組表を取る（いま放送中の番組もそこに含まれる）。
+ * そうでなければ、いま放送中の番組が分からない局があるときだけ p/f を取る。
+ */
 export async function tickAutoRefresh(): Promise<void> {
+  // タイマーと画面の切り替えから同時に呼ばれうる。判定が非同期なので、
+  // 両方が「空いている」と見て走り出さないようにする。
+  if (ticking) return;
+  ticking = true;
+  try {
+    await tick();
+  } finally {
+    ticking = false;
+  }
+}
+
+async function tick(): Promise<void> {
+  if (running.size > 0 || ChannelScan.isActive()) return;
+  // 裏のタブでも回す。走査の待ちは Worker で数えるので絞られない（33章）。
+  if (knownTunings().length === 0) return;
+
+  const now = Date.now();
+  if (await scheduleIsDue(now)) {
+    lastScheduleAttempt = now;
+    try {
+      const result = await fetchSchedule({
+        byUser: false,
+        onProgress: (progress) => {
+          emitStatus(`番組表を取得しています… ${progress.label}`
+            + ` (${progress.index + 1}/${progress.total})`);
+        },
+      });
+      // 利用者の操作に譲って止まったなら、何も言わない。
+      emitStatus('');
+      if (result.stopped) lastScheduleAttempt = 0;
+    } catch (error) {
+      emitStatus(`番組表の取得に失敗しました: ${
+        error instanceof Error ? error.message : String(error)}`);
+    }
+    return;
+  }
+
   if (!needsPrograms()) return;
   const result = await maybeAutoRefresh((progress) => {
     emitStatus(`番組情報を取得しています… ${progress.label}`
@@ -196,62 +282,145 @@ export async function tickAutoRefresh(): Promise<void> {
   }
 }
 
-/** 1中継器に留まる時間。番組表は section が揃うのを待てないので時間で切る。 */
-const SCHEDULE_DWELL_MS = 60_000;
-
 /**
- * 番組表を取る。EIT[schedule] を読むので、放映中の更新より桁で時間がかかる。
+ * 1中継器に留まる上限。**揃えば上限を待たずに次へ進む**（eit-schedule-state.ts）。
  *
- * **利用者が明示的に始めたときだけ走らせる。**自動更新の経路には載せない。
- * 1中継器あたり1分留まるので、関東の地上波10波でも受信機4本で3分前後になる。
+ * Mirakurun と同じ10分（C 側の kScanEntryTimeoutMaxMs も同じ）。実測で、BS の
+ * 1つの TS は5分では揃わなかった。
  */
+const SCHEDULE_MAX_DWELL_MS = 600_000;
+
 export interface ScheduleOptions {
-  /** 1中継器に留まる時間 (ms)。長いほど取りこぼしが減る。 */
+  /** 1中継器に留まる上限 (ms)。 */
   readonly dwellMs?: number | undefined;
   /** 波を絞る。省略すると登録済みの全部。 */
   readonly wave?: WaveType | undefined;
   readonly onProgress?: ((progress: ScanProgress) => void) | undefined;
+  /** 利用者が始めたか。裏の取得は false。既定は true。 */
+  readonly byUser?: boolean | undefined;
 }
 
-export async function fetchSchedule(options: ScheduleOptions = {}): Promise<number> {
-  if (running !== null) throw new Error('すでに走査が動いています。');
+export interface ScheduleResult {
+  /** 届いた番組の数。 */
+  readonly programs: number;
+  /** 番組表が揃った局の数。 */
+  readonly complete: number;
+  /** 回った中継器の数。 */
+  readonly tunings: number;
+  /** 途中で止められたか。 */
+  readonly stopped: boolean;
+}
+
+/**
+ * 番組表を取る。EIT[schedule] を読む。中継器の選び方は schedule-plan.ts。
+ *
+ * **1つの TS で全局ぶんが揃う前提は、外れても壊れないようにする。**
+ * 前提が外れたネットワークがあれば、残りの中継器を回り直す。前提どおり
+ * なら2回目は起きない。
+ */
+export async function fetchSchedule(options: ScheduleOptions = {}): Promise<ScheduleResult> {
+  const byUser = options.byUser !== false;
+  if (byUser) await takeOver();
+  if (running.size > 0) throw new Error('すでに走査が動いています。');
   const onProgress = options.onProgress;
-  const dwellMs = options.dwellMs ?? SCHEDULE_DWELL_MS;
-  const tunings = knownTunings()
-    .filter((tuning) => options.wave === undefined || tuning.wave === options.wave);
-  if (tunings.length === 0) {
+  const dwellMs = options.dwellMs ?? SCHEDULE_MAX_DWELL_MS;
+  const channels = channelsSync(false)
+    .filter((channel) => options.wave === undefined || channel.channelType === options.wave);
+  if (channels.length === 0) {
     throw new Error('局が登録されていません。先にスキャンを実行してください。');
   }
-  const byWave = new Map<WaveType, Tuning[]>();
-  for (const tuning of tunings) {
-    const list = byWave.get(tuning.wave);
-    if (list === undefined) byWave.set(tuning.wave, [tuning]);
-    else list.push(tuning);
-  }
-
-  lastAttempt = Date.now();
+  const accept = new Set(channels.map((channel) => channel.id));
+  const since = Date.now();
+  lastAttempt = since;
   const programs: ProgramItem[] = [];
-  try {
-    for (const [, waveTunings] of byWave) {
-      const scan = new ChannelScan();
-      running = scan;
+  const complete = new Set<number>();
+  let tuningCount = 0;
+  let stopped = false;
+  // **進み具合は全体で数える。**地上波と衛星が同時に進むので、走査ごとの
+  // 「3/13」と「1/3」が交互に届くと読めない。
+  let total = 0;
+  let done = 0;
+  const report = onProgress === undefined ? undefined : (progress: ScanProgress): void => {
+    done += 1;
+    onProgress({ ...progress, index: done - 1, total });
+  };
+
+  const runPlan = async (plan: SchedulePlan): Promise<void> => {
+    if (stopped) return;
+    const scan = new ChannelScan();
+    begin(scan, byUser);
+    try {
       const result = await scan.run({
-        tunings: waveTunings,
+        tunings: plan.tunings,
         allowLnb15v: allowLnb15v(),
         schedule: true,
+        scheduleOther: true,
+        scheduleExpect: plan.expect,
+        acceptChannels: accept,
         dwellMs,
-        ...(onProgress === undefined ? {} : { onProgress }),
+        ...(report === undefined ? {} : { onProgress: report }),
       });
       programs.push(...result.programs);
-      running = null;
+      for (const key of result.scheduleComplete) complete.add(key);
+      tuningCount += plan.tunings.length;
+      if (scan.stopped) stopped = true;
+    } finally {
+      end(scan);
     }
-    await mergePrograms(programs);
-    await primeChannels();
-    window.dispatchEvent(new CustomEvent('webts-programs-updated'));
-    return programs.length;
-  } finally {
-    running = null;
-  }
+  };
+
+  /**
+   * **地上波と衛星を同時に回す。**受信機が別で、C 側も系統ごとにジョブを
+   * 持つ。以前は地上波（約5分）が終わるまで衛星（3.5〜10分）を始めず、
+   * 8本の受信機のうち3本しか使っていなかった。
+   *
+   * 片方が失敗しても、もう片方の結果は捨てない。失敗は全部が終わってから
+   * 投げる。
+   */
+  const runAll = async (all: Iterable<SchedulePlan>): Promise<void> => {
+    const list = [...all];
+    total += list.reduce((sum, plan) => sum + plan.tunings.length, 0);
+    const results = await Promise.allSettled(list.map(runPlan));
+    const failure = results.find((result) => result.status === 'rejected');
+    if (failure !== undefined) {
+      // 両方が終わるのを待ってから、揃った局だけ重ねて投げる。
+      await applySchedule(programs, complete, since);
+      await primeChannels();
+      window.dispatchEvent(new CustomEvent('webts-programs-updated'));
+      throw failure.reason;
+    }
+  };
+
+  const { plans, visited } = planByNetwork(channels);
+  await runAll(plans.values());
+
+  const arrived = new Set(programs.map((program) => program.channelId));
+  if (!stopped) await runAll(planRetry(channels, visited, arrived).values());
+
+  // 止められても、揃った局は揃っているので重ねてよい。**取得時刻だけは
+  // 書かない。**書くと、途中で止まった取得が30分間「新しい」扱いになる。
+  // 波を絞った取得でも書かない。ほかの波まで新しい扱いになる。
+  await applySchedule(programs, complete, since);
+  if (!stopped && options.wave === undefined) await writeScheduleFetchedAt(Date.now());
+  await primeChannels();
+  window.dispatchEvent(new CustomEvent('webts-programs-updated'));
+  return { programs: programs.length, complete: complete.size, tunings: tuningCount, stopped };
+}
+
+/**
+ * 番組表を取り直す間隔。Mirakurun は毎時20分と50分に取る（30分おき）。
+ * 前回の取得がこれより古ければ、起動時でも取りに行く。
+ */
+const SCHEDULE_INTERVAL_MS = 30 * 60 * 1000;
+
+/** 番組表の取得に失敗したとき、次に試すまで空ける時間。 */
+const SCHEDULE_RETRY_MS = 10 * 60 * 1000;
+
+let lastScheduleAttempt = 0;
+
+async function scheduleIsDue(now: number): Promise<boolean> {
+  if (now - lastScheduleAttempt < SCHEDULE_RETRY_MS) return false;
+  return now - await readScheduleFetchedAt() >= SCHEDULE_INTERVAL_MS;
 }
 
 /** 走査する波の順。地上波が最初なのは、アンテナがある可能性が一番高いため。 */
@@ -264,47 +433,79 @@ export interface FullScanResult {
   readonly failures: readonly { wave: WaveType; error: string }[];
 }
 
+function fullScanTunings(wave: WaveType): Tuning[] {
+  return wave === 'GR' ? grTunings()
+    : satelliteScanTunings(wave === 'BS' ? bsTunings() : csTunings());
+}
+
 /**
- * 全部の波を順に走査する。設定の「スキャン開始」がこれを呼ぶ。
+ * 全部の波を走査する。設定の「スキャン開始」がこれを呼ぶ。
+ *
+ * **地上波と衛星は同時に回す。**受信機が別で、C 側も系統ごとにジョブを
+ * 持つ。衛星の中では BS、CS の順。各系統の1本目は視聴のために空けたまま
+ * （channel-scan.ts）。以前は地上波 → BS → CS を直列に回していた。
  *
  * **1つの波で失敗しても続ける。**衛星アンテナが無い環境では BS/CS が
  * 何も見つからないのが普通で、それを理由に地上波の結果まで捨てるのは
  * おかしい。信号が無いだけなら失敗ですらない（ロックしないまま次へ進む）。
  *
+ * 進み具合は全体で数える。`index` と `total` は全部の波を通した番号、
+ * `found` は全部の波を通した累計。2つの走査が交互に知らせてくるので、
+ * 走査ごとの数のままでは画面が読めない。
+ *
  * 保存は呼び出し側に任せる。全部の波を集め終えてから1回で書きたいため。
+ * 結果は地上波、BS、CS の順に並べる（終わった順ではなく）。
  */
 export async function scanAllWaves(
   onWave?: (wave: WaveType) => void,
   onProgress?: (progress: ScanProgress) => void,
   onStage?: (label: string, stage: number, elapsedMs: number) => void,
 ): Promise<FullScanResult> {
-  if (running !== null) throw new Error('すでに走査が動いています。');
-  const channels: ChannelItem[] = [];
-  const programs: ProgramItem[] = [];
+  await takeOver();
+  const byWave = new Map<WaveType, { channels: ChannelItem[]; programs: ProgramItem[] }>();
   const failures: { wave: WaveType; error: string }[] = [];
+  const total = ALL_WAVES.reduce((sum, wave) => sum + fullScanTunings(wave).length, 0);
+  let done = 0;
+  let found = 0;
 
-  for (const wave of ALL_WAVES) {
+  const runWave = async (wave: WaveType): Promise<void> => {
     onWave?.(wave);
-    const tunings = wave === 'GR' ? grTunings()
-      : satelliteScanTunings(wave === 'BS' ? bsTunings() : csTunings());
     const scan = new ChannelScan();
-    running = scan;
+    begin(scan, true);
+    let foundHere = 0;
+    const report = onProgress === undefined ? undefined : (progress: ScanProgress): void => {
+      done += 1;
+      found += progress.found - foundHere;
+      foundHere = progress.found;
+      onProgress({ ...progress, index: done - 1, total, found });
+    };
     try {
       const result = await scan.run({
-        tunings,
+        tunings: fullScanTunings(wave),
         allowLnb15v: allowLnb15v(),
-        ...(onProgress === undefined ? {} : { onProgress }),
+        ...(report === undefined ? {} : { onProgress: report }),
         ...(onStage === undefined ? {} : { onStage }),
       });
-      channels.push(...result.channels);
-      programs.push(...result.programs);
+      byWave.set(wave, { channels: [...result.channels], programs: [...result.programs] });
     } catch (error) {
       failures.push({
         wave, error: error instanceof Error ? error.message : String(error),
       });
     } finally {
-      running = null;
+      end(scan);
     }
+  };
+
+  await Promise.all([
+    runWave('GR'),
+    (async (): Promise<void> => { await runWave('BS'); await runWave('CS'); })(),
+  ]);
+
+  const channels: ChannelItem[] = [];
+  const programs: ProgramItem[] = [];
+  for (const wave of ALL_WAVES) {
+    channels.push(...(byWave.get(wave)?.channels ?? []));
+    programs.push(...(byWave.get(wave)?.programs ?? []));
   }
   return { channels, programs, failures };
 }
