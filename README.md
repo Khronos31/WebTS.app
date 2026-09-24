@@ -6,7 +6,6 @@ PX-Q3U4 を利用者の端末へ直接つなぎ、WebUSB 対応ブラウザだ�
 
 地上波・BS・CS の視聴、字幕、チャンネル走査、番組表の取得が Windows・Linux・
 macOS・Android で動く。M0〜M3 の受け入れ条件は満たしている（[受け入れ結果](docs/ACCEPTANCE.md)）。
-**公開はまだしていない。**
 
 ## 状態
 
