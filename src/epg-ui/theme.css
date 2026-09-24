@@ -1510,6 +1510,10 @@ body {
   gap: 8px;
 }
 
+.dialog-footer.program-dialog-footer {
+  justify-content: space-between;
+}
+
 /* ==========================================================
    Channel Manager Table (Settings)
    ========================================================== */
@@ -2421,25 +2425,6 @@ body.guide-dragging-active {
   white-space: nowrap;
 }
 
-.guide-card-watch-btn {
-  padding: 2px 7px;
-  font-size: 0.6875rem;
-  font-weight: 600;
-  border-radius: 3px;
-  border: none;
-  background-color: var(--primary);
-  color: #ffffff;
-  cursor: pointer;
-  display: inline-flex;
-  align-items: center;
-  gap: 3px;
-  transition: background-color 0.15s ease;
-  white-space: nowrap;
-}
-
-.guide-card-watch-btn:hover {
-  background-color: var(--primary-light);
-}
 
 .guide-card-title {
   font-size: 0.8125rem;

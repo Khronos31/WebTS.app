@@ -13,11 +13,16 @@ import {
   type FirmwareStage,
 } from '../../usb/firmware';
 import { readSetupState } from '../../ui/setup-state';
-import { saveChannels } from '../channel-store';
-import { scanAllWaves, stopUserScan } from '../epg-refresh';
+import {
+  getScanState,
+  startFullScan,
+  stopScan,
+  subscribeScan,
+  type ScanState,
+} from '../scan-manager';
 import { bsTunings, csTunings, grTunings, satelliteScanTunings } from '../tuning';
 import type { ChannelItem } from '../types';
-import { channelsSync, notifyChannelsChanged } from '../channel-source';
+import { channelsSync } from '../channel-source';
 import { loadQ3U4Identifiers } from '../../usb/px4-identity';
 import { getTheme, setTheme, type ThemeMode } from '../theme-manager';
 import { allowLnb15v, setAllowLnb15v } from '../lnb-setting';
@@ -29,7 +34,7 @@ export interface SettingsViewOptions {
 export class SettingsView {
   public readonly element: HTMLElement;
   private onStateChanged: () => void;
-  private isScanning = false;
+  private unsubscribeScan: (() => void) | null = null;
   private scanTimer: number | null = null;
 
   constructor(options: SettingsViewOptions) {
@@ -300,6 +305,9 @@ export class SettingsView {
           </svg>
           スキャン開始
         </button>
+        <button type="button" class="btn btn-secondary" id="stop-scan-btn" style="display: none;">
+          スキャン中止
+        </button>
       </div>
 
       <div class="scan-progress-box" id="scan-box" style="display: none; margin-bottom: 20px;">
@@ -386,6 +394,7 @@ export class SettingsView {
     `;
 
     const startBtn = card.querySelector<HTMLButtonElement>('#start-scan-btn')!;
+    const stopBtn = card.querySelector<HTMLButtonElement>('#stop-scan-btn')!;
     const scanBox = card.querySelector<HTMLElement>('#scan-box')!;
     const scanOverallStatus = card.querySelector<HTMLElement>('#scan-overall-status')!;
     const scanOverallCount = card.querySelector<HTMLElement>('#scan-overall-count')!;
@@ -484,141 +493,78 @@ export class SettingsView {
       scanLog.scrollTop = scanLog.scrollHeight;
     };
 
-    // フルスキャン開始
-    startBtn.addEventListener('click', () => {
-      if (this.isScanning) return;
-      this.isScanning = true;
-      startBtn.disabled = true;
-      scanBox.style.display = 'block';
-      scanLog.innerHTML = '';
-
-      // UI初期化
-      scanBar.style.width = '0%';
-      scanPctText.textContent = '0%';
-      scanOverallCount.textContent = `0 / ${totalTunings}`;
-      scanOverallStatus.textContent = '全帯域スキャン準備中...';
-
-      scanGrBar.style.width = '0%';
-      scanGrCount.textContent = `0 / ${totalGR}`;
-      scanGrFound.textContent = '検出: 0 局';
-
-      scanSatBadge.textContent = 'BS/CS 衛星';
-      scanSatBadge.className = 'scan-lane-badge sat';
-      scanSatWavePill.style.display = 'none';
-      scanSatBar.style.width = '0%';
-      scanSatCount.textContent = `0 / ${totalSat}`;
-      scanSatFound.textContent = '検出: 0 局';
-
-      appendLog(`[FULL-SCAN] 全帯域並列フルスキャンを開始します（地上波 ${totalGR}ch / 衛星 ${totalSat}中継器）...`);
-
-      // 進捗は中継器を読み終えた時点で1回来る。ロックの成否は
-      // ドライバが記録したものをそのまま出す。推測しない。
-      // **検出数は全部の波を通した累計で来る。**地上波と衛星が同時に進む
-      // ので、波ごとに 0 へ戻すと差分が狂う。
-      let previousFound = 0;
-      let doneGR = 0;
-      let doneSat = 0;
-      let foundGR = 0;
-      let foundSat = 0;
-
-      void scanAllWaves((wave) => {
-        if (wave === 'GR') {
-          appendLog(`[FULL-SCAN] 地上波 (GR 13ch〜${13 + totalGR - 1}ch) の並列走査を開始します`);
-        } else if (wave === 'BS') {
-          scanSatWavePill.textContent = 'BS';
-          scanSatWavePill.className = 'scan-wave-pill BS';
-          scanSatWavePill.style.display = 'inline-flex';
-          appendLog('[FULL-SCAN] 衛星 (BS/CS) の並列走査を開始します');
-        } else if (wave === 'CS') {
-          scanSatWavePill.textContent = 'CS';
-          scanSatWavePill.className = 'scan-wave-pill CS';
-          scanSatWavePill.style.display = 'inline-flex';
-          appendLog('[FULL-SCAN] 衛星 CS の走査を開始します');
-        }
-      }, (progress) => {
-        const wave = progress.tuning.wave;
-        const gained = Math.max(0, progress.found - previousFound);
-        previousFound = progress.found;
-
-        // 全体進捗
-        const pct = Math.round(((progress.index + 1) / progress.total) * 100);
-        scanBar.style.width = `${pct}%`;
-        scanPctText.textContent = `${pct}%`;
-        scanOverallCount.textContent = `${progress.index + 1} / ${progress.total}`;
-        scanOverallStatus.textContent = `スキャン中... (検出済み: ${progress.found} 局)`;
-
-        // 各レーン更新
-        if (wave === 'GR') {
-          doneGR = Math.min(totalGR, doneGR + 1);
-          foundGR += gained;
-          const grPct = Math.round((doneGR / totalGR) * 100);
-          scanGrBar.style.width = `${grPct}%`;
-          scanGrCount.textContent = `${doneGR} / ${totalGR}`;
-          scanGrFound.textContent = `検出: ${foundGR} 局`;
-          const chLabel = progress.label.endsWith('ch') ? progress.label : `${progress.label}ch`;
-          if (progress.locked === true) {
-            appendLog(`✔ [GR] ${chLabel} ロック成功 検出: ${gained} サービス`);
-          } else {
-            appendLog(`- [GR] ${chLabel}: 信号なし`);
-          }
+    const syncScanUI = (scanState: Readonly<ScanState>, newLog?: string) => {
+      if (scanState.isScanning) {
+        startBtn.style.display = 'none';
+        stopBtn.style.display = 'inline-flex';
+        stopBtn.disabled = false;
+        stopBtn.textContent = 'スキャン中止';
+        scanBox.style.display = 'block';
+      } else {
+        startBtn.style.display = 'inline-flex';
+        startBtn.disabled = false;
+        stopBtn.style.display = 'none';
+        if (scanState.completed || scanState.logs.length > 0 || scanState.error) {
+          scanBox.style.display = 'block';
         } else {
-          // BS or CS
-          doneSat = Math.min(totalSat, doneSat + 1);
-          foundSat += gained;
-          const satPct = Math.round((doneSat / totalSat) * 100);
-          scanSatBar.style.width = `${satPct}%`;
-          scanSatCount.textContent = `${doneSat} / ${totalSat}`;
-          scanSatFound.textContent = `検出: ${foundSat} 局`;
-          if (progress.locked === true) {
-            appendLog(`✔ [${wave}] ${progress.label} ロック成功 検出: ${gained} サービス`);
-          } else {
-            appendLog(`- [${wave}] ${progress.label}: 信号なし`);
-          }
+          scanBox.style.display = 'none';
         }
-      }, (label, _stage, elapsedMs) => {
-        // 選局に入るまでの段階。ここを出さないと、ファームウェアの投入や
-        // デバイスを開くところで詰まったときに無言で固まって見える。
-        if (doneGR === 0 && doneSat === 0) {
-          scanOverallStatus.textContent = `${label}…`;
-        }
-        appendLog(`[FULL-SCAN] ${label}（${(elapsedMs / 1000).toFixed(1)} 秒）`);
-      }).then(async (result) => {
-        for (const failure of result.failures) {
-          appendLog(`[FULL-SCAN] ${failure.wave} は失敗しました: ${failure.error}`);
-        }
-        await saveChannels(result.channels, result.programs);
-        // **控えを読み直す。**一覧と「全N局」は控え（channelsSync）を読むので、
-        // 保存しただけでは走査前の中身のまま出ていた（初回は0局）。
-        await notifyChannelsChanged();
-        enabledIds = defaultEnabledChannelIds(result.channels);
-        saveEnabledChannelIds(enabledIds);
+      }
 
-        // 完了状態
-        scanBar.style.width = '100%';
-        scanPctText.textContent = '100%';
-        scanOverallCount.textContent = `${totalTunings} / ${totalTunings}`;
-        scanOverallStatus.textContent = 'フルスキャン完了！';
+      scanBar.style.width = `${scanState.percent}%`;
+      scanPctText.textContent = `${scanState.percent}%`;
+      scanOverallCount.textContent = scanState.overallCountText;
+      scanOverallStatus.textContent = scanState.status;
 
-        scanGrBar.style.width = '100%';
-        scanGrCount.textContent = `${totalGR} / ${totalGR}`;
+      scanGrBar.style.width = scanState.gr.barWidth;
+      scanGrCount.textContent = scanState.gr.countText;
+      scanGrFound.textContent = scanState.gr.foundText;
 
+      if (scanState.sat.wavePill !== 'none') {
+        scanSatWavePill.textContent = scanState.sat.wavePill;
+        scanSatWavePill.className = `scan-wave-pill ${scanState.sat.wavePill}`;
+        scanSatWavePill.style.display = 'inline-flex';
+      } else {
         scanSatWavePill.style.display = 'none';
-        scanSatBar.style.width = '100%';
-        scanSatCount.textContent = `${totalSat} / ${totalSat}`;
+      }
+      scanSatBar.style.width = scanState.sat.barWidth;
+      scanSatCount.textContent = scanState.sat.countText;
+      scanSatFound.textContent = scanState.sat.foundText;
 
-        appendLog(
-          `[FULL-SCAN] 全帯域スキャンが完了しました。検出: 地上波 ${foundGR} 局 / 衛星(BS/CS) ${foundSat} 局 (合計 ${result.channels.length} 局)`);
+      if (newLog) {
+        appendLog(newLog);
+      } else {
+        scanLog.innerHTML = '';
+        for (const log of scanState.logs) {
+          appendLog(log);
+        }
+      }
+    };
+
+    // 初期状態の復元
+    syncScanUI(getScanState());
+
+    // スキャンマネージャーからの通知購読
+    this.unsubscribeScan = subscribeScan((scanState, newLog) => {
+      syncScanUI(scanState, newLog);
+      if (scanState.completed) {
+        enabledIds = getEnabledChannelIds();
         renderTable();
         updateStatusBadge();
         this.onStateChanged();
-      }).catch((error: unknown) => {
-        scanSatWavePill.style.display = 'none';
-        scanOverallStatus.textContent = 'エラーが発生しました';
-        appendLog(`[FULL-SCAN] 失敗: ${error instanceof Error ? error.message : String(error)}`);
-      }).finally(() => {
-        this.isScanning = false;
-        startBtn.disabled = false;
-      });
+      }
+    });
+
+    // フルスキャン開始
+    startBtn.addEventListener('click', () => {
+      void startFullScan();
+    });
+
+    // スキャン中止
+    stopBtn.addEventListener('click', () => {
+      stopBtn.disabled = true;
+      stopBtn.textContent = '中止中...';
+      stopScan();
     });
 
     return card;
@@ -795,8 +741,10 @@ export class SettingsView {
       clearInterval(this.scanTimer);
       this.scanTimer = null;
     }
-    // 走査中に画面を離れたら、チューナーを掴んだままにしない。
-    stopUserScan();
+    if (this.unsubscribeScan) {
+      this.unsubscribeScan();
+      this.unsubscribeScan = null;
+    }
   }
 }
 
