@@ -78,6 +78,37 @@ TypeScript ライブラリであり、`package-lock.json` が完全性ハッシ�
 - B24 は8単位符号系に JIS X 0201/0208、外字、DRCS、制御符号による画面座標指定まで
   含む仕様であり、自前で書き直す対象ではない。KonomiTV が使っているのも同じ実装。
 
+### データ放送（BML）
+
+| 対象 | 固定 | ライセンス | 用途 |
+|---|---|---|---|
+| [web-bml](https://github.com/otya128/web-bml) | 1.0.1（完全一致指定） | MIT | BML ブラウザと TS の解読 |
+| [arib-mmt-tlv-ts](https://github.com/otya128/arib-mmt-tlv-ts) | 2.0.2（web-bml の推移依存） | MIT | TS・SI の解読 |
+| [fflate](https://github.com/101arrowz/fflate) | 0.8.3（同） | MIT | モジュールの展開 |
+| [fast-xml-parser](https://github.com/NaturalIntelligence/fast-xml-parser) | 4.5.7（同） | MIT | BML 文書の解析 |
+| [strnum](https://github.com/NaturalIntelligence/strnum) | 1.1.2（fast-xml-parser の推移依存） | MIT | 同上 |
+| [css（otya128 のフォーク）](https://github.com/otya128/reworkcss-css) | 3.0.2（GitHub の tarball、`package-lock.json` が完全性ハッシュで固定） | MIT | BML の CSS の解析 |
+
+- **`crc-32`（Apache-2.0）は取り込まない。**web-bml の依存に入っているが、使い道は PNG
+  チャンクの CRC だけなので、`vite.config.ts` の alias で同じ値を返す自前の実装
+  （`src/bml/crc32.ts`）へ差し替えている。`node_modules` には入るが成果物には入らない。
+- web-bml は、データ放送を使い始めたときだけ読む別のチャンクになる。
+
+### データ放送のフォント
+
+| 対象 | 固定 | ライセンス | 用途 |
+|---|---|---|---|
+| [web-bml-fonts](https://github.com/otya128/web-bml/tree/master/fonts) | 1.0.0（完全一致指定） | Apache-2.0 | BML の丸ゴシック・太丸ゴシック・角ゴシック |
+
+- **コードではなくフォントのデータである。**成果物の JavaScript へリンクもトランスパイルも
+  されず、別のファイルとして配信され、BML を表示するときにブラウザが読む。
+- 中身は Kosugi Maru と Kosugi（著作者 Motoya、googlefonts/kosugi-maru・googlefonts/kosugi）。
+  Regular の2書体は Google Fonts の原本とハッシュが一致することを確かめた。太丸ゴシックは
+  原本を fontforge で機械的に太らせた派生物で、パッケージの README にそう書かれている。
+- ライセンス本文・著作者・README は、ビルド時に `dist/licenses/web-bml-fonts/` へ写して
+  同じ配信物に入れる。
+- フォントのバイナリはリポジトリに入れない。`package-lock.json` が版と完全性ハッシュを固定する。
+
 ## ビルド・テスト専用
 
 | 対象 | ライセンス |

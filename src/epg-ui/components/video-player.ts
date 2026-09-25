@@ -374,6 +374,27 @@ export class VideoPlayer {
     this.subtitleText.style.display = text === '' ? 'none' : '';
   }
 
+  /**
+   * 映像を箱の中の一部へ寄せる。データ放送が映像の位置と大きさを決めるとき
+   * に使う。値は箱に対する割合（0〜1）。null で全面へ戻す。
+   */
+  public setVideoRect(rect: { left: number; top: number; width: number; height: number } | null): void {
+    const style = this.media.style;
+    if (rect === null) {
+      style.removeProperty('position');
+      style.removeProperty('left');
+      style.removeProperty('top');
+      style.removeProperty('width');
+      style.removeProperty('height');
+      return;
+    }
+    style.position = 'absolute';
+    style.left = `${rect.left * 100}%`;
+    style.top = `${rect.top * 100}%`;
+    style.width = `${rect.width * 100}%`;
+    style.height = `${rect.height * 100}%`;
+  }
+
   /** 映像の実寸が分かった時点で表示比を合わせる。 */
   public setAspectRatio(ratio: string): void {
     this.element.style.aspectRatio = ratio;

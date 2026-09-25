@@ -6,6 +6,7 @@ import { channelsSync, findChannelSync, programsSync } from '../channel-source';
 import { VideoPlayer } from '../components/video-player';
 import { LiveSession, type LiveStats } from '../live-session';
 import { tuningForChannel } from '../tuning';
+import { isDataBroadcastVisible, sendDataBroadcastKey } from '../data-broadcast';
 
 export interface WatchViewOptions {
   channelId: number;
@@ -21,6 +22,8 @@ export class WatchView {
   private channel: ChannelItem;
   private currentProgram: ProgramItem | null = null;
   private nextProgram: ProgramItem | null = null;
+  /** 番組情報のパネル。番組が替わったら中の番組情報だけを作り直す。 */
+  private detailsSection!: HTMLElement;
 
   constructor(options: WatchViewOptions) {
     this.element = document.createElement('div');
@@ -54,6 +57,39 @@ export class WatchView {
       options.onNavigateBack();
     });
 
+    // PC表示用データ放送操作バー（放映中一覧へ戻る と 局情報 の間）
+    const bmlBar = document.createElement('div');
+    bmlBar.className = 'watch-bml-bar';
+    bmlBar.innerHTML = `
+      <button type="button" class="btn-bml btn-bml-d" data-bml-key="d" title="データ放送表示切替 (d)">
+        <span class="bml-d-icon">d</span>
+        <span>データ</span>
+        <kbd class="bml-kbd">d</kbd>
+      </button>
+      <div class="bml-color-group">
+        <button type="button" class="btn-bml btn-bml-blue" data-bml-key="blue" title="青 (h)">
+          <span class="color-dot blue"></span>
+          <span>青</span>
+          <kbd class="bml-kbd">h</kbd>
+        </button>
+        <button type="button" class="btn-bml btn-bml-red" data-bml-key="red" title="赤 (j)">
+          <span class="color-dot red"></span>
+          <span>赤</span>
+          <kbd class="bml-kbd">j</kbd>
+        </button>
+        <button type="button" class="btn-bml btn-bml-green" data-bml-key="green" title="緑 (k)">
+          <span class="color-dot green"></span>
+          <span>緑</span>
+          <kbd class="bml-kbd">k</kbd>
+        </button>
+        <button type="button" class="btn-bml btn-bml-yellow" data-bml-key="yellow" title="黄 (l)">
+          <span class="color-dot yellow"></span>
+          <span>黄</span>
+          <kbd class="bml-kbd">l</kbd>
+        </button>
+      </div>
+    `;
+
     const channelBadgeRow = document.createElement('div');
     channelBadgeRow.className = 'watch-channel-badge-row';
     channelBadgeRow.innerHTML = `
@@ -62,7 +98,7 @@ export class WatchView {
       ${this.channel.remoteControlKeyId ? `<span class="channel-key-badge">${this.channel.remoteControlKeyId}ch</span>` : ''}
     `;
 
-    topBar.append(backBtn, channelBadgeRow);
+    topBar.append(backBtn, bmlBar, channelBadgeRow);
     this.element.append(topBar);
 
     // 2. 動画プレイヤーコンポーネント
@@ -93,56 +129,38 @@ export class WatchView {
 
     void this.startLive();
 
-    // 3. 番組情報 & メタデータエリア
+    // 3. タブバー（番組情報 ＆ リモコン）
+    const tabBar = document.createElement('div');
+    tabBar.className = 'watch-tab-bar';
+    tabBar.innerHTML = `
+      <button type="button" class="watch-tab-btn active" data-tab="details">
+        <svg viewBox="0 0 24 24" style="width:16px;height:16px;fill:currentColor">
+          <path d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm-5 14H7v-2h7v2zm3-4H7v-2h10v2zm0-4H7V7h10v2z"/>
+        </svg>
+        <span>番組情報</span>
+      </button>
+      <button type="button" class="watch-tab-btn" data-tab="remote">
+        <svg viewBox="0 0 24 24" style="width:16px;height:16px;fill:currentColor">
+          <path d="M9 2c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h6c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2H9zm3 2a1.5 1.5 0 1 1 0 3 1.5 1.5 0 0 1 0-3zm-2 5h4v2h-4V9zm0 3h4v2h-4v-2zm0 3h4v2h-4v-2z"/>
+        </svg>
+        <span>リモコン</span>
+        <span class="watch-tab-bml-badge" title="データ放送表示中">d</span>
+      </button>
+    `;
+    this.element.append(tabBar);
+
+    // 4. パネルコンテナ
+    const panelsContainer = document.createElement('div');
+    panelsContainer.className = 'watch-panels-container';
+
+    // 4-1. 番組情報 & メタデータエリア
     const detailsSection = document.createElement('div');
-    detailsSection.className = 'watch-details-section';
+    detailsSection.className = 'watch-tab-panel watch-details-section active';
 
-    const formatTime = (ms: number) => {
-      const d = new Date(ms);
-      return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
-    };
-
-    const timeRange = this.currentProgram
-      ? `${formatTime(this.currentProgram.startAt)} 〜 ${formatTime(this.currentProgram.endAt)}`
-      : '--:-- 〜 --:--';
+    this.detailsSection = detailsSection;
 
     detailsSection.innerHTML = `
-      <div class="watch-program-header">
-        <div class="watch-time-row">
-          <span class="watch-live-tag">🔴 放送中</span>
-          <span class="watch-time-text">${timeRange}</span>
-          ${this.currentProgram?.genre ? `<span class="genre-tag">${escapeHtml(this.currentProgram.genre)}</span>` : ''}
-        </div>
-
-        <h2 class="watch-program-title">${escapeHtml(this.currentProgram?.name || '番組情報なし')}</h2>
-
-        <div class="progress-track" style="margin-top: 8px; margin-bottom: 16px;">
-          <div class="progress-fill" id="watch-progress-fill" style="width: 0%;"></div>
-        </div>
-
-        <p class="watch-program-desc">${escapeHtml(this.currentProgram?.description || '詳細情報はありません。')}</p>
-      </div>
-
-      <!-- 拡張情報 (あれば表示) -->
-      ${this.currentProgram?.extended ? `
-        <div class="watch-extended-info">
-          ${Object.entries(this.currentProgram.extended).map(([key, val]) => `
-            <div class="extended-item">
-              <span class="extended-key">${escapeHtml(key)}:</span>
-              <span class="extended-val">${escapeHtml(val)}</span>
-            </div>
-          `).join('')}
-        </div>
-      ` : ''}
-
-      <!-- 次の番組 -->
-      ${this.nextProgram ? `
-        <div class="watch-next-card">
-          <span class="next-label">次の番組:</span>
-          <span class="next-time">${formatTime(this.nextProgram.startAt)}</span>
-          <span class="next-title">${escapeHtml(this.nextProgram.name)}</span>
-        </div>
-      ` : ''}
+      ${this.programInfoHtml()}
 
       <!-- クイック選局（有効な他チャンネル） -->
       <div class="watch-channel-selector-box">
@@ -199,10 +217,121 @@ export class WatchView {
       });
     });
 
-    this.element.append(detailsSection);
+    // 4-2. リモコンエリア (スマホ・タッチ・画面上操作)
+    const remoteSection = document.createElement('div');
+    remoteSection.className = 'watch-tab-panel watch-remote-section';
+    remoteSection.innerHTML = `
+      <div class="watch-remote-card">
+        <!-- 上段: dデータ & 4色カラーボタン -->
+        <div class="remote-group remote-top-row">
+          <button type="button" class="remote-btn remote-btn-d" data-bml-key="d" title="データ放送表示切替 (d)">
+            <span class="bml-d-icon">d</span>
+            <span>データ</span>
+          </button>
+          <div class="remote-color-group">
+            <button type="button" class="remote-color-btn blue" data-bml-key="blue" title="青 (h)">
+              <span class="color-dot blue"></span>
+              <span>青</span>
+            </button>
+            <button type="button" class="remote-color-btn red" data-bml-key="red" title="赤 (j)">
+              <span class="color-dot red"></span>
+              <span>赤</span>
+            </button>
+            <button type="button" class="remote-color-btn green" data-bml-key="green" title="緑 (k)">
+              <span class="color-dot green"></span>
+              <span>緑</span>
+            </button>
+            <button type="button" class="remote-color-btn yellow" data-bml-key="yellow" title="黄 (l)">
+              <span class="color-dot yellow"></span>
+              <span>黄</span>
+            </button>
+          </div>
+        </div>
+
+        <!-- 中段: 十字キー (DPAD) と 決定 / 戻る -->
+        <div class="remote-group remote-dpad-row">
+          <div class="dpad-container">
+            <div class="dpad-cross">
+              <button type="button" class="dpad-btn dpad-up" data-bml-key="up" aria-label="上 (↑)">
+                <svg viewBox="0 0 24 24"><path d="M12 8l-6 6 1.41 1.41L12 10.83l4.59 4.58L18 14z"/></svg>
+              </button>
+              <button type="button" class="dpad-btn dpad-left" data-bml-key="left" aria-label="左 (←)">
+                <svg viewBox="0 0 24 24"><path d="M15.41 7.41L14 6l-6 6 6 6 1.41-1.41L10.83 12z"/></svg>
+              </button>
+              <button type="button" class="dpad-btn dpad-ok" data-bml-key="enter" aria-label="決定 (Enter)">
+                <span>決定</span>
+              </button>
+              <button type="button" class="dpad-btn dpad-right" data-bml-key="right" aria-label="右 (→)">
+                <svg viewBox="0 0 24 24"><path d="M10 6L8.59 7.41 13.17 12l-4.58 4.59L10 18l6-6z"/></svg>
+              </button>
+              <button type="button" class="dpad-btn dpad-down" data-bml-key="down" aria-label="下 (↓)">
+                <svg viewBox="0 0 24 24"><path d="M16.59 8.59L12 13.17 7.41 8.59 6 10l6 6 6-6z"/></svg>
+              </button>
+            </div>
+          </div>
+          <button type="button" class="remote-btn remote-btn-back" data-bml-key="back" title="戻る (Esc/BS)">
+            <svg viewBox="0 0 24 24" style="width:14px;height:14px;fill:currentColor">
+              <path d="M20 11H7.83l5.59-5.59L12 4l-8 8 8 8 1.41-1.41L7.83 13H20v-2z"/>
+            </svg>
+            <span>戻る</span>
+          </button>
+        </div>
+
+        <!-- 下段: テンキー (数字キー 1〜12 & 0) -->
+        <div class="remote-group remote-keypad-row">
+          <div class="remote-keypad-label">数字キー</div>
+          <div class="remote-keypad-grid">
+            <button type="button" class="remote-num-btn" data-bml-key="1">1</button>
+            <button type="button" class="remote-num-btn" data-bml-key="2">2</button>
+            <button type="button" class="remote-num-btn" data-bml-key="3">3</button>
+            <button type="button" class="remote-num-btn" data-bml-key="4">4</button>
+            <button type="button" class="remote-num-btn" data-bml-key="5">5</button>
+            <button type="button" class="remote-num-btn" data-bml-key="6">6</button>
+            <button type="button" class="remote-num-btn" data-bml-key="7">7</button>
+            <button type="button" class="remote-num-btn" data-bml-key="8">8</button>
+            <button type="button" class="remote-num-btn" data-bml-key="9">9</button>
+            <button type="button" class="remote-num-btn" data-bml-key="10">10</button>
+            <button type="button" class="remote-num-btn" data-bml-key="11">11</button>
+            <button type="button" class="remote-num-btn" data-bml-key="12">12</button>
+            <button type="button" class="remote-num-btn remote-num-zero" data-bml-key="0">0</button>
+          </div>
+        </div>
+      </div>
+    `;
+
+    panelsContainer.append(detailsSection, remoteSection);
+    this.element.append(panelsContainer);
+
+    // タブ切替イベント
+    tabBar.querySelectorAll<HTMLButtonElement>('.watch-tab-btn').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const tab = btn.dataset.tab;
+        tabBar.querySelectorAll('.watch-tab-btn').forEach((b) => b.classList.remove('active'));
+        btn.classList.add('active');
+        detailsSection.classList.toggle('active', tab === 'details');
+        remoteSection.classList.toggle('active', tab === 'remote');
+      });
+    });
+
+    // リモコン・データ放送ボタンのクリックイベント
+    this.element.querySelectorAll<HTMLButtonElement>('[data-bml-key]').forEach((btn) => {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const key = btn.dataset.bmlKey;
+        if (key) {
+          this.triggerBmlKey(key);
+        }
+      });
+    });
+
+    // キーボードショートカット & BML表示状態の監視
+    window.addEventListener('keydown', this.handleKeyDown);
+    window.addEventListener('webts-bml-visibility', this.handleBmlVisibility);
+    this.updateBmlVisibility(isDataBroadcastVisible());
 
     // プログレスバーの更新タイマー (5秒ごと)
     this.progressTimer = window.setInterval(() => {
+      this.refreshProgramInfo();
       if (!this.currentProgram) return;
       const now = Date.now();
       const total = this.currentProgram.endAt - this.currentProgram.startAt;
@@ -211,6 +340,78 @@ export class WatchView {
       const fill = this.element.querySelector<HTMLElement>('#watch-progress-fill');
       if (fill) fill.style.width = `${pct}%`;
     }, 5000);
+  }
+
+  /**
+   * 番組情報（番組名・時刻・説明・拡張情報・次の番組）の HTML。
+   * 番組が替わったら refreshProgramInfo() がこれで作り直す。
+   */
+  private programInfoHtml(): string {
+    const timeRange = this.currentProgram
+      ? `${formatTime(this.currentProgram.startAt)} 〜 ${formatTime(this.currentProgram.endAt)}`
+      : '--:-- 〜 --:--';
+
+    return `
+      <div class="watch-program-header">
+        <div class="watch-time-row">
+          <span class="watch-live-tag">🔴 放送中</span>
+          <span class="watch-time-text">${timeRange}</span>
+          ${this.currentProgram?.genre ? `<span class="genre-tag">${escapeHtml(this.currentProgram.genre)}</span>` : ''}
+        </div>
+
+        <h2 class="watch-program-title">${escapeHtml(this.currentProgram?.name || '番組情報なし')}</h2>
+
+        <div class="progress-track" style="margin-top: 8px; margin-bottom: 16px;">
+          <div class="progress-fill" id="watch-progress-fill" style="width: 0%;"></div>
+        </div>
+
+        <p class="watch-program-desc">${escapeHtml(this.currentProgram?.description || '詳細情報はありません。')}</p>
+      </div>
+
+      <!-- 拡張情報 (あれば表示) -->
+      ${this.currentProgram?.extended ? `
+        <div class="watch-extended-info">
+          ${Object.entries(this.currentProgram.extended).map(([key, val]) => `
+            <div class="extended-item">
+              <span class="extended-key">${escapeHtml(key)}:</span>
+              <span class="extended-val">${escapeHtml(val)}</span>
+            </div>
+          `).join('')}
+        </div>
+      ` : ''}
+
+      <!-- 次の番組 -->
+      ${this.nextProgram ? `
+        <div class="watch-next-card">
+          <span class="next-label">次の番組:</span>
+          <span class="next-time">${formatTime(this.nextProgram.startAt)}</span>
+          <span class="next-title">${escapeHtml(this.nextProgram.name)}</span>
+        </div>
+      ` : ''}
+    `;
+  }
+
+  /**
+   * 番組が替わっていたら番組情報を作り直す。5秒ごとに呼ぶ。
+   *
+   * **以前は画面を開いたときに一度決めるだけだった。**番組が終わっても
+   * 前の番組のまま残り、進み具合のバーも 100% で止まっていた（実機、
+   * 2026-09-25）。番組表の取得が後から終わった場合も、ここで拾う。
+   * クイック選局と受信状態の欄は作り直さない（ボタンと数字を保つ）。
+   */
+  private refreshProgramInfo(): void {
+    const current = currentProgramFor(this.channel);
+    const next = nextProgramFor(this.channel);
+    if (current?.id === this.currentProgram?.id && next?.id === this.nextProgram?.id) return;
+    this.currentProgram = current;
+    this.nextProgram = next;
+
+    this.detailsSection
+      .querySelectorAll('.watch-program-header, .watch-extended-info, .watch-next-card')
+      .forEach((element) => { element.remove(); });
+    const template = document.createElement('template');
+    template.innerHTML = this.programInfoHtml();
+    this.detailsSection.prepend(template.content);
   }
 
   /**
@@ -235,6 +436,10 @@ export class WatchView {
         onStats: (stats) => { this.showStats(stats); },
         onCaption: (text) => { this.player.setSubtitleText(text); },
         onEnded: (reason) => { if (reason !== '') this.showStatus(reason); },
+        dataBroadcast: {
+          container: this.player.element,
+          setVideoRect: (rect) => { this.player.setVideoRect(rect); },
+        },
       });
       // 開き直したときは音量が既定へ戻る。つまみの位置と鳴り方がずれるので、
       // いま表示されている値をそのまま入れ直す。
@@ -283,7 +488,124 @@ export class WatchView {
     this.player.setStatusText(text);
   }
 
+  private triggerBmlKey(name: string): void {
+    sendDataBroadcastKey(name);
+    this.pulseButton(name);
+  }
+
+  private pulseButton(name: string): void {
+    const key = name.toLowerCase();
+    const buttons = this.element.querySelectorAll<HTMLElement>(`[data-bml-key="${key}"]`);
+    buttons.forEach((btn) => {
+      btn.classList.add('pulse-press');
+      window.setTimeout(() => {
+        btn.classList.remove('pulse-press');
+      }, 150);
+    });
+  }
+
+  private handleBmlVisibility = (e: Event): void => {
+    const custom = e as CustomEvent<{ visible: boolean }>;
+    this.updateBmlVisibility(custom.detail?.visible ?? isDataBroadcastVisible());
+  };
+
+  private updateBmlVisibility(visible: boolean): void {
+    const dButtons = this.element.querySelectorAll<HTMLElement>('[data-bml-key="d"]');
+    dButtons.forEach((btn) => {
+      btn.classList.toggle('active', visible);
+    });
+    const bmlBadge = this.element.querySelector<HTMLElement>('.watch-tab-bml-badge');
+    if (bmlBadge) {
+      bmlBadge.classList.toggle('visible', visible);
+    }
+  }
+
+  private handleKeyDown = (e: KeyboardEvent): void => {
+    const active = document.activeElement;
+    if (active && (
+      active.tagName === 'INPUT' ||
+      active.tagName === 'TEXTAREA' ||
+      active.tagName === 'SELECT' ||
+      (active as HTMLElement).isContentEditable
+    )) {
+      return;
+    }
+
+    let keyName: string | null = null;
+    switch (e.key) {
+      case 'd':
+      case 'D':
+        keyName = 'd';
+        break;
+      case 'h':
+      case 'H':
+      case 'b':
+      case 'B':
+        keyName = 'blue';
+        break;
+      case 'j':
+      case 'J':
+      case 'r':
+      case 'R':
+        keyName = 'red';
+        break;
+      case 'k':
+      case 'K':
+      case 'g':
+      case 'G':
+        keyName = 'green';
+        break;
+      case 'l':
+      case 'L':
+      case 'y':
+      case 'Y':
+        keyName = 'yellow';
+        break;
+      case 'ArrowUp':
+        keyName = 'up';
+        break;
+      case 'ArrowDown':
+        keyName = 'down';
+        break;
+      case 'ArrowLeft':
+        keyName = 'left';
+        break;
+      case 'ArrowRight':
+        keyName = 'right';
+        break;
+      case 'Enter':
+      case ' ':
+        keyName = 'enter';
+        break;
+      case 'Backspace':
+      case 'Escape':
+        keyName = 'back';
+        break;
+      case '0':
+      case '1':
+      case '2':
+      case '3':
+      case '4':
+      case '5':
+      case '6':
+      case '7':
+      case '8':
+      case '9':
+        keyName = e.key;
+        break;
+      default:
+        return;
+    }
+
+    if (keyName !== null) {
+      e.preventDefault();
+      this.triggerBmlKey(keyName);
+    }
+  };
+
   public destroy(): void {
+    window.removeEventListener('keydown', this.handleKeyDown);
+    window.removeEventListener('webts-bml-visibility', this.handleBmlVisibility);
     if (this.progressTimer !== null) {
       clearInterval(this.progressTimer);
       this.progressTimer = null;
@@ -306,6 +628,12 @@ function currentProgramFor(channel: ChannelItem): ProgramItem | null {
 function nextProgramFor(channel: ChannelItem): ProgramItem | null {
   const now = Date.now();
   return programsSync(channel.id).find((program) => program.startAt > now) ?? null;
+}
+
+/** 時:分。 */
+function formatTime(ms: number): string {
+  const d = new Date(ms);
+  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
 }
 
 function escapeHtml(str: string): string {

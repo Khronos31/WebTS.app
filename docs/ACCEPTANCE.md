@@ -59,8 +59,8 @@
 | 対応 OS・ブラウザ・ドライバ binding の互換表を公開する | [動作環境](COMPATIBILITY.md) | ✅ |
 | SBOM、第三者通知、対応ソース bundle を生成する | `npm run sbom` / `THIRD_PARTY_NOTICES.md` / `npm run source-bundle` | ✅ |
 | 全履歴に禁止バイナリ・放送キャプチャ・秘密情報が無いことを検査する | `npm run history:check` が通る。混入していた mp4 は履歴から除去済み | ✅ |
-| M0〜M3 の受け入れ結果を記録した後に public 化する | 記録はこの文書。**public 化は未実施** | ⬜ |
-| public 化後に Cloudflare Pages と `webts.app` を接続する | 未実施 | ⬜ |
+| M0〜M3 の受け入れ結果を記録した後に public 化する | 記録はこの文書。2026-09-24 に公開リポ `Khronos31/WebTS.app` を public にした | ✅ |
+| public 化後に Cloudflare Pages と `webts.app` を接続する | 2026-09-24 に 0.1.0 を `webts.app` へ配信（`v0.1.0`） | ✅ |
 
 ## 測って出た不具合
 

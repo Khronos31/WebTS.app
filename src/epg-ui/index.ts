@@ -20,8 +20,12 @@ import {
   emitStatus, fetchSchedule, isRefreshing, onRefreshStatus, tickAutoRefresh,
 } from './epg-refresh';
 import { requestPersistentStorage } from './persist-storage';
+import { installDataBroadcastConsole } from './data-broadcast';
 
 initTheme();
+// データ放送は視聴と一緒に自動で動く。キーの UI はまだ無いので、
+// JS コンソールの `webts.bml.key('d')` などから操作する。
+installDataBroadcastConsole();
 
 // 番組情報の自動更新。
 //

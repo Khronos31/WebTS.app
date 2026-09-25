@@ -7,7 +7,7 @@
 // おけば、差し替えても一覧側を書き換えずに済む。
 
 import type { ChannelItem, ProgramItem } from './types';
-import { mergeSchedule } from './schedule-merge';
+import { isStaleProgram, mergeSchedule } from './schedule-merge';
 
 const DATABASE = 'webts-channels';
 const STORE = 'channels';
@@ -79,10 +79,9 @@ export async function mergePrograms(programs: readonly ProgramItem[]): Promise<P
   const merged = new Map(existing.map((program) => [program.id, program]));
   for (const program of programs) merged.set(program.id, program);
   // 終わった番組をいつまでも抱えない。更新のたびに積むと際限なく増える。
-  // 終了時刻が未定 (endAt === startAt) のものは残す。特番で実際に起きる。
-  const stale = Date.now() - 6 * 60 * 60 * 1000;
-  const list = [...merged.values()].filter(
-    (program) => program.endAt === program.startAt || program.endAt > stale);
+  // 終了時刻が未定のものの扱いも含めて、判定は schedule-merge.ts と同じ。
+  const now = Date.now();
+  const list = [...merged.values()].filter((program) => !isStaleProgram(program, now));
   await savePrograms(list);
   return list;
 }

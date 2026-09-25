@@ -136,12 +136,6 @@ export class NavDrawer {
 
     this.drawerElement.append(header, list, footer);
 
-    // Escapeキーで閉じる
-    window.addEventListener('keydown', (e) => {
-      if (e.key === 'Escape' && this.isOpen()) {
-        this.close();
-      }
-    });
 
     // リサイズ監視
     window.addEventListener('resize', () => {

@@ -26,6 +26,7 @@ import { channelsSync } from '../channel-source';
 import { loadQ3U4Identifiers } from '../../usb/px4-identity';
 import { getTheme, setTheme, type ThemeMode } from '../theme-manager';
 import { allowLnb15v, setAllowLnb15v } from '../lnb-setting';
+import { getZipcode, normalizeZipcode, setZipcode } from '../bml-receiver-info';
 
 export interface SettingsViewOptions {
   onStateChanged: () => void;
@@ -53,7 +54,10 @@ export class SettingsView {
     // 1. テーマ・外観設定 カード
     this.element.append(this.createThemeCard());
 
-    // 2. ファームウェアを取得・設定 カード
+    // 2. データ放送 地域・郵便番号設定（任意） カード
+    this.element.append(this.createZipcodeCard());
+
+    // 3. ファームウェアを取得・設定 カード
     this.element.append(this.createFirmwareCard(state.firmware));
 
     // 3. 地域設定・チャンネルスキャン カード
@@ -127,6 +131,124 @@ export class SettingsView {
 
         badge.textContent = val === 'system' ? 'システム同期' : val === 'light' ? 'ライト' : 'ダーク';
       });
+    });
+
+    return card;
+  }
+
+  private createZipcodeCard(): HTMLElement {
+    const card = document.createElement('div');
+    card.className = 'settings-card';
+
+    const formatCode = (code: string): string => {
+      return code.length === 7 ? `${code.slice(0, 3)}-${code.slice(3)}` : code;
+    };
+
+    const currentZip = getZipcode();
+
+    card.innerHTML = `
+      <div class="settings-card-header">
+        <div class="settings-card-title">
+          <svg viewBox="0 0 24 24" style="width:20px;height:20px;fill:currentColor">
+            <path d="M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7zm0 9.5c-1.38 0-2.5-1.12-2.5-2.5s1.12-2.5 2.5-2.5 2.5 1.12 2.5 2.5-1.12 2.5-2.5 2.5z"/>
+          </svg>
+          <span>データ放送 地域・郵便番号設定</span>
+        </div>
+        <span class="status-badge ${currentZip ? 'ok' : ''}" id="zipcode-status-badge">
+          ${currentZip ? `設定済み (〒${formatCode(currentZip)})` : '任意（未設定）'}
+        </span>
+      </div>
+
+      <p class="settings-card-desc">
+        BMLデータ放送で地域情報（天気予報、ニュース、自治体からのお知らせ等）の初期表示に使用される受信機設定です。<br>
+        <strong>設定は任意です。</strong>未設定でもデータ放送の視聴や操作に支障はありません（未設定の場合、一部の局で郵便番号設定の案内が表示されることがあります）。<br>
+        入力された郵便番号はお使いのブラウザ（端末内の localStorage）にのみ保存され、外部サーバーへ送信されることは一切ありません。
+      </p>
+
+      <div class="form-group" style="margin-bottom: 8px;">
+        <label class="form-label" for="bml-zipcode-input">郵便番号（7桁）:</label>
+        <div style="display: flex; gap: 8px; max-width: 480px; align-items: center; flex-wrap: wrap;">
+          <input
+            type="text"
+            id="bml-zipcode-input"
+            class="form-input"
+            style="max-width: 180px;"
+            placeholder="1000001"
+            value="${currentZip ?? ''}"
+            maxlength="10"
+            inputmode="numeric"
+            autocomplete="postal-code"
+          />
+          <button type="button" class="btn btn-primary" id="bml-zipcode-save-btn">保存</button>
+          <button type="button" class="btn btn-secondary" id="bml-zipcode-clear-btn" ${currentZip ? '' : 'style="display: none;"'}>解除</button>
+        </div>
+        <div style="font-size: 0.75rem; color: var(--text-secondary); margin-top: 6px;">
+          空欄で保存すると未設定に戻ります。
+        </div>
+      </div>
+
+      <div id="bml-zipcode-status" style="margin-top: 8px; font-size: 0.8125rem; min-height: 1.25rem;"></div>
+    `;
+
+    const input = card.querySelector<HTMLInputElement>('#bml-zipcode-input')!;
+    const saveBtn = card.querySelector<HTMLButtonElement>('#bml-zipcode-save-btn')!;
+    const clearBtn = card.querySelector<HTMLButtonElement>('#bml-zipcode-clear-btn')!;
+    const badge = card.querySelector<HTMLElement>('#zipcode-status-badge')!;
+    const statusBox = card.querySelector<HTMLElement>('#bml-zipcode-status')!;
+
+    const updateUI = () => {
+      const zip = getZipcode();
+      if (zip) {
+        badge.className = 'status-badge ok';
+        badge.textContent = `設定済み (〒${formatCode(zip)})`;
+        input.value = zip;
+        clearBtn.style.display = '';
+      } else {
+        badge.className = 'status-badge';
+        badge.textContent = '任意（未設定）';
+        input.value = '';
+        clearBtn.style.display = 'none';
+      }
+    };
+
+    const handleSave = () => {
+      const val = input.value.trim();
+      if (!val) {
+        setZipcode(null);
+        updateUI();
+        statusBox.innerHTML = '<span style="color: var(--text-secondary);">郵便番号の設定を解除しました。</span>';
+        return;
+      }
+
+      const normalized = normalizeZipcode(val);
+      if (!normalized) {
+        statusBox.innerHTML = '<span style="color: var(--error);">7桁の郵便番号を入力してください（例: 1000001）。</span>';
+        input.focus();
+        return;
+      }
+
+      const ok = setZipcode(normalized);
+      if (ok) {
+        updateUI();
+        statusBox.innerHTML = `<span style="color: var(--success); font-weight: 600;">✔ 郵便番号を保存しました (〒${formatCode(normalized)})</span>`;
+      } else {
+        statusBox.innerHTML = '<span style="color: var(--error);">保存に失敗しました。</span>';
+      }
+    };
+
+    const handleClear = () => {
+      setZipcode(null);
+      updateUI();
+      statusBox.innerHTML = '<span style="color: var(--text-secondary);">郵便番号の設定を解除しました。</span>';
+    };
+
+    saveBtn.addEventListener('click', handleSave);
+    clearBtn.addEventListener('click', handleClear);
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        handleSave();
+      }
     });
 
     return card;

@@ -1642,6 +1642,126 @@ body {
   gap: 8px;
 }
 
+/* データ放送 (BML) トップバー用ボタン */
+.watch-bml-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.btn-bml {
+  background: var(--surface-color);
+  border: 1px solid var(--surface-border);
+  color: var(--text-primary);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  padding: 5px 10px;
+  border-radius: 4px;
+  font-size: 0.8125rem;
+  font-weight: 500;
+  transition: background-color 0.15s ease, border-color 0.15s ease, transform 0.1s ease;
+  user-select: none;
+}
+
+.btn-bml:hover {
+  background-color: var(--ripple);
+  border-color: var(--primary-light);
+}
+
+.btn-bml:active,
+.btn-bml.pulse-press {
+  transform: scale(0.95);
+  background-color: var(--ripple);
+}
+
+.btn-bml-d {
+  font-weight: 700;
+  border-color: rgba(233, 30, 99, 0.4);
+}
+
+.btn-bml-d.active {
+  background: rgba(233, 30, 99, 0.18);
+  border-color: #e91e63;
+  color: #ff4081;
+  box-shadow: 0 0 10px rgba(233, 30, 99, 0.4);
+}
+
+.bml-d-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 17px;
+  height: 17px;
+  background: #e91e63;
+  color: #ffffff;
+  border-radius: 3px;
+  font-size: 0.6875rem;
+  font-weight: 800;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  line-height: 1;
+}
+
+.bml-color-group {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.color-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  display: inline-block;
+  flex-shrink: 0;
+}
+
+.color-dot.blue {
+  background-color: #2196f3;
+  box-shadow: 0 0 6px rgba(33, 150, 243, 0.6);
+}
+
+.color-dot.red {
+  background-color: #f44336;
+  box-shadow: 0 0 6px rgba(244, 67, 54, 0.6);
+}
+
+.color-dot.green {
+  background-color: #4caf50;
+  box-shadow: 0 0 6px rgba(76, 175, 80, 0.6);
+}
+
+.color-dot.yellow {
+  background-color: #fbc02d;
+  box-shadow: 0 0 6px rgba(251, 192, 45, 0.6);
+}
+
+.bml-kbd {
+  display: inline-block;
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid var(--surface-border);
+  border-radius: 3px;
+  padding: 1px 4px;
+  font-size: 0.6875rem;
+  color: var(--text-secondary);
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  line-height: 1.1;
+}
+
+@media (prefers-color-scheme: light) {
+  .bml-kbd {
+    background: rgba(0, 0, 0, 0.05);
+  }
+}
+
+/* スマホ表示ではトップバーのBMLボタンを非表示にし、下部リモコンタブに集約 */
+@media (max-width: 768px) {
+  .watch-bml-bar {
+    display: none;
+  }
+}
+
 /* プレイヤーラッパー */
 .watch-player-wrapper {
   width: 100%;
@@ -1786,6 +1906,76 @@ body {
   width: 65px;
   accent-color: var(--primary);
   cursor: pointer;
+}
+
+/* ==========================================================
+   Watch View Tabs & Panels
+   ========================================================== */
+.watch-tab-bar {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-top: 16px;
+  border-bottom: 1px solid var(--surface-border);
+}
+
+.watch-tab-btn {
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: var(--text-secondary);
+  padding: 10px 18px;
+  font-size: 0.875rem;
+  font-weight: 500;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  transition: color 0.15s ease, border-color 0.15s ease;
+  user-select: none;
+  position: relative;
+  margin-bottom: -1px;
+}
+
+.watch-tab-btn:hover {
+  color: var(--text-primary);
+}
+
+.watch-tab-btn.active {
+  color: var(--primary-light);
+  border-bottom-color: var(--primary);
+  font-weight: 700;
+}
+
+.watch-tab-bml-badge {
+  display: none;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #e91e63;
+  color: #ffffff;
+  font-size: 0.6875rem;
+  font-weight: 700;
+  margin-left: 2px;
+  animation: live-pulse 1.4s ease-in-out infinite;
+}
+
+.watch-tab-bml-badge.visible {
+  display: inline-flex;
+}
+
+.watch-panels-container {
+  width: 100%;
+}
+
+.watch-tab-panel {
+  display: none;
+}
+
+.watch-tab-panel.active {
+  display: block;
 }
 
 /* 番組詳細 & メタデータ */
@@ -1947,6 +2137,321 @@ body {
 
 .signal-val.ok {
   color: var(--success);
+}
+
+/* ==========================================================
+   リモコン UI (Remote Control Section)
+   ========================================================== */
+.watch-remote-section {
+  padding-top: 16px;
+}
+
+.watch-remote-card {
+  background: var(--surface-color);
+  border: 1px solid var(--surface-border);
+  border-radius: 12px;
+  padding: 24px 20px;
+  max-width: 380px;
+  margin: 0 auto;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25);
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+
+.remote-group {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+.remote-top-row {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  width: 100%;
+}
+
+.remote-btn {
+  background: var(--surface-color-variant);
+  border: 1px solid var(--surface-border);
+  color: var(--text-primary);
+  border-radius: 6px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  transition: background-color 0.15s ease, border-color 0.15s ease, transform 0.1s ease;
+  user-select: none;
+}
+
+.remote-btn:hover {
+  background-color: var(--ripple);
+  border-color: var(--primary-light);
+}
+
+.remote-btn:active,
+.remote-btn.pulse-press {
+  transform: scale(0.94);
+  background-color: var(--ripple);
+}
+
+.remote-btn-d {
+  padding: 8px 14px;
+  font-weight: 700;
+  font-size: 0.875rem;
+  border-color: rgba(233, 30, 99, 0.4);
+}
+
+.remote-btn-d.active {
+  background: rgba(233, 30, 99, 0.2);
+  border-color: #e91e63;
+  color: #ff4081;
+  box-shadow: 0 0 10px rgba(233, 30, 99, 0.4);
+}
+
+.remote-color-group {
+  display: flex;
+  gap: 6px;
+  flex: 1;
+  justify-content: flex-end;
+}
+
+.remote-color-btn {
+  padding: 8px 10px;
+  font-size: 0.8125rem;
+  font-weight: 600;
+  border-radius: 6px;
+  background: var(--surface-color-variant);
+  border: 1px solid var(--surface-border);
+  color: var(--text-primary);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  transition: background-color 0.15s ease, border-color 0.15s ease, transform 0.1s ease;
+  user-select: none;
+}
+
+.remote-color-btn:hover {
+  border-color: var(--primary-light);
+  background-color: var(--ripple);
+}
+
+.remote-color-btn:active,
+.remote-color-btn.pulse-press {
+  transform: scale(0.92);
+}
+
+/* 十字キー (DPAD) */
+.remote-dpad-row {
+  position: relative;
+  width: 100%;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+}
+
+.dpad-container {
+  position: relative;
+  width: 180px;
+  height: 180px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.dpad-cross {
+  width: 172px;
+  height: 172px;
+  border-radius: 50%;
+  background: var(--surface-color-variant);
+  border: 1px solid var(--surface-border);
+  box-shadow: inset 0 2px 8px rgba(0, 0, 0, 0.25);
+  display: grid;
+  grid-template-columns: 48px 60px 48px;
+  grid-template-rows: 48px 60px 48px;
+  place-items: center;
+  justify-content: center;
+  align-content: center;
+  gap: 4px;
+}
+
+.dpad-btn {
+  background: none;
+  border: none;
+  color: var(--text-primary);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 6px;
+  transition: background-color 0.15s ease, color 0.15s ease, transform 0.1s ease;
+  user-select: none;
+}
+
+.dpad-btn svg {
+  width: 26px;
+  height: 26px;
+  fill: currentColor;
+}
+
+.dpad-btn:hover {
+  background-color: var(--ripple);
+  color: var(--primary-light);
+}
+
+.dpad-btn:active,
+.dpad-btn.pulse-press {
+  transform: scale(0.9);
+  color: var(--primary);
+}
+
+.dpad-up {
+  grid-column: 2;
+  grid-row: 1;
+  width: 50px;
+  height: 44px;
+  border-radius: 18px 18px 6px 6px;
+}
+
+.dpad-left {
+  grid-column: 1;
+  grid-row: 2;
+  width: 44px;
+  height: 50px;
+  border-radius: 18px 6px 6px 18px;
+}
+
+.dpad-ok {
+  grid-column: 2;
+  grid-row: 2;
+  width: 52px;
+  height: 52px;
+  border-radius: 50%;
+  background: var(--surface-color);
+  border: 1px solid var(--surface-border);
+  font-size: 0.8125rem;
+  font-weight: 700;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.25);
+}
+
+.dpad-ok:hover {
+  border-color: var(--primary);
+  color: var(--primary-light);
+}
+
+.dpad-right {
+  grid-column: 3;
+  grid-row: 2;
+  width: 44px;
+  height: 50px;
+  border-radius: 6px 18px 18px 6px;
+}
+
+.dpad-down {
+  grid-column: 2;
+  grid-row: 3;
+  width: 50px;
+  height: 44px;
+  border-radius: 6px 6px 18px 18px;
+}
+
+.remote-btn-back {
+  position: absolute;
+  right: calc((100% - 16px) / 6);
+  bottom: 4px;
+  transform: translateX(50%);
+  width: auto;
+  max-width: 72px;
+  height: 38px;
+  padding: 0 10px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  background: var(--surface-color-variant);
+  border: 1px solid var(--surface-border);
+  border-radius: 8px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.15);
+  transition: background-color 0.15s ease, border-color 0.15s ease, transform 0.1s ease;
+  white-space: nowrap;
+}
+
+.remote-btn-back svg {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+}
+
+.remote-btn-back:hover {
+  border-color: var(--primary-light);
+  background-color: var(--ripple);
+}
+
+.remote-btn-back:active,
+.remote-btn-back.pulse-press {
+  transform: translateX(50%) scale(0.94);
+  border-color: var(--primary);
+  background-color: rgba(0, 127, 137, 0.18);
+}
+
+/* テンキー (数字キー) */
+.remote-keypad-row {
+  width: 100%;
+}
+
+.remote-keypad-label {
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--text-secondary);
+  margin-bottom: 10px;
+  text-align: center;
+  letter-spacing: 0.05em;
+}
+
+.remote-keypad-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+  width: 100%;
+}
+
+.remote-num-btn {
+  height: 46px;
+  border-radius: 8px;
+  background: var(--surface-color-variant);
+  border: 1px solid var(--surface-border);
+  color: var(--text-primary);
+  font-size: 1.125rem;
+  font-weight: 600;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background-color 0.15s ease, border-color 0.15s ease, transform 0.1s ease;
+  user-select: none;
+}
+
+.remote-num-btn:hover {
+  border-color: var(--primary-light);
+  background-color: var(--ripple);
+}
+
+.remote-num-btn:active,
+.remote-num-btn.pulse-press {
+  transform: scale(0.92);
+  border-color: var(--primary);
+  background-color: rgba(0, 127, 137, 0.18);
+}
+
+.remote-num-zero {
+  grid-column: 2;
 }
 
 /* ==========================================================
