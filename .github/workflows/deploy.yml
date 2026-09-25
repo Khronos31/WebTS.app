@@ -52,8 +52,11 @@ jobs:
         run: npm run firmware
 
       # 配る前に全部通す。ここを省くと、壊れたものを公開できてしまう。
+      # **動作報告（src/reports/）は beta ブランチから作るときだけ入る。**
       - name: Verify vendor, typecheck, test and build
         run: npm run check
+        env:
+          VITE_WEBTS_CHANNEL: ${{ github.ref_name == 'beta' && 'beta' || '' }}
 
       - name: No binaries anywhere in history
         run: npm run history:check

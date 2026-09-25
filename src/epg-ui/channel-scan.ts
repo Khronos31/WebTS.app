@@ -22,6 +22,7 @@ import { ensureTunerAvailable, loadQ3U4Module } from './q3u4-module';
 import { stageLabel } from './stage-label';
 import { sleepUnthrottled } from './tick';
 import type { ChannelItem, ProgramItem } from './types';
+import { reportOutcome } from '../reports/beta-reports';
 
 const DRAIN_BYTES = 512 * 1024;
 /** state, stage, error, cursor, workers, entries。 */
@@ -329,6 +330,17 @@ export class ChannelScan {
     /** C 側のジョブを選ぶ番号。系統ごとに1つある。 */
     const wave = satellite ? WAVE_SATELLITE : WAVE_TERRESTRIAL;
     let completed = 0;
+    /** beta の動作報告のため。波ごとに、1つでもロックしたか。 */
+    const lockedWaves = new Set<Tuning['wave']>();
+    const report = (result: 'ok' | 'no-signal' | 'failed', stage = -1, code = 0): void => {
+      for (const scanned of new Set(tunings.map((tuning) => tuning.wave))) {
+        reportOutcome({
+          kind: 'scan', wave: scanned,
+          result: result === 'failed' ? result : lockedWaves.has(scanned) ? 'ok' : 'no-signal',
+          stage, code,
+        });
+      }
+    };
     try {
       const started = module.ccall('webts_q3u4_scan_start', 'number',
         ['number', 'number', 'number', 'number', 'number',
@@ -341,6 +353,7 @@ export class ChannelScan {
       if (started !== 0) {
         const name = String(module.ccall(
           'webts_q3u4_scan_error_name', 'string', ['number'], [started]));
+        report('failed', 0, started);
         throw new Error(`スキャンを開始できません: ${name} (${started})`);
       }
 
@@ -443,6 +456,7 @@ export class ChannelScan {
             }
             completed += 1;
             const locked = lockedAt(index) === 1;
+            if (locked && base_tuning !== undefined) lockedWaves.add(base_tuning.wave);
             const label = base_tuning?.label ?? '?';
             if (base_tuning !== undefined) {
               options.onProgress?.({
@@ -469,6 +483,7 @@ export class ChannelScan {
             const code = words[2] ?? 0;
             const name = String(module.ccall(
               'webts_q3u4_scan_error_name', 'string', ['number'], [code]));
+            report('failed', stage, code);
             throw new Error(`スキャンが止まりました: ${name} (${code})`);
           }
           break;
@@ -493,6 +508,8 @@ export class ChannelScan {
       }
 
       module.ccall('webts_q3u4_scan_join', 'number', ['number'], [wave]);
+      // 利用者が止めた走査は、動いたかどうかの判断に使えないので送らない。
+      if (!this.#stopped) report('ok');
     } finally {
       module.HEAPU8.fill(0, firmwarePointer, firmwarePointer + firmware.length);
       module._free(firmwarePointer);

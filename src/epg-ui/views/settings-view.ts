@@ -20,6 +20,12 @@ import { loadPx4Models, usbFilters } from '../../usb/px4-identity';
 import { getTheme, setTheme, type ThemeMode } from '../theme-manager';
 import { allowLnb15v, setAllowLnb15v } from '../lnb-setting';
 import { getZipcode, normalizeZipcode, setZipcode } from '../bml-receiver-info';
+import {
+  REPORTS_BUILT,
+  lastSentReport,
+  reportsEnabled,
+  setReportsEnabled,
+} from '../../reports/beta-reports';
 
 export interface SettingsViewOptions {
   onStateChanged: () => void;
@@ -61,6 +67,11 @@ export class SettingsView {
 
     // 6. 受信状態 (Signal Monitor) カード
     this.element.append(this.createSignalCard());
+
+    // 7. 動作報告（beta版） カード
+    if (REPORTS_BUILT) {
+      this.element.append(this.createBetaReportsCard());
+    }
   }
 
   private createThemeCard(): HTMLElement {
@@ -711,6 +722,87 @@ export class SettingsView {
         </div>
       </div>
     `;
+
+    return card;
+  }
+
+  private createBetaReportsCard(): HTMLElement {
+    const card = document.createElement('div');
+    card.className = 'settings-card';
+    card.id = 'reports-setting-card';
+
+    const enabled = reportsEnabled();
+
+    card.innerHTML = `
+      <div class="settings-card-header">
+        <div class="settings-card-title">
+          <svg viewBox="0 0 24 24" style="width:20px;height:20px;fill:currentColor">
+            <path d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm-5 14H7v-2h7v2zm3-4H7v-2h10v2zm0-4H7V7h10v2z"/>
+          </svg>
+          <span>動作報告（beta版）</span>
+        </div>
+        <span class="status-badge ${enabled ? 'ok' : ''}" id="beta-reports-status-badge">
+          ${enabled ? '許可' : '停止'}
+        </span>
+      </div>
+
+      <p class="settings-card-desc">
+        beta 版（beta.webts.app）限定で、「その機種で動いたか」を確認するために最小限の動作ログを配布サーバへ送信します。
+        本機能は既定で有効ですが、オプトアウト（停止）できます。
+      </p>
+
+      <div style="margin-bottom: 16px;">
+        <label class="checkbox-label" style="font-size: 0.9375rem; font-weight: 600; cursor: pointer;">
+          <input type="checkbox" id="beta-reports-toggle" ${enabled ? 'checked' : ''} style="width: 18px; height: 18px; cursor: pointer;" />
+          <span>動作報告の送信を許可する（既定で有効）</span>
+        </label>
+      </div>
+
+      <div style="font-size: 0.875rem; line-height: 1.6; margin-bottom: 16px;">
+        <div style="font-weight: 600; margin-bottom: 4px;">送信される情報:</div>
+        <ul style="margin: 0 0 12px 20px; padding: 0; color: var(--text-secondary); font-size: 0.8125rem;">
+          <li>アプリのバージョン、チューナーの機種名（例: PX-Q3U4）</li>
+          <li>OSの種類（Windows / macOS / Linux / Android / ChromeOS）、ブラウザの種類とメジャーバージョン（例: Chrome 140）</li>
+          <li>視聴か走査か、受信波（地上波・BS・CS）</li>
+          <li>動作結果（映った・ロックした／信号なし／停止した段階とエラー番号）</li>
+        </ul>
+        <div style="font-weight: 600; margin-bottom: 4px;">送信されない情報:</div>
+        <ul style="margin: 0 0 12px 20px; padding: 0; color: var(--text-secondary); font-size: 0.8125rem;">
+          <li>シリアル番号、USB識別子、B-CASカード情報</li>
+          <li>視聴した局や番組、地域設定・郵便番号、端末固有の識別ID</li>
+          <li>詳細な時刻（サーバ側の保存は日付単位のみ）。受け側はIPアドレスも保存しません</li>
+        </ul>
+        <div style="font-size: 0.75rem; color: var(--text-secondary);">
+          ※ 同じ内容の報告は1回しか送信されません。本番（webts.app）のビルドには送信処理自体が入りません。
+        </div>
+      </div>
+
+      <div style="border-top: 1px solid var(--divider); padding-top: 12px; margin-top: 12px;">
+        <div style="font-weight: 600; font-size: 0.875rem; margin-bottom: 6px;">最後に送信された報告:</div>
+        <div id="beta-reports-last-container"></div>
+      </div>
+    `;
+
+    const toggle = card.querySelector<HTMLInputElement>('#beta-reports-toggle')!;
+    const badge = card.querySelector<HTMLElement>('#beta-reports-status-badge')!;
+    const lastContainer = card.querySelector<HTMLElement>('#beta-reports-last-container')!;
+
+    const renderLastReport = () => {
+      const last = lastSentReport();
+      if (last !== null) {
+        lastContainer.innerHTML = `<pre style="background: var(--code-bg); padding: 10px; border-radius: 4px; font-size: 0.75rem; overflow-x: auto; margin: 0; font-family: monospace;">${escapeHtml(JSON.stringify(last, null, 2))}</pre>`;
+      } else {
+        lastContainer.innerHTML = '<div style="font-size: 0.8125rem; color: var(--text-secondary);">まだ送信されていません。</div>';
+      }
+    };
+    renderLastReport();
+
+    toggle.addEventListener('change', () => {
+      setReportsEnabled(toggle.checked);
+      const isEnabled = reportsEnabled();
+      badge.className = `status-badge ${isEnabled ? 'ok' : ''}`;
+      badge.textContent = isEnabled ? '許可' : '停止';
+    });
 
     return card;
   }

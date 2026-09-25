@@ -22,6 +22,7 @@ import { ensureTunerAvailable, loadQ3U4Module, type Q3U4Module } from './q3u4-mo
 import { CaptionText } from './caption-text';
 import type { Tuning } from './tuning';
 import { STAGE_LABEL } from './stage-label';
+import { reportOutcome } from '../reports/beta-reports';
 import { allowLnb15v } from './lnb-setting';
 import { ChannelScan } from './channel-scan';
 import {
@@ -187,6 +188,8 @@ export class LiveSession {
   #frames = 0;
   /** 「映像が出ません」を出したか。映像が出たら消すために覚えておく。 */
   #silentWarned = false;
+  /** beta の動作報告を済ませたか。1回の視聴で1回だけ送る。 */
+  #reported = false;
   #stats: LiveStats | null = null;
   #dataBroadcast: DataBroadcast | null = null;
   #dataBroadcastStarting: Promise<void> | null = null;
@@ -377,6 +380,7 @@ export class LiveSession {
     if (started !== 0) {
       const name = String(this.#module.ccall(
         'webts_q3u4_descramble_error_name', 'string', ['number'], [started]));
+      this.#report('failed', 0, started);
       this.stop();
       options.onEnded?.(`受信を開始できません: ${name} (${started})`);
       return;
@@ -423,6 +427,7 @@ export class LiveSession {
         return;
       case 'progress':
         this.#frames = message.frames;
+        if (message.frames > 0) this.#report('ok');
         // 遅れて映像が出たら、出しておいた「映像が出ません」を消す。
         // 消さないと、映っているのに出ないと言い続ける。
         if (this.#silentWarned && message.frames > 0) {
@@ -440,6 +445,16 @@ export class LiveSession {
         this.stop();
         return;
     }
+  }
+
+  /**
+   * 映ったか、どこで止まったかを beta の動作報告に出す。映らないまま利用者が
+   * 止めた場合や、放送側の事情（未契約など）で映らない場合は送らない。
+   */
+  #report(result: 'ok' | 'failed', stage = -1, code = 0): void {
+    if (this.#reported) return;
+    this.#reported = true;
+    reportOutcome({ kind: 'view', wave: this.#options.tuning.wave, result, stage, code });
   }
 
   #publishStats(message: Extract<PlayerMessage, { kind: 'progress' }>): void {
@@ -522,6 +537,7 @@ export class LiveSession {
       const end: PlayerRequest = { kind: 'end' };
       this.#worker.postMessage(end);
       if (state === 3) {
+        this.#report('failed', stage, error);
         // **復号の失敗は番号だけでは何も分からない。**C 側は B25 の戻り値と
         // ECM の状況を持っているのに、ここで読まずに捨てていた。
         this.#options.onEnded?.(`受信が止まりました: ${name} (${error})`
