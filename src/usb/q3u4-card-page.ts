@@ -1,4 +1,4 @@
-import { readCachedFirmware } from './firmware';
+import { loadFirmware } from './firmware';
 
 // 見た目は作り込まない。素の要素のみ。
 //
@@ -120,10 +120,11 @@ start.addEventListener('click', async () => {
   let outputPointer = 0;
   let module: CardModule | null = null;
   try {
-    const firmware = await readCachedFirmware();
-    if (!firmware) {
-      status.textContent =
-        'ファームウェアがキャッシュされていません。先に /firmware.html で取り込んでください。';
+    let firmware: Uint8Array;
+    try {
+      firmware = await loadFirmware();
+    } catch (error) {
+      status.textContent = error instanceof Error ? error.message : String(error);
       return;
     }
 

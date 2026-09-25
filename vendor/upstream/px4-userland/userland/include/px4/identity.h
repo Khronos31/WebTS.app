@@ -16,6 +16,35 @@ namespace px4::userland {
 
 inline constexpr std::uint16_t kQ3U4VendorId = 0x0511U;
 inline constexpr std::uint16_t kQ3U4ProductId = 0x084aU;
+inline constexpr std::uint16_t kW3U4ProductId = 0x083fU;
+inline constexpr std::uint16_t kPxMlt5PeProductId = 0x024eU;
+inline constexpr std::uint16_t kDtv02a5TsPProductId = 0x924eU;
+
+enum class DeviceModel : std::uint8_t {
+    px_q3u4 = 0,
+    px_mlt5pe = 1,
+    dtv02a_5ts_p = 2,
+    px_w3u4 = 3,
+};
+
+// Fixed per-model enclosure shape.  Q3U4 exposes two IT9305E bridges with
+// four fixed-system receivers each.  W3U4 is one of those bridges alone.
+// The MLT5 family exposes one IT930x with five receivers that can each tune
+// either ISDB-T or ISDB-S.
+struct DeviceProfile final {
+    DeviceModel model;
+    std::uint16_t product_id;
+    const char* name;
+    std::uint8_t bridge_count;
+    std::uint8_t receiver_count;
+};
+
+const DeviceProfile* device_profile_for_usb_id(std::uint16_t vendor_id,
+                                               std::uint16_t product_id) noexcept;
+const DeviceProfile& device_profile(DeviceModel model) noexcept;
+// Accepts the instance identifier of any supported model: a 14-digit Q3U4
+// base serial, or a 15-digit W3U4 or MLT5-family USB serial.
+bool valid_device_instance(std::string_view value) noexcept;
 
 enum class UsbSpeed : std::uint8_t {
     unknown = 0,
@@ -98,10 +127,13 @@ struct RejectedObservation final {
     DeviceObservation observation;
 };
 
+// One physical enclosure of any supported model.  base_serial is the model's
+// instance identifier; a single-bridge model uses devices[0] only.
 struct Q3U4Group final {
     std::string base_serial;
     std::array<std::optional<DeviceObservation>, 2U> devices;
     GroupStatus status = GroupStatus::incomplete;
+    DeviceModel model = DeviceModel::px_q3u4;
 };
 
 struct GroupingResult final {

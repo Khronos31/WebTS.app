@@ -125,11 +125,11 @@
     {
       "name": "px4-userland",
       "origin": "https://github.com/Khronos31/px4-userland.git",
-      "ref": null,
-      "commit": "10a373dbda0603b2d8180bb2508e2d88dd70eb2d",
+      "ref": "v0.1.5-beta",
+      "commit": "16b2bdbbcf5e3d992a24f284422628def1390aa9",
       "license": "GPL-2.0-only",
       "root": "vendor/upstream/px4-userland",
-      "fileCount": 80,
+      "fileCount": 90,
       "modifiedCount": 0,
       "files": [
         {
@@ -139,8 +139,8 @@
         },
         {
           "path": "PROVENANCE.md",
-          "upstreamSha256": "8566038fd7e15fa89d92c9e849cc2f28ba61b5070f0124879b1288b3e469b662",
-          "vendoredSha256": "8566038fd7e15fa89d92c9e849cc2f28ba61b5070f0124879b1288b3e469b662"
+          "upstreamSha256": "afcc75071c86b4af1b34f524e45e80299418bfdac991b1c1d7c35b867890ecdf",
+          "vendoredSha256": "afcc75071c86b4af1b34f524e45e80299418bfdac991b1c1d7c35b867890ecdf"
         },
         {
           "path": "THIRD_PARTY_NOTICES.md",
@@ -149,8 +149,8 @@
         },
         {
           "path": "VERSION",
-          "upstreamSha256": "2d2454ef0edeb462a6ce8b25d387aaa74df08093d5cea0428a10ce55510c6326",
-          "vendoredSha256": "2d2454ef0edeb462a6ce8b25d387aaa74df08093d5cea0428a10ce55510c6326"
+          "upstreamSha256": "800cf1c0392b24de7c0a1c6ea6778ecb433dec71c49a150bce96a98477527b2f",
+          "vendoredSha256": "800cf1c0392b24de7c0a1c6ea6778ecb433dec71c49a150bce96a98477527b2f"
         },
         {
           "path": "userland/include/px4/card.h",
@@ -169,8 +169,8 @@
         },
         {
           "path": "userland/include/px4/control_server.h",
-          "upstreamSha256": "d5a3f7d32c920bbd57bddf01f175a5a1d177865a4150dd052e26da6687158a7b",
-          "vendoredSha256": "d5a3f7d32c920bbd57bddf01f175a5a1d177865a4150dd052e26da6687158a7b"
+          "upstreamSha256": "d62683c7f8e7dc8e0d7215d973f4077b6310a5f76bdcfee7820d0a44280b2f81",
+          "vendoredSha256": "d62683c7f8e7dc8e0d7215d973f4077b6310a5f76bdcfee7820d0a44280b2f81"
         },
         {
           "path": "userland/include/px4/error.h",
@@ -184,23 +184,23 @@
         },
         {
           "path": "userland/include/px4/identity.h",
-          "upstreamSha256": "48dfd14f655def4a9437f1a174f3e9cdb1a413fdef208c3aa96244e7d7c6b288",
-          "vendoredSha256": "48dfd14f655def4a9437f1a174f3e9cdb1a413fdef208c3aa96244e7d7c6b288"
+          "upstreamSha256": "0cde257fecc6bffb45acb1b56c249c41e361ddad581d7bd9528ecdac765e0e1b",
+          "vendoredSha256": "0cde257fecc6bffb45acb1b56c249c41e361ddad581d7bd9528ecdac765e0e1b"
         },
         {
           "path": "userland/include/px4/ipc.h",
-          "upstreamSha256": "cadf63a56154705a7fc55f1df6c346f26a333be180a9c0f16b49b944633faf20",
-          "vendoredSha256": "cadf63a56154705a7fc55f1df6c346f26a333be180a9c0f16b49b944633faf20"
+          "upstreamSha256": "8e3762716aaccc07c8646b58c957041bb29b4eb35c4042509ee9f72ee1f2b6a5",
+          "vendoredSha256": "8e3762716aaccc07c8646b58c957041bb29b4eb35c4042509ee9f72ee1f2b6a5"
         },
         {
           "path": "userland/include/px4/it930x.h",
-          "upstreamSha256": "6771f50546dee58068e5284fdcdb9a0f7f41ebfede6f51fea49da1ff58480855",
-          "vendoredSha256": "6771f50546dee58068e5284fdcdb9a0f7f41ebfede6f51fea49da1ff58480855"
+          "upstreamSha256": "2277435b3d95b9211dd70bc1ea9261bec2aa878ca7556744611b885a08c312fa",
+          "vendoredSha256": "2277435b3d95b9211dd70bc1ea9261bec2aa878ca7556744611b885a08c312fa"
         },
         {
           "path": "userland/include/px4/libusb_transport.h",
-          "upstreamSha256": "1fe6a20002f80a3489589ae28a70f72d22effd8913dfb869d2a6191840676f5e",
-          "vendoredSha256": "1fe6a20002f80a3489589ae28a70f72d22effd8913dfb869d2a6191840676f5e"
+          "upstreamSha256": "95ef3219ae30076d46a6f246f0a2e2028a9bb43ca86774d33eee9dd467734edd",
+          "vendoredSha256": "95ef3219ae30076d46a6f246f0a2e2028a9bb43ca86774d33eee9dd467734edd"
         },
         {
           "path": "userland/include/px4/logging.h",
@@ -229,8 +229,8 @@
         },
         {
           "path": "userland/include/px4/q3u4_stream.h",
-          "upstreamSha256": "5abf7813846942acb60ab1b9dcef0396b577d13b2c6df68289843f8c715caf71",
-          "vendoredSha256": "5abf7813846942acb60ab1b9dcef0396b577d13b2c6df68289843f8c715caf71"
+          "upstreamSha256": "b6302690a792c0954f023d2f1ce1a55314eca2bfa3423683e3fba090c0050b93",
+          "vendoredSha256": "b6302690a792c0954f023d2f1ce1a55314eca2bfa3423683e3fba090c0050b93"
         },
         {
           "path": "userland/include/px4/transport.h",
@@ -239,18 +239,18 @@
         },
         {
           "path": "userland/include/px4/tuner_service.h",
-          "upstreamSha256": "4d7685efa947178d55b0da8673241e65c6d21afe4cfc468568e62a0a1685c4a8",
-          "vendoredSha256": "4d7685efa947178d55b0da8673241e65c6d21afe4cfc468568e62a0a1685c4a8"
+          "upstreamSha256": "e44e1bd87c05a543d457a919e5987f7f04b0e7ce8b197d10000775f53855635a",
+          "vendoredSha256": "e44e1bd87c05a543d457a919e5987f7f04b0e7ce8b197d10000775f53855635a"
         },
         {
           "path": "userland/src/bridge_i2c.cpp",
-          "upstreamSha256": "7aae0bf360ccdafc06a99a4600813a0db4f172a2195288236ebde196e04218b6",
-          "vendoredSha256": "7aae0bf360ccdafc06a99a4600813a0db4f172a2195288236ebde196e04218b6"
+          "upstreamSha256": "b01abb8bbcf147239fff37c0594fc153571d5fd2c994cf434d2c4e3bea553d1c",
+          "vendoredSha256": "b01abb8bbcf147239fff37c0594fc153571d5fd2c994cf434d2c4e3bea553d1c"
         },
         {
           "path": "userland/src/bridge_i2c.h",
-          "upstreamSha256": "17710bd17879a759526fead095089e8124c24ba551af0632f2bb640d103736aa",
-          "vendoredSha256": "17710bd17879a759526fead095089e8124c24ba551af0632f2bb640d103736aa"
+          "upstreamSha256": "4b04267c4d0e03fd4227c84d68768c4c8237bc765c6867d57718d599e0f7de66",
+          "vendoredSha256": "4b04267c4d0e03fd4227c84d68768c4c8237bc765c6867d57718d599e0f7de66"
         },
         {
           "path": "userland/src/card.cpp",
@@ -269,8 +269,8 @@
         },
         {
           "path": "userland/src/control_server.cpp",
-          "upstreamSha256": "6ef9c029ee72241dda4a0a20a30cb00ccf3a7d68ed14fd08b53199b0fb8cacfd",
-          "vendoredSha256": "6ef9c029ee72241dda4a0a20a30cb00ccf3a7d68ed14fd08b53199b0fb8cacfd"
+          "upstreamSha256": "56cdcbcef840b8b7c952f4a45bfe47e21ed8345f21a5c9b975b877321df39d49",
+          "vendoredSha256": "56cdcbcef840b8b7c952f4a45bfe47e21ed8345f21a5c9b975b877321df39d49"
         },
         {
           "path": "userland/src/control_server_test_access.h",
@@ -286,6 +286,26 @@
           "path": "userland/src/control_workers.h",
           "upstreamSha256": "8d79613366f3c569c7f3ad99d4b67e3d1870093bcd4f42380e8ff05991bfe99f",
           "vendoredSha256": "8d79613366f3c569c7f3ad99d4b67e3d1870093bcd4f42380e8ff05991bfe99f"
+        },
+        {
+          "path": "userland/src/cxd2856er.cpp",
+          "upstreamSha256": "0d915887e906a0c908f83c78c25c16bfe19ccb2b0a2010721e7f54b7b5fe977f",
+          "vendoredSha256": "0d915887e906a0c908f83c78c25c16bfe19ccb2b0a2010721e7f54b7b5fe977f"
+        },
+        {
+          "path": "userland/src/cxd2856er.h",
+          "upstreamSha256": "114e3d07a31839ba3ce455a2fdbe3d557af4f4f641246a368cadad30e6870c8b",
+          "vendoredSha256": "114e3d07a31839ba3ce455a2fdbe3d557af4f4f641246a368cadad30e6870c8b"
+        },
+        {
+          "path": "userland/src/cxd2858er.cpp",
+          "upstreamSha256": "8a9a39af6c61ae97a2bfd0fe1c1dc109fae40fe38326393870265a06e6624620",
+          "vendoredSha256": "8a9a39af6c61ae97a2bfd0fe1c1dc109fae40fe38326393870265a06e6624620"
+        },
+        {
+          "path": "userland/src/cxd2858er.h",
+          "upstreamSha256": "98292a42fe120c3f9aeb128b42faa6b267997721c63007088b608c06e2b72496",
+          "vendoredSha256": "98292a42fe120c3f9aeb128b42faa6b267997721c63007088b608c06e2b72496"
         },
         {
           "path": "userland/src/error.cpp",
@@ -314,18 +334,18 @@
         },
         {
           "path": "userland/src/identity.cpp",
-          "upstreamSha256": "196b34d85b97cb8ae474f5c16f633c901db40e7de60b7c53fbf80141d927934c",
-          "vendoredSha256": "196b34d85b97cb8ae474f5c16f633c901db40e7de60b7c53fbf80141d927934c"
+          "upstreamSha256": "2a04513e7c6acfd22dca02493ea59225c55f9861a72e140b91eae5bdca0ee363",
+          "vendoredSha256": "2a04513e7c6acfd22dca02493ea59225c55f9861a72e140b91eae5bdca0ee363"
         },
         {
           "path": "userland/src/ipc.cpp",
-          "upstreamSha256": "f8007c9a22b1272bf26aa89f74c35a714548fe5e246a4aaec7f9c357ad45b58f",
-          "vendoredSha256": "f8007c9a22b1272bf26aa89f74c35a714548fe5e246a4aaec7f9c357ad45b58f"
+          "upstreamSha256": "368c474a1178b9b4faa3fea1c9c1797310fdf8b07de1321e103977636d8e88e0",
+          "vendoredSha256": "368c474a1178b9b4faa3fea1c9c1797310fdf8b07de1321e103977636d8e88e0"
         },
         {
           "path": "userland/src/it930x.cpp",
-          "upstreamSha256": "8bd878df2c097fbfc1d2fedc8d62f90e8f28c8217d3a09ef4db2cb545de166c8",
-          "vendoredSha256": "8bd878df2c097fbfc1d2fedc8d62f90e8f28c8217d3a09ef4db2cb545de166c8"
+          "upstreamSha256": "d508d3bf934ac7ab78155e7b5dc63ed85fe05f7f89c43ea26c47d5505f38cf7e",
+          "vendoredSha256": "d508d3bf934ac7ab78155e7b5dc63ed85fe05f7f89c43ea26c47d5505f38cf7e"
         },
         {
           "path": "userland/src/it930x_probe_args.cpp",
@@ -359,13 +379,13 @@
         },
         {
           "path": "userland/src/libusb_transport.cpp",
-          "upstreamSha256": "91e3eeec19c570c506a22f33c10711f1db046911576627e60c913515c8619531",
-          "vendoredSha256": "91e3eeec19c570c506a22f33c10711f1db046911576627e60c913515c8619531"
+          "upstreamSha256": "81f134638e3428384ca090ff2c0c33e0281b8d6879f464c88ca21f35fbdfa4d8",
+          "vendoredSha256": "81f134638e3428384ca090ff2c0c33e0281b8d6879f464c88ca21f35fbdfa4d8"
         },
         {
           "path": "userland/src/libusb_transport_internal.h",
-          "upstreamSha256": "85b93507288041050dd38e9ef7a1dd7d1df3ecf31754f9be9e9fb23c31415cb4",
-          "vendoredSha256": "85b93507288041050dd38e9ef7a1dd7d1df3ecf31754f9be9e9fb23c31415cb4"
+          "upstreamSha256": "030abfa6bed41df401e1f07de2a32983bfedad4b0d09d43d8f6ec20acd99b459",
+          "vendoredSha256": "030abfa6bed41df401e1f07de2a32983bfedad4b0d09d43d8f6ec20acd99b459"
         },
         {
           "path": "userland/src/libusb_transport_test_access.cpp",
@@ -376,6 +396,36 @@
           "path": "userland/src/logging.cpp",
           "upstreamSha256": "8c1ee995fac110304bf2290a91e6c4f405bf17b970ec31dcd4cfc2a800767265",
           "vendoredSha256": "8c1ee995fac110304bf2290a91e6c4f405bf17b970ec31dcd4cfc2a800767265"
+        },
+        {
+          "path": "userland/src/mlt5pe_backend.cpp",
+          "upstreamSha256": "015b978a09c21b817f009e4b0cbea4fac242398c6d14718a5a9d63f59311062c",
+          "vendoredSha256": "015b978a09c21b817f009e4b0cbea4fac242398c6d14718a5a9d63f59311062c"
+        },
+        {
+          "path": "userland/src/mlt5pe_backend.h",
+          "upstreamSha256": "e8dc39ba914a9a2f4e41c8d611be56e3ffbc2a6e55fc2620753339142a40c6e2",
+          "vendoredSha256": "e8dc39ba914a9a2f4e41c8d611be56e3ffbc2a6e55fc2620753339142a40c6e2"
+        },
+        {
+          "path": "userland/src/mlt5pe_frontend.cpp",
+          "upstreamSha256": "7fe6519425b48ce5fa8e3b018444b593572d466887877094f9d8a689133e8f13",
+          "vendoredSha256": "7fe6519425b48ce5fa8e3b018444b593572d466887877094f9d8a689133e8f13"
+        },
+        {
+          "path": "userland/src/mlt5pe_frontend.h",
+          "upstreamSha256": "3aad3d245e7347606686f607a591a2595b1d7ee2fe3af5f6cafd18a325642a9d",
+          "vendoredSha256": "3aad3d245e7347606686f607a591a2595b1d7ee2fe3af5f6cafd18a325642a9d"
+        },
+        {
+          "path": "userland/src/mlt5pe_power.cpp",
+          "upstreamSha256": "00765485bacfe73cb5bca6d5b536727611fbe012cded25a90df76af4e28a258c",
+          "vendoredSha256": "00765485bacfe73cb5bca6d5b536727611fbe012cded25a90df76af4e28a258c"
+        },
+        {
+          "path": "userland/src/mlt5pe_power.h",
+          "upstreamSha256": "5797487a6ee0fb6025afec5b2768fa2cd20f4d24b708ee6e6939210ab9af72db",
+          "vendoredSha256": "5797487a6ee0fb6025afec5b2768fa2cd20f4d24b708ee6e6939210ab9af72db"
         },
         {
           "path": "userland/src/mock_transport.cpp",
@@ -389,8 +439,8 @@
         },
         {
           "path": "userland/src/pcsc_ifd_adapter.cpp",
-          "upstreamSha256": "444f6577ea546937c1b022578be5f46db1d07127c14ba9bafafb7004b98e8997",
-          "vendoredSha256": "444f6577ea546937c1b022578be5f46db1d07127c14ba9bafafb7004b98e8997"
+          "upstreamSha256": "4bc115ba6c34a514b5a74580e912affda0dcb4c401896f01c66381b3d003849e",
+          "vendoredSha256": "4bc115ba6c34a514b5a74580e912affda0dcb4c401896f01c66381b3d003849e"
         },
         {
           "path": "userland/src/posix_ipc.cpp",
@@ -414,13 +464,13 @@
         },
         {
           "path": "userland/src/px4d_args.cpp",
-          "upstreamSha256": "8bb2d2d59fca00bf0e3fe9b9131b7596f36990a923b4816b02991779d83e4fcb",
-          "vendoredSha256": "8bb2d2d59fca00bf0e3fe9b9131b7596f36990a923b4816b02991779d83e4fcb"
+          "upstreamSha256": "ed58a78bb788f122e2717cbe599e13502ce653b2d48c1bb588c5523ee1f0db26",
+          "vendoredSha256": "ed58a78bb788f122e2717cbe599e13502ce653b2d48c1bb588c5523ee1f0db26"
         },
         {
           "path": "userland/src/px4d_args.h",
-          "upstreamSha256": "5fe9739ead02fa031a0f7b7d01aab046527209e3b1e94ff47c6131166c6fc0af",
-          "vendoredSha256": "5fe9739ead02fa031a0f7b7d01aab046527209e3b1e94ff47c6131166c6fc0af"
+          "upstreamSha256": "78868a6b0f9897c06b3bcb6dcbf2b9359c1dcdc34aec1698b277c7c32edec04f",
+          "vendoredSha256": "78868a6b0f9897c06b3bcb6dcbf2b9359c1dcdc34aec1698b277c7c32edec04f"
         },
         {
           "path": "userland/src/q3u4_card_backend.cpp",
@@ -464,8 +514,8 @@
         },
         {
           "path": "userland/src/q3u4_stream.cpp",
-          "upstreamSha256": "dfdcf873f1f308fcde530625ede25acdac1d7620410ca3c547e1408a56505be8",
-          "vendoredSha256": "dfdcf873f1f308fcde530625ede25acdac1d7620410ca3c547e1408a56505be8"
+          "upstreamSha256": "9dd958cd1aab186811b1d7ecb7ac178419839c171ee18928775b102fc8bbaf6b",
+          "vendoredSha256": "9dd958cd1aab186811b1d7ecb7ac178419839c171ee18928775b102fc8bbaf6b"
         },
         {
           "path": "userland/src/q3u4_tuner_backend.cpp",
@@ -499,13 +549,13 @@
         },
         {
           "path": "userland/src/tagged_ts_demux.cpp",
-          "upstreamSha256": "7a5b7dd4fa3455112db7c929e754927bae204fb6848066b8d4e32e1549ff9924",
-          "vendoredSha256": "7a5b7dd4fa3455112db7c929e754927bae204fb6848066b8d4e32e1549ff9924"
+          "upstreamSha256": "466522dbcebf5deef50df8302f288a7014b3481c38adfa50688defb4f515135a",
+          "vendoredSha256": "466522dbcebf5deef50df8302f288a7014b3481c38adfa50688defb4f515135a"
         },
         {
           "path": "userland/src/tagged_ts_demux.h",
-          "upstreamSha256": "9e554bd91ff428e06bc6d2c0d64b80949e6e0685408ab37124818e3e0a941a8c",
-          "vendoredSha256": "9e554bd91ff428e06bc6d2c0d64b80949e6e0685408ab37124818e3e0a941a8c"
+          "upstreamSha256": "d44c76e43ae5d434de41371d8bc8d35693322d3214989ac8329ab1f71e9b0c6c",
+          "vendoredSha256": "d44c76e43ae5d434de41371d8bc8d35693322d3214989ac8329ab1f71e9b0c6c"
         },
         {
           "path": "userland/src/tc90522.cpp",
@@ -529,8 +579,8 @@
         },
         {
           "path": "userland/src/tuner_service.cpp",
-          "upstreamSha256": "eba151add23f52f3795304f5a194a02b8ffb7cf6e6d145bf71115d23a6f3be9a",
-          "vendoredSha256": "eba151add23f52f3795304f5a194a02b8ffb7cf6e6d145bf71115d23a6f3be9a"
+          "upstreamSha256": "145129ad0ebc6d00b1a9dd74b878e7f241b0ef46a3e9d7a04d44db588c469131",
+          "vendoredSha256": "145129ad0ebc6d00b1a9dd74b878e7f241b0ef46a3e9d7a04d44db588c469131"
         }
       ]
     },

@@ -1,8 +1,12 @@
 # WebTS.app
 
-PX-Q3U4 を利用者の端末へ直接つなぎ、WebUSB 対応ブラウザだけで ISDB の
+PX4 系のチューナーを利用者の端末へ直接つなぎ、WebUSB 対応ブラウザだけで ISDB の
 ライブ放送を視聴する静的 Web アプリケーション。放送 TS、カード通信、復号、映像音声処理を
 公開クラウドへ送らない。
+
+対応チューナーは PLEX PX-Q3U4（実機確認済み）と、PLEX PX-W3U4・PX-MLT5PE、e-Better
+DTV02A-5TS-P（上流 px4-userland で対応。PX-W3U4 は上流でも Beta。**WebTS では実機未確認で、
+報告を募集している**）。詳しくは [動作環境](docs/COMPATIBILITY.md)。
 
 地上波・BS・CS の視聴、字幕、チャンネル走査、番組表の取得が Windows・Linux・
 macOS・Android で動く。M0〜M3 の受け入れ条件は満たしている（[受け入れ結果](docs/ACCEPTANCE.md)）。

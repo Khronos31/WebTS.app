@@ -7,7 +7,7 @@
 //
 // そのため、実体の生成はここ1か所に集める。
 
-import { loadQ3U4Identifiers } from '../usb/px4-identity';
+import { readTunerPermission } from '../usb/px4-identity';
 
 const MODULE_URL = '/build/q3u4-descramble/q3u4-descramble.mjs';
 
@@ -49,25 +49,25 @@ export function keepSessionOpen(module: Q3U4Module, keep: boolean): void {
 /**
  * 受信機を使い始める前の確認。
  *
- * **PX-Q3U4 は USB 機器2つとして列挙される**（内部に IT930x が2個ある。
- * FINDINGS 9章）。ブラウザの選択ダイアログには同じに見える行が2つ並び、
- * 一度では片方しか許可できない。片方だけだと C 側は NOT_FOUND を返すが、
- * その番号を見せられても何をすればいいか分からない。ここで止めて、
- * 何が足りないかを言う。
+ * **機種によっては1台が USB 機器いくつかとして列挙される。**PX-Q3U4 は
+ * 内部に IT930x が2個あり、2つに見える（FINDINGS 9章）。ブラウザの選択
+ * ダイアログには同じに見える行が2つ並び、一度では片方しか許可できない。
+ * 片方だけだと C 側は NOT_FOUND を返すが、その番号を見せられても何を
+ * すればいいか分からない。ここで止めて、何が足りないかを言う。
+ * 何台要るかは上流の機種の表が答える（px4-identity.ts）。
  */
 export async function ensureTunerAvailable(): Promise<void> {
   if (typeof navigator === 'undefined' || !('usb' in navigator)) {
     throw new Error('この環境では WebUSB が使えません。'
       + 'Chromium 系のブラウザで、HTTPS か localhost から開いてください。');
   }
-  const identifiers = await loadQ3U4Identifiers();
-  const devices = await navigator.usb.getDevices();
-  const matching = devices.filter((device) => device.vendorId === identifiers.vendorId
-    && device.productId === identifiers.productId);
-  if (matching.length >= 2) return;
-  throw new Error(matching.length === 0
-    ? 'PX-Q3U4 が許可されていません。設定の「チューナーを接続」から許可してください。'
-    : 'PX-Q3U4 の許可が1台ぶんしかありません。この機種は USB 機器2つとして見え、'
-      + '選択ダイアログには同じ行が2つ並びます。設定からもう一度接続して、'
-      + 'もう片方も許可してください。');
+  const permission = await readTunerPermission();
+  if (permission.ready) return;
+  if (permission.model === null) {
+    throw new Error('チューナーが許可されていません。設定の「チューナーを接続」から許可してください。');
+  }
+  const { model, granted, required } = permission;
+  throw new Error(`${model.name} の許可が ${granted} 台ぶんしかありません。`
+    + `この機種は USB 機器 ${required} つとして見え、選択ダイアログには同じ行が`
+    + ` ${required} つ並びます。設定からもう一度接続して、残りも許可してください。`);
 }

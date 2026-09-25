@@ -35,7 +35,12 @@ public:
         std::size_t buffered_bytes;
     };
 
-    TaggedTsDemux() noexcept;
+    static constexpr std::uint8_t kQ3U4MaxTag = 4U;
+    // The MLT5 family tags five inputs, 0x17 through 0x57.
+    static constexpr std::uint8_t kMlt5PeMaxTag = 5U;
+
+    // Emits only receiver tags 1..max_tag (at most 7).
+    explicit TaggedTsDemux(std::uint8_t max_tag = kQ3U4MaxTag) noexcept;
     ~TaggedTsDemux() noexcept = default;
 
     TaggedTsDemux(const TaggedTsDemux&) = delete;
@@ -66,14 +71,15 @@ public:
 
 private:
     // A wire sync byte identifies packet alignment even when its high bit is
-    // the receiver-local TEI marker.  Only the four ordinary tags are
-    // emitted; TEI and unknown tags are consumed as whole packets.
+    // the receiver-local TEI marker.  Only tags 1..max_tag are emitted; TEI
+    // and unknown tags are consumed as whole packets.
     static bool is_packet_boundary(std::uint8_t value) noexcept;
     void compact_pending() noexcept;
     bool acquire_sync() noexcept;
     void discard_bytes(std::size_t count) noexcept;
     void consume_packet() noexcept;
 
+    std::uint8_t max_tag_;
     std::unique_ptr<std::uint8_t[]> pending_;
     std::size_t pending_offset_ = 0U;
     std::size_t pending_size_ = 0U;

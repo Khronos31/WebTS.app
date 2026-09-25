@@ -19,8 +19,19 @@ namespace px4::userland {
 namespace {
 
 constexpr std::size_t kBridgeCount = 2U;
-constexpr std::size_t kReceiversPerBridge = 4U;
 constexpr std::size_t kPidCount = 8192U;
+
+// Enclosure stream shape: Q3U4 has two bridges with four fixed-system tags;
+// the MLT5 family has one bridge with five dual-system tags.
+struct StreamLayout final {
+    std::size_t bridge_count;
+    std::size_t receivers_per_bridge;
+    bool dual_system;
+};
+
+constexpr StreamLayout kQ3U4Layout{2U, 4U, false};
+constexpr StreamLayout kW3U4Layout{1U, 4U, false};
+constexpr StreamLayout kMlt5PeLayout{1U, 5U, true};
 
 // The demodulator can assert lock before its TS output and the IT930x packet
 // sync buffer have reached a clean epoch.  Hardware A/B testing with the
@@ -121,9 +132,10 @@ public:
         std::condition_variable state_changed;
 
         Bridge(Impl& owner_value, Transport& transport_value,
-               std::size_t receiver_base_value) noexcept
+               std::size_t receiver_base_value, std::size_t receiver_count) noexcept
             : owner(owner_value), transport(transport_value),
-              receiver_base(receiver_base_value)
+              receiver_base(receiver_base_value),
+              demux(static_cast<std::uint8_t>(receiver_count))
         {
         }
 
@@ -174,10 +186,14 @@ public:
         }
     };
 
+    // A single-bridge layout passes the same transport twice; the second
+    // Bridge is never started or iterated.
     Impl(Transport& dev1, Transport& dev2, std::size_t queue_packets,
-         StartupStabilizationPolicy stabilization) noexcept
-        : queue_packets_(queue_packets), stabilization_(stabilization),
-          bridges_{Bridge(*this, dev1, 0U), Bridge(*this, dev2, 4U)}
+         StartupStabilizationPolicy stabilization, StreamLayout layout) noexcept
+        : queue_packets_(queue_packets), stabilization_(stabilization), layout_(layout),
+          bridges_{Bridge(*this, dev1, 0U, layout.receivers_per_bridge),
+                   Bridge(*this, dev2, layout.receivers_per_bridge,
+                          layout.receivers_per_bridge)}
     {
     }
 
@@ -188,7 +204,8 @@ public:
 
     static Result<std::unique_ptr<Impl>> create(Transport& dev1, Transport& dev2,
                                                  std::size_t queue_packets,
-                                                 StartupStabilizationPolicy stabilization) noexcept
+                                                 StartupStabilizationPolicy stabilization,
+                                                 StreamLayout layout) noexcept
     {
         if (queue_packets < Q3U4StreamDataPlane::kMinQueuePackets ||
             queue_packets > Q3U4StreamDataPlane::kMaxQueuePackets ||
@@ -201,7 +218,7 @@ public:
              stabilization.maximum_packets < stabilization.clean_packets))
             return Result<std::unique_ptr<Impl>>::failure(Error::INVALID_ARGUMENT);
         std::unique_ptr<Impl> value(
-            new (std::nothrow) Impl(dev1, dev2, queue_packets, stabilization));
+            new (std::nothrow) Impl(dev1, dev2, queue_packets, stabilization, layout));
         if (!value) return Result<std::unique_ptr<Impl>>::failure(Error::INTERNAL);
         return Result<std::unique_ptr<Impl>>::success(std::move(value));
     }
@@ -210,7 +227,8 @@ public:
                                     ByteView packet) noexcept
     {
         auto* bridge = static_cast<Bridge*>(context);
-        if (local_receiver >= kReceiversPerBridge || packet.size != kPacketSize)
+        if (local_receiver >= bridge->owner.layout_.receivers_per_bridge ||
+            packet.size != kPacketSize)
             return Result<void>::failure(Error::INVALID_ARGUMENT);
         return bridge->owner.enqueue(bridge->receiver_base + local_receiver, packet);
     }
@@ -220,18 +238,26 @@ public:
         auto* bridge = static_cast<Bridge*>(context);
         if ((wire_sync & 0x80U) == 0U) return;
         const std::size_t wire_tag = (wire_sync >> 4U) & 0x07U;
-        if (wire_tag == 0U || wire_tag > kReceiversPerBridge) return;
+        if (wire_tag == 0U || wire_tag > bridge->owner.layout_.receivers_per_bridge) return;
         bridge->owner.count_wire_tei(bridge->receiver_base + wire_tag - 1U);
     }
 
-    static bool valid_receiver(std::size_t receiver) noexcept
+    bool valid_receiver(std::size_t receiver) const noexcept
     {
-        return receiver < ipc::kReceiverCount;
+        return receiver < layout_.bridge_count * layout_.receivers_per_bridge;
     }
 
-    static std::size_t bridge_index(std::size_t receiver) noexcept
+    std::size_t bridge_index(std::size_t receiver) const noexcept
     {
-        return receiver < 4U ? 0U : 1U;
+        return receiver / layout_.receivers_per_bridge;
+    }
+
+    bool valid_system(std::size_t receiver, ipc::System system) const noexcept
+    {
+        if (layout_.dual_system)
+            return system == ipc::System::ISDB_T || system == ipc::System::ISDB_S;
+        const bool satellite = (receiver % layout_.receivers_per_bridge) < 2U;
+        return system == (satellite ? ipc::System::ISDB_S : ipc::System::ISDB_T);
     }
 
     // Lock order: bridge.lifecycle -> session.mutex.  Reader methods acquire
@@ -375,15 +401,8 @@ public:
         if (attachment.owner_client_id == 0U || attachment.lease_id == 0U ||
             attachment.attachment_id == 0U || !valid_receiver(attachment.receiver))
             return Result<void>::failure(Error::INVALID_ARGUMENT);
-        if ((attachment.receiver < 2U ||
-             (attachment.receiver >= 4U && attachment.receiver < 6U)) &&
-            attachment.system != ipc::System::ISDB_S)
+        if (!valid_system(attachment.receiver, attachment.system))
             return Result<void>::failure(Error::INVALID_ARGUMENT);
-        if ((attachment.receiver >= 2U && attachment.receiver < 4U) ||
-            attachment.receiver >= 6U) {
-            if (attachment.system != ipc::System::ISDB_T)
-                return Result<void>::failure(Error::INVALID_ARGUMENT);
-        }
 
         Bridge& bridge = bridges_[bridge_index(attachment.receiver)];
         std::unique_lock<std::mutex> lifecycle(bridge.lifecycle);
@@ -634,7 +653,7 @@ public:
 
     void count_empty(std::size_t base) noexcept
     {
-        for (std::size_t offset = 0U; offset < kReceiversPerBridge; ++offset) {
+        for (std::size_t offset = 0U; offset < layout_.receivers_per_bridge; ++offset) {
             Session& session = sessions_[base + offset];
             std::lock_guard<std::mutex> lock(session.mutex);
             if (session.attached && session.terminal == StreamTerminal::none)
@@ -644,7 +663,7 @@ public:
 
     bool bridge_has_published_packets(std::size_t base) const noexcept
     {
-        for (std::size_t offset = 0U; offset < kReceiversPerBridge; ++offset) {
+        for (std::size_t offset = 0U; offset < layout_.receivers_per_bridge; ++offset) {
             const Session& session = sessions_[base + offset];
             std::lock_guard<std::mutex> lock(session.mutex);
             if (session.attached && session.counters.packets != 0U) return true;
@@ -658,12 +677,12 @@ public:
     {
         const std::size_t losses = after.sync_loss_events - before.sync_loss_events;
         if (losses != 0U) {
-            bridge_sync_errors_[base < 4U ? 0U : 1U].fetch_add(losses);
+            bridge_sync_errors_[bridge_index(base)].fetch_add(losses);
             // A loss occurs before a valid local tag is available.  Mirror
             // each bridge-wide observation into the receivers active at the
             // observation point so their lease-level counters are useful;
             // this is intentionally replicated attribution, never a byte sum.
-            for (std::size_t offset = 0U; offset < kReceiversPerBridge; ++offset) {
+            for (std::size_t offset = 0U; offset < layout_.receivers_per_bridge; ++offset) {
                 Session& session = sessions_[base + offset];
                 std::lock_guard<std::mutex> lock(session.mutex);
                 if (!session.attached || session.terminal != StreamTerminal::none)
@@ -843,7 +862,7 @@ public:
 
     void promote_ready_sessions(std::size_t base) noexcept
     {
-        for (std::size_t offset = 0U; offset < kReceiversPerBridge; ++offset) {
+        for (std::size_t offset = 0U; offset < layout_.receivers_per_bridge; ++offset) {
             Session& session = sessions_[base + offset];
             std::lock_guard<std::mutex> lock(session.mutex);
             if (!session.attached || session.terminal != StreamTerminal::none ||
@@ -863,7 +882,7 @@ public:
 
     void mark_bridge_terminal(Bridge& bridge, StreamTerminal reason) noexcept
     {
-        for (std::size_t offset = 0U; offset < kReceiversPerBridge; ++offset) {
+        for (std::size_t offset = 0U; offset < layout_.receivers_per_bridge; ++offset) {
             Session& session = sessions_[bridge.receiver_base + offset];
             std::lock_guard<std::mutex> lock(session.mutex);
             if (session.attached && session.terminal == StreamTerminal::none) {
@@ -895,14 +914,15 @@ public:
         // lifecycle lock is deliberately held while taking each session lock
         // (the documented lifecycle -> session order); no new attach can
         // observe a detached session with an old attached_count.
-        for (Bridge& bridge : bridges_) {
+        for (std::size_t index = 0U; index < layout_.bridge_count; ++index) {
+            Bridge& bridge = bridges_[index];
             bool owns_stopping = false;
             {
                 std::unique_lock<std::mutex> lifecycle(bridge.lifecycle);
                 while (bridge.state == Bridge::State::starting ||
                        bridge.state == Bridge::State::stopping)
                     bridge.state_changed.wait(lifecycle);
-                for (std::size_t offset = 0U; offset < kReceiversPerBridge;
+                for (std::size_t offset = 0U; offset < layout_.receivers_per_bridge;
                      ++offset) {
                     Session& session = sessions_[bridge.receiver_base + offset];
                     std::lock_guard<std::mutex> session_lock(session.mutex);
@@ -937,7 +957,7 @@ public:
                 // failed, in which case STREAM_END must expose bridge_fatal.
                 std::lock_guard<std::mutex> lifecycle(bridge.lifecycle);
                 if (bridge.state == Bridge::State::fatal) {
-                    for (std::size_t offset = 0U; offset < kReceiversPerBridge;
+                    for (std::size_t offset = 0U; offset < layout_.receivers_per_bridge;
                          ++offset) {
                         Session& session = sessions_[bridge.receiver_base + offset];
                         std::lock_guard<std::mutex> session_lock(session.mutex);
@@ -960,6 +980,7 @@ public:
 
     std::size_t queue_packets_;
     StartupStabilizationPolicy stabilization_;
+    StreamLayout layout_;
     std::array<Session, ipc::kReceiverCount> sessions_{};
     std::array<Bridge, kBridgeCount> bridges_;
     std::atomic<bool> enclosure_fatal_{false};
@@ -982,7 +1003,31 @@ Result<std::unique_ptr<Q3U4StreamDataPlane>> Q3U4StreamDataPlane::create(
     Transport& dev1, Transport& dev2, std::size_t queue_packets) noexcept
 {
     auto impl = Impl::create(dev1, dev2, queue_packets,
-                             StartupStabilizationPolicy{});
+                             StartupStabilizationPolicy{}, kQ3U4Layout);
+    if (!impl) return Result<std::unique_ptr<Q3U4StreamDataPlane>>::failure(impl.error());
+    std::unique_ptr<Q3U4StreamDataPlane> value(
+        new (std::nothrow) Q3U4StreamDataPlane(std::move(impl.value())));
+    if (!value) return Result<std::unique_ptr<Q3U4StreamDataPlane>>::failure(Error::INTERNAL);
+    return Result<std::unique_ptr<Q3U4StreamDataPlane>>::success(std::move(value));
+}
+
+Result<std::unique_ptr<Q3U4StreamDataPlane>> Q3U4StreamDataPlane::create_w3u4(
+    Transport& device, std::size_t queue_packets) noexcept
+{
+    auto impl = Impl::create(device, device, queue_packets,
+                             StartupStabilizationPolicy{}, kW3U4Layout);
+    if (!impl) return Result<std::unique_ptr<Q3U4StreamDataPlane>>::failure(impl.error());
+    std::unique_ptr<Q3U4StreamDataPlane> value(
+        new (std::nothrow) Q3U4StreamDataPlane(std::move(impl.value())));
+    if (!value) return Result<std::unique_ptr<Q3U4StreamDataPlane>>::failure(Error::INTERNAL);
+    return Result<std::unique_ptr<Q3U4StreamDataPlane>>::success(std::move(value));
+}
+
+Result<std::unique_ptr<Q3U4StreamDataPlane>> Q3U4StreamDataPlane::create_mlt5pe(
+    Transport& device, std::size_t queue_packets) noexcept
+{
+    auto impl = Impl::create(device, device, queue_packets,
+                             StartupStabilizationPolicy{}, kMlt5PeLayout);
     if (!impl) return Result<std::unique_ptr<Q3U4StreamDataPlane>>::failure(impl.error());
     std::unique_ptr<Q3U4StreamDataPlane> value(
         new (std::nothrow) Q3U4StreamDataPlane(std::move(impl.value())));
@@ -1001,7 +1046,27 @@ Q3U4StreamDataPlane::create_for_test(
         stabilization.clean_packets,
         stabilization.maximum_packets,
     };
-    auto impl = Impl::create(dev1, dev2, queue_packets, policy);
+    auto impl = Impl::create(dev1, dev2, queue_packets, policy, kQ3U4Layout);
+    if (!impl)
+        return Result<std::unique_ptr<Q3U4StreamDataPlane>>::failure(impl.error());
+    std::unique_ptr<Q3U4StreamDataPlane> value(
+        new (std::nothrow) Q3U4StreamDataPlane(std::move(impl.value())));
+    if (!value)
+        return Result<std::unique_ptr<Q3U4StreamDataPlane>>::failure(Error::INTERNAL);
+    return Result<std::unique_ptr<Q3U4StreamDataPlane>>::success(std::move(value));
+}
+
+Result<std::unique_ptr<Q3U4StreamDataPlane>>
+Q3U4StreamDataPlane::create_mlt5pe_for_test(
+    Transport& device, std::size_t queue_packets,
+    StartupStabilizationTestConfig stabilization) noexcept
+{
+    const StartupStabilizationPolicy policy{
+        stabilization.minimum_packets,
+        stabilization.clean_packets,
+        stabilization.maximum_packets,
+    };
+    auto impl = Impl::create(device, device, queue_packets, policy, kMlt5PeLayout);
     if (!impl)
         return Result<std::unique_ptr<Q3U4StreamDataPlane>>::failure(impl.error());
     std::unique_ptr<Q3U4StreamDataPlane> value(
@@ -1080,7 +1145,8 @@ Result<StreamTerminal> Q3U4StreamDataPlane::terminal(
 Result<std::uint64_t> Q3U4StreamDataPlane::bridge_sync_errors(
     std::uint8_t bridge) const noexcept
 {
-    if (bridge >= kBridgeCount)
+    if (bridge >= kBridgeCount ||
+        (impl_ != nullptr && bridge >= impl_->layout_.bridge_count))
         return Result<std::uint64_t>::failure(Error::INVALID_ARGUMENT);
     return Result<std::uint64_t>::success(
         impl_ == nullptr ? 0U : impl_->bridge_sync_errors_[bridge].load());

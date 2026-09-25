@@ -1,8 +1,8 @@
-// Modified/ported for px4-userland on 2026-09-02.
+// Modified/ported for px4-userland on 2026-09-02; MLT5 support added on 2026-09-24.
 //
 // Copyright (c) 2018-2021 nns779
-// Derived from tsukumijima/px4_drv commit 9eedea8c502875a788697984b93b50032339b9aa.
-// Origin paths: driver/px4_device.c, driver/px4_usb.c,
+// Derived from tsukumijima/px4_drv commit d748866f0da1cb3656106a520de4e9d7f073aacd (v0.6.1).
+// Origin paths: driver/px4_device.c, driver/px4_usb.c, driver/px4_usb.h,
 // winusb/src/DriverHost_PX4/px4_device.cpp.
 // Source snapshot maintained by tsukumijima.
 // SPDX-License-Identifier: GPL-2.0-only
@@ -13,6 +13,61 @@
 
 namespace px4::userland {
 namespace {
+
+constexpr std::array<DeviceProfile, 4U> kDeviceProfiles{{
+    {DeviceModel::px_q3u4, kQ3U4ProductId, "PX-Q3U4", 2U, 8U},
+    {DeviceModel::px_w3u4, kW3U4ProductId, "PX-W3U4", 1U, 4U},
+    {DeviceModel::px_mlt5pe, kPxMlt5PeProductId, "PX-MLT5PE", 1U, 5U},
+    {DeviceModel::dtv02a_5ts_p, kDtv02a5TsPProductId, "DTV02A-5TS-P", 1U, 5U},
+}};
+
+constexpr std::size_t kQ3U4BaseSerialLength = 14U;
+constexpr std::size_t kUsbSerialLength = 15U;
+
+bool all_digits(std::string_view value) noexcept
+{
+    for (const char character : value) {
+        if (character < '0' || character > '9') {
+            return false;
+        }
+    }
+    return true;
+}
+
+// Enclosure identity of one observed USB device: the instance identifier and
+// the bridge slot inside that enclosure.
+struct GroupKey final {
+    std::string base_serial;
+    std::size_t slot = 0U;
+    DeviceModel model = DeviceModel::px_q3u4;
+};
+
+Result<GroupKey> group_key(const DeviceObservation& observation) noexcept
+{
+    const DeviceProfile* profile =
+        device_profile_for_usb_id(observation.vendor_id, observation.product_id);
+    if (profile == nullptr) {
+        return Result<GroupKey>::failure(Error::UNSUPPORTED);
+    }
+    GroupKey key;
+    key.model = profile->model;
+    if (profile->bridge_count == 2U) {
+        const auto parsed = parse_q3u4_serial(observation.serial);
+        if (!parsed) {
+            return Result<GroupKey>::failure(parsed.error());
+        }
+        key.base_serial = parsed.value().base_serial;
+        key.slot = static_cast<std::size_t>(parsed.value().dev_id - 1U);
+        return Result<GroupKey>::success(std::move(key));
+    }
+    // The single-bridge serial is the whole identifier; its last digit is
+    // not a bridge number.
+    if (observation.serial.size() != kUsbSerialLength || !all_digits(observation.serial)) {
+        return Result<GroupKey>::failure(Error::INVALID_ARGUMENT);
+    }
+    key.base_serial = observation.serial;
+    return Result<GroupKey>::success(std::move(key));
+}
 
 bool endpoint_matches(const UsbInterfaceObservation& interface,
                       std::uint8_t address) noexcept
@@ -62,18 +117,48 @@ bool location_less(const UsbLocation& left, const UsbLocation& right) noexcept
 
 bool observation_less(const DeviceObservation& left, const DeviceObservation& right) noexcept
 {
-    const auto left_serial = parse_q3u4_serial(left.serial);
-    const auto right_serial = parse_q3u4_serial(right.serial);
-    if (left_serial.value().base_serial != right_serial.value().base_serial) {
-        return left_serial.value().base_serial < right_serial.value().base_serial;
+    const auto left_key = group_key(left);
+    const auto right_key = group_key(right);
+    if (left_key.value().base_serial != right_key.value().base_serial) {
+        return left_key.value().base_serial < right_key.value().base_serial;
     }
-    if (left_serial.value().dev_id != right_serial.value().dev_id) {
-        return left_serial.value().dev_id < right_serial.value().dev_id;
+    if (left_key.value().slot != right_key.value().slot) {
+        return left_key.value().slot < right_key.value().slot;
     }
     return location_less(left.location, right.location);
 }
 
 }  // namespace
+
+const DeviceProfile* device_profile_for_usb_id(std::uint16_t vendor_id,
+                                               std::uint16_t product_id) noexcept
+{
+    if (vendor_id != kQ3U4VendorId) {
+        return nullptr;
+    }
+    for (const DeviceProfile& profile : kDeviceProfiles) {
+        if (profile.product_id == product_id) {
+            return &profile;
+        }
+    }
+    return nullptr;
+}
+
+const DeviceProfile& device_profile(DeviceModel model) noexcept
+{
+    for (const DeviceProfile& profile : kDeviceProfiles) {
+        if (profile.model == model) {
+            return profile;
+        }
+    }
+    return kDeviceProfiles[0];
+}
+
+bool valid_device_instance(std::string_view value) noexcept
+{
+    return (value.size() == kQ3U4BaseSerialLength || value.size() == kUsbSerialLength) &&
+           all_digits(value);
+}
 
 Result<ParsedQ3U4Serial> parse_q3u4_serial(std::string_view serial) noexcept
 {
@@ -119,10 +204,10 @@ bool q3u4_topology_is_usable(const UsbTopologyObservation& topology) noexcept
 
 ObservationStatus validate_q3u4_observation(const DeviceObservation& observation) noexcept
 {
-    if (observation.vendor_id != kQ3U4VendorId || observation.product_id != kQ3U4ProductId) {
+    if (device_profile_for_usb_id(observation.vendor_id, observation.product_id) == nullptr) {
         return ObservationStatus::unsupported;
     }
-    if (!parse_q3u4_serial(observation.serial)) {
+    if (!group_key(observation)) {
         return ObservationStatus::invalid_serial;
     }
     if (!q3u4_speed_is_usable(observation.speed)) {
@@ -166,21 +251,22 @@ Result<GroupingResult> group_q3u4_devices(const std::vector<DeviceObservation>& 
     std::sort(sorted.begin(), sorted.end(), observation_less);
 
     for (const DeviceObservation& observation : sorted) {
-        const auto parsed = parse_q3u4_serial(observation.serial);
-        if (!parsed) {
+        const auto key = group_key(observation);
+        if (!key) {
             return Result<GroupingResult>::failure(Error::INTERNAL);
         }
         auto group = std::find_if(result.groups.begin(), result.groups.end(),
-                                  [&parsed](const Q3U4Group& candidate) {
-                                      return candidate.base_serial == parsed.value().base_serial;
+                                  [&key](const Q3U4Group& candidate) {
+                                      return candidate.base_serial == key.value().base_serial;
                                   });
         if (group == result.groups.end()) {
             result.groups.push_back(Q3U4Group{});
             group = std::prev(result.groups.end());
-            group->base_serial = parsed.value().base_serial;
+            group->base_serial = key.value().base_serial;
+            group->model = key.value().model;
         }
-        const std::size_t slot = static_cast<std::size_t>(parsed.value().dev_id - 1U);
-        if (group->devices[slot].has_value()) {
+        const std::size_t slot = key.value().slot;
+        if (group->model != key.value().model || group->devices[slot].has_value()) {
             group->status = GroupStatus::duplicate;
         } else {
             group->devices[slot] = observation;
@@ -196,9 +282,11 @@ Result<GroupingResult> group_q3u4_devices(const std::vector<DeviceObservation>& 
             group.status == GroupStatus::invalid_observation) {
             continue;
         }
-        group.status = group.devices[0U].has_value() && group.devices[1U].has_value()
-                           ? GroupStatus::ready
-                           : GroupStatus::incomplete;
+        bool complete = true;
+        for (std::size_t slot = 0U; slot < device_profile(group.model).bridge_count; ++slot) {
+            complete = complete && group.devices[slot].has_value();
+        }
+        group.status = complete ? GroupStatus::ready : GroupStatus::incomplete;
     }
     std::sort(result.groups.begin(), result.groups.end(),
               [](const Q3U4Group& left, const Q3U4Group& right) {
@@ -210,15 +298,8 @@ Result<GroupingResult> group_q3u4_devices(const std::vector<DeviceObservation>& 
 Result<std::size_t> select_ready_q3u4_group(const GroupingResult& grouping,
                                             std::string_view base_serial) noexcept
 {
-    if (!base_serial.empty() && base_serial.size() != 14U) {
+    if (!base_serial.empty() && !valid_device_instance(base_serial)) {
         return Result<std::size_t>::failure(Error::INVALID_ARGUMENT);
-    }
-    if (!base_serial.empty()) {
-        for (const char character : base_serial) {
-            if (character < '0' || character > '9') {
-                return Result<std::size_t>::failure(Error::INVALID_ARGUMENT);
-            }
-        }
     }
 
     std::size_t ready_count = 0U;

@@ -9,9 +9,14 @@ terms in [`LICENSE`](LICENSE).
 
 - Direct source: [`tsukumijima/px4_drv`](https://github.com/tsukumijima/px4_drv), snapshot commit
   `9eedea8c502875a788697984b93b50032339b9aa`.
+- MLT5-family increment (2026-09-24): PX-MLT5PE/DTV02A-5TS-P support is derived from the same repository at
+  `d748866f0da1cb3656106a520de4e9d7f073aacd` (tag `v0.6.1`, which contains DTV02A-5TS-P commit
+  `72a807de2009c2ce376953c75687b4d45708f00e`). Files changed or added in that increment cite `v0.6.1` in their
+  headers; untouched files keep the original snapshot. Between the two snapshots, the origin paths used by this
+  project differ only in `driver/px4_usb.c` and `driver/px4_usb.h` (the DTV02A-5TS-P product ID).
 - Original upstream: [`nns779/px4_drv`](https://github.com/nns779/px4_drv).
 - Current product: `Khronos31/px4-userland`, an independent standalone repository for a Linux/Android/macOS userland
-  product for PLEX PX-Q3U4.
+  product for PLEX PX-Q3U4, PX-MLT5PE, and DTV02A-5TS-P.
 - License for this project and its derivative portions: [`GPL-2.0-only`](LICENSE).
 
 Git author names and commit history are evidence about repository activity; they are not, by themselves, a list of

@@ -26,6 +26,9 @@ TunerService::TunerService(TunerServiceBackend& backend,
       attachment_id_source_(attachment_id_source), stream_control_(stream_control)
 {
     states_.fill(ipc::ReceiverState::free);
+    for (std::size_t receiver = backend_.receiver_count(); receiver < states_.size();
+         ++receiver)
+        states_[receiver] = ipc::ReceiverState::absent;
 }
 
 TunerService::~TunerService() noexcept
@@ -38,14 +41,17 @@ bool TunerService::valid_client(std::uint64_t client_id) noexcept
     return client_id != 0U;
 }
 
-bool TunerService::valid_receiver(std::uint8_t receiver) noexcept
+bool TunerService::valid_receiver(std::uint8_t receiver) const noexcept
 {
-    return receiver < ipc::kReceiverCount;
+    return receiver < ipc::kReceiverCount && receiver < backend_.receiver_count();
 }
 
-ipc::System TunerService::receiver_system(std::uint8_t receiver) noexcept
+ipc::System TunerService::initial_system(std::uint8_t receiver) const noexcept
 {
-    return (receiver == 0U || receiver == 1U || receiver == 4U || receiver == 5U)
+    // A dual-system receiver cannot stream before its first tune, which
+    // replaces this value with the tuned system.
+    return backend_.receiver_supports(receiver, ipc::System::ISDB_S) &&
+                   !backend_.receiver_supports(receiver, ipc::System::ISDB_T)
         ? ipc::System::ISDB_S
         : ipc::System::ISDB_T;
 }
@@ -218,7 +224,7 @@ Result<TunerAcquireResult> TunerService::acquire(std::uint64_t client_id,
     lease.client_id = client_id;
     lease.lease_id = lease_id_value;
     lease.receiver = receiver;
-    lease.system = receiver_system(receiver);
+    lease.system = initial_system(receiver);
     lease.nonce = nonce_value;
     set_state_locked(receiver, ipc::ReceiverState::leased);
     return Result<TunerAcquireResult>::success(
@@ -376,7 +382,7 @@ Result<ipc::TuneResponsePayload> TunerService::tune(
         lease.stream_state == StreamState::active ||
         lease.stream_state == StreamState::revoked)
         return Result<ipc::TuneResponsePayload>::failure(Error::BUSY);
-    if (request.system != lease.system)
+    if (!backend_.receiver_supports(receiver, request.system))
         return Result<ipc::TuneResponsePayload>::failure(Error::INVALID_ARGUMENT);
     if (!valid_tune(request))
         return Result<ipc::TuneResponsePayload>::failure(Error::INVALID_ARGUMENT);
@@ -410,6 +416,22 @@ Result<ipc::TuneResponsePayload> TunerService::tune(
             ? 0U
             : static_cast<std::uint32_t>(request.timeout_ms - elapsed);
     };
+    const bool select_before_tune = request.system == ipc::System::ISDB_S &&
+                                    backend_.selects_satellite_stream_before_tune();
+    const auto select_satellite_stream = [&](std::uint32_t remaining) noexcept {
+        return request.slot != 0xffffU
+            ? backend_.select_satellite_slot(
+                  receiver, static_cast<std::uint8_t>(request.slot), remaining)
+            : backend_.select_satellite_tsid(receiver, request.stream_id, remaining);
+    };
+    if (select_before_tune) {
+        const std::uint32_t select_timeout = remaining_before_tune();
+        if (select_timeout == 0U)
+            return fail_after_power(Error::TIMEOUT);
+        const auto selected = select_satellite_stream(select_timeout);
+        if (!selected)
+            return fail_after_power(selected.error());
+    }
     const std::uint32_t tune_timeout = remaining_before_tune();
     if (tune_timeout == 0U)
         return fail_after_power(Error::TIMEOUT);
@@ -450,16 +472,13 @@ Result<ipc::TuneResponsePayload> TunerService::tune(
         }
     }
 
-    if (request.system == ipc::System::ISDB_S) {
+    if (request.system == ipc::System::ISDB_S && !select_before_tune) {
         const std::uint64_t elapsed = time_.monotonic_ms() - start_ms;
         if (elapsed >= request.timeout_ms)
             return fail_after_power(Error::TIMEOUT);
         const auto remaining = static_cast<std::uint32_t>(
             request.timeout_ms - elapsed);
-        const auto selected = request.slot != 0xffffU
-            ? backend_.select_satellite_slot(
-                  receiver, static_cast<std::uint8_t>(request.slot), remaining)
-            : backend_.select_satellite_tsid(receiver, request.stream_id, remaining);
+        const auto selected = select_satellite_stream(remaining);
         if (!selected)
             return fail_after_power(selected.error());
         if (time_.monotonic_ms() - start_ms >= request.timeout_ms)
@@ -471,6 +490,8 @@ Result<ipc::TuneResponsePayload> TunerService::tune(
 
     {
         std::lock_guard<std::mutex> lock(mutex_);
+        // receiver_lock keeps this lease in place since it was copied above.
+        leases_[receiver].system = request.system;
         set_state_locked(receiver, ipc::ReceiverState::tuned);
     }
     return Result<ipc::TuneResponsePayload>::success(

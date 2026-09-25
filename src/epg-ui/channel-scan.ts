@@ -15,7 +15,7 @@ import { ServiceInfoReader, type NetworkEntry, type ServiceEntry } from '../ts/s
 import { EitReader } from '../ts/eit';
 import { serviceKey } from '../ts/eit-schedule-state';
 import { decodeAribText } from '../ts/arib-text';
-import { readCachedFirmware } from '../usb/firmware';
+import { loadFirmware } from '../usb/firmware';
 import { toProgramItem } from './program-item';
 import { grTunings, tuningKey, type Tuning } from './tuning';
 import { ensureTunerAvailable, loadQ3U4Module } from './q3u4-module';
@@ -32,9 +32,11 @@ const WAVE_TERRESTRIAL = 0;
 const WAVE_SATELLITE = 1;
 /** C 側が立てられる作業者の上限。 */
 const MAX_WORKERS = 4;
-/** 上流の global 受信機番号。各ブリッジの下2つが ISDB-S、上2つが ISDB-T。 */
-const TERRESTRIAL_RECEIVERS = [2, 3, 6, 7];
-const SATELLITE_RECEIVERS = [0, 1, 4, 5];
+/**
+ * 受信機は C 側に選ばせる（q3u4-descramble-probe.cpp の claim_receiver）。
+ * どの受信機がどの波を受けられるかは機種によるので、JS には番号を持たせない。
+ */
+const ANY_RECEIVER = -1;
 
 interface WorkerState {
   index: number;
@@ -286,20 +288,19 @@ export class ChannelScan {
       throw new Error('衛星の走査には相対 TS 番号が要ります。');
     }
     await ensureTunerAvailable();
-    const firmware = await readCachedFirmware();
-    if (firmware === null) {
-      throw new Error('ファームウェアが設定されていません。設定から取得してください。');
-    }
+    const firmware = await loadFirmware();
     const module = await loadQ3U4Module();
 
-    // **各系統の1本目は視聴のために空けておく。**視聴はいつも1本目を使う
-    // （live-session.ts）。以前は視聴中のときだけ避けていたので、先に走査が
-    // 4本とも掴むと視聴が始められず、選局のたびに走査を止めていた。番組表を
-    // 定期的に取るようになると、それでは選局するたびに取り直しになる。
-    const pool = satellite ? SATELLITE_RECEIVERS : TERRESTRIAL_RECEIVERS;
+    // **視聴用の1本は C 側が空けておく。**以前は視聴中のときだけ避けていた
+    // ので、先に走査が全部掴むと視聴が始められず、選局のたびに走査を止めて
+    // いた。番組表を定期的に取るようになると、それでは選局するたびに取り
+    // 直しになる。作業者の数だけ頼み、受信機は C 側が機種に合わせて割り
+    // 当てる。回せる受信機が少ない機種では、取れなかった作業者は何もせずに
+    // 終わり、残りの作業者が全部の中継器を回す。
     const override = import.meta.env.DEV
       ? (globalThis as { __webtsScanReceivers?: number[] }).__webtsScanReceivers : undefined;
-    const receivers = (override ?? pool.slice(1)).slice(0, Math.min(MAX_WORKERS, tunings.length));
+    const receivers = (override ?? Array<number>(MAX_WORKERS).fill(ANY_RECEIVER))
+      .slice(0, Math.min(MAX_WORKERS, tunings.length));
     if (receivers.length === 0) {
       throw new Error('空いている受信機がありません。');
     }

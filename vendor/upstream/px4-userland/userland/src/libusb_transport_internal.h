@@ -313,6 +313,8 @@ private:
 
 struct Q3U4Enclosure final {
     std::string base_serial;
+    DeviceModel model = DeviceModel::px_q3u4;
+    // transports[1] is null for a single-bridge model.
     std::array<std::unique_ptr<LibusbTransport>, 2U> transports;
 };
 
@@ -374,8 +376,10 @@ struct Q3U4Runtime::Impl final {
     std::unique_ptr<LibusbSession> session_;
     std::unique_ptr<Q3U4RuntimeState> state_;
     std::unique_ptr<FdSyscalls> syscalls_;
+    // transports_[1] is null for a single-bridge model.
     std::array<std::unique_ptr<LibusbTransport>, 2U> transports_;
     std::string base_serial_;
+    DeviceModel model_ = DeviceModel::px_q3u4;
 };
 
 class RuntimeTestAccess final {

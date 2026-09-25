@@ -40,7 +40,7 @@ bool valid_system(System value) noexcept
 bool valid_receiver_state(ReceiverState value) noexcept
 {
     return static_cast<std::uint8_t>(value) <=
-           static_cast<std::uint8_t>(ReceiverState::error);
+           static_cast<std::uint8_t>(ReceiverState::absent);
 }
 
 bool valid_share_mode(ShareMode value) noexcept
@@ -325,13 +325,36 @@ bool valid_tune(const TuneRequestPayload& value) noexcept
     return (value.stream_id == 0xffffU) != (value.slot == 0xffffU);
 }
 
-bool valid_receiver_record(const ReceiverRecord& value, std::size_t global) noexcept
+bool valid_receiver_count(std::uint8_t count) noexcept
 {
-    const auto expected_dev = static_cast<std::uint8_t>((global / 4U) + 1U);
-    const auto expected_local = static_cast<std::uint8_t>(global % 4U);
-    const System expected_system = expected_local < 2U ? System::ISDB_S : System::ISDB_T;
-    return value.global_id == global && value.dev_id == expected_dev &&
-           value.local_id == expected_local && value.system == expected_system;
+    return count == kQ3U4ReceiverCount || count == kW3U4ReceiverCount ||
+           count == kMlt5PeReceiverCount;
+}
+
+// Q3U4 is the only enclosure with two USB devices.
+std::uint8_t usb_present_mask_for(std::uint8_t count) noexcept
+{
+    return count == kQ3U4ReceiverCount ? kUsbPresentMask : 0x01U;
+}
+
+// Precondition: valid_receiver_count(count) and global < count.
+ReceiverRecord expected_receiver_record(std::uint8_t count, std::size_t global) noexcept
+{
+    const auto id = static_cast<std::uint8_t>(global);
+    if (count == kMlt5PeReceiverCount) {
+        return ReceiverRecord{id, 1U, id, System::ISDB_T_OR_S};
+    }
+    const auto local = static_cast<std::uint8_t>(global % 4U);
+    return ReceiverRecord{id, static_cast<std::uint8_t>((global / 4U) + 1U), local,
+                          local < 2U ? System::ISDB_S : System::ISDB_T};
+}
+
+bool valid_receiver_record(const ReceiverRecord& value, std::uint8_t count,
+                           std::size_t global) noexcept
+{
+    const ReceiverRecord expected = expected_receiver_record(count, global);
+    return value.global_id == expected.global_id && value.dev_id == expected.dev_id &&
+           value.local_id == expected.local_id && value.system == expected.system;
 }
 
 void write_counters(Writer& writer, const CountersPayload& value) noexcept
@@ -518,6 +541,20 @@ Result<HelloResponsePayload> decode_hello_response_payload(ByteView input) noexc
     return Result<HelloResponsePayload>::success(value);
 }
 
+Result<std::array<ReceiverRecord, kReceiverCount>> receiver_records(
+    std::uint8_t receiver_count) noexcept
+{
+    std::array<ReceiverRecord, kReceiverCount> records{};
+    if (!valid_receiver_count(receiver_count)) {
+        return Result<std::array<ReceiverRecord, kReceiverCount>>::failure(
+            Error::INVALID_ARGUMENT);
+    }
+    for (std::size_t index = 0U; index < receiver_count; ++index) {
+        records[index] = expected_receiver_record(receiver_count, index);
+    }
+    return Result<std::array<ReceiverRecord, kReceiverCount>>::success(records);
+}
+
 Result<std::size_t> encode_payload(const ListResponsePayload& value,
                                    MutableByteView output) noexcept
 {
@@ -526,12 +563,16 @@ Result<std::size_t> encode_payload(const ListResponsePayload& value,
         !valid_boolean(value.ready) || (value.usb_present_mask & ~kUsbPresentMask) != 0U) {
         return invalid();
     }
-    for (std::size_t index = 0U; index < value.receivers.size(); ++index) {
-        if (!valid_receiver_record(value.receivers[index], index)) {
+    if (!valid_receiver_count(value.receiver_count) ||
+        (value.usb_present_mask & ~usb_present_mask_for(value.receiver_count)) != 0U) {
+        return invalid();
+    }
+    for (std::size_t index = 0U; index < value.receiver_count; ++index) {
+        if (!valid_receiver_record(value.receivers[index], value.receiver_count, index)) {
             return invalid();
         }
     }
-    const std::size_t required = 46U + value.serial_utf8.size;
+    const std::size_t required = 14U + (4U * value.receiver_count) + value.serial_utf8.size;
     if (required > kMaxControlPayload) {
         return invalid();
     }
@@ -545,9 +586,10 @@ Result<std::size_t> encode_payload(const ListResponsePayload& value,
     writer.bytes(value.serial_utf8);
     writer.u8(value.ready);
     writer.u8(value.usb_present_mask);
-    writer.u8(static_cast<std::uint8_t>(kReceiverCount));
+    writer.u8(value.receiver_count);
     writer.u8(kCardReaderCount);
-    for (const ReceiverRecord& receiver : value.receivers) {
+    for (std::size_t index = 0U; index < value.receiver_count; ++index) {
+        const ReceiverRecord& receiver = value.receivers[index];
         writer.u8(receiver.global_id);
         writer.u8(receiver.dev_id);
         writer.u8(receiver.local_id);
@@ -569,10 +611,12 @@ Result<ListResponsePayload> decode_list_response_payload(ByteView input) noexcep
         !reader.u8(value.ready) || !reader.u8(value.usb_present_mask) ||
         !reader.u8(receiver_count) || !reader.u8(card_count) ||
         !valid_boolean(value.ready) || (value.usb_present_mask & ~kUsbPresentMask) != 0U ||
-        receiver_count != kReceiverCount || card_count != kCardReaderCount) {
+        !valid_receiver_count(receiver_count) || card_count != kCardReaderCount ||
+        (value.usb_present_mask & ~usb_present_mask_for(receiver_count)) != 0U) {
         return malformed<ListResponsePayload>();
     }
-    for (std::size_t index = 0U; index < value.receivers.size(); ++index) {
+    value.receiver_count = receiver_count;
+    for (std::size_t index = 0U; index < receiver_count; ++index) {
         std::uint8_t system = 0U;
         ReceiverRecord& receiver = value.receivers[index];
         if (!reader.u8(receiver.global_id) || !reader.u8(receiver.dev_id) ||
@@ -580,7 +624,7 @@ Result<ListResponsePayload> decode_list_response_payload(ByteView input) noexcep
             return malformed<ListResponsePayload>();
         }
         receiver.system = static_cast<System>(system);
-        if (!valid_receiver_record(receiver, index)) {
+        if (!valid_receiver_record(receiver, receiver_count, index)) {
             return malformed<ListResponsePayload>();
         }
     }

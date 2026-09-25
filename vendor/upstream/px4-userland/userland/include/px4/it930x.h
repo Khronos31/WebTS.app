@@ -1,9 +1,10 @@
-// Modified/ported for px4-userland on 2026-09-03.
+// Modified/ported for px4-userland on 2026-09-03; MLT5 support added on 2026-09-24.
 //
 // Copyright (c) 2018-2021 nns779
-// Derived from tsukumijima/px4_drv commit 9eedea8c502875a788697984b93b50032339b9aa.
+// Derived from tsukumijima/px4_drv commit d748866f0da1cb3656106a520de4e9d7f073aacd (v0.6.1).
 // Origin paths: driver/it930x.c, driver/it930x.h, driver/itedtv_bus.c,
-// driver/px4_device.c, winusb/src/DriverHost_PX4/px4_device.cpp.
+// driver/px4_device.c, driver/pxmlt_device.c,
+// winusb/src/DriverHost_PX4/px4_device.cpp.
 // Source snapshot maintained by tsukumijima.
 // SPDX-License-Identifier: GPL-2.0-only
 #ifndef PX4_USERLAND_IT930X_H
@@ -113,8 +114,20 @@ public:
     Result<FirmwareLoadResult> initialize_q3u4(
         const FirmwareImage& image,
         InitializationPolicy policy = InitializationPolicy::accept_cold_or_warm) noexcept;
+    // Initialize the single IT930x of a PX-MLT5PE/DTV02A-5TS-P in the fixed
+    // px4_drv state and leave its GPIOs idle.  The backend-power, LNB, card,
+    // and PSB operations above use the same GPIO/register assignment on this
+    // board and are shared with Q3U4.
+    Result<FirmwareLoadResult> initialize_mlt5pe(
+        const FirmwareImage& image,
+        InitializationPolicy policy = InitializationPolicy::accept_cold_or_warm) noexcept;
 
 private:
+    enum class BoardLayout : std::uint8_t {
+        q3u4,
+        mlt5pe,
+    };
+
     enum class Q3U4BackendPowerState : std::uint8_t {
         unknown,
         off,
@@ -135,7 +148,12 @@ private:
     Result<void> modify_q3u4_register_locked(std::uint32_t reg, std::uint8_t value,
                                              std::uint8_t mask) noexcept;
     Result<void> set_card_baud_rate_locked(It930xCardBaudRate baud_rate) noexcept;
-    Result<void> warm_initialize_q3u4_locked() noexcept;
+    Result<void> warm_initialize_locked(BoardLayout layout) noexcept;
+    Result<void> configure_stream_inputs_locked(BoardLayout layout) noexcept;
+    Result<void> configure_idle_gpio_locked(BoardLayout layout) noexcept;
+    Result<FirmwareLoadResult> initialize_locked(const FirmwareImage& image,
+                                                 InitializationPolicy policy,
+                                                 BoardLayout layout) noexcept;
     Result<void> configure_q3u4_stream_output_locked() noexcept;
     Result<FirmwareLoadResult> load_firmware_image_locked(const FirmwareImage& image) noexcept;
     Result<void> verify_q3u4_state_locked() noexcept;

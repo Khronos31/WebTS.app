@@ -12,6 +12,8 @@ namespace px4::userland {
 
 enum class Px4dOpenMode : std::uint8_t {
     native,
+    // One --fd per USB device of the enclosure: two for a PX-Q3U4, one for a
+    // PX-MLT5PE/DTV02A-5TS-P.
     file_descriptors,
 };
 

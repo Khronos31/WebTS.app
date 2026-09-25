@@ -5,13 +5,6 @@ import {
   getEnabledChannelIds,
   saveEnabledChannelIds,
 } from '../enabled-channels';
-import {
-  FIRMWARE_SOURCE,
-  cacheFirmware,
-  clearCachedFirmware,
-  extractFirmware,
-  type FirmwareStage,
-} from '../../usb/firmware';
 import { readSetupState } from '../../ui/setup-state';
 import {
   getScanState,
@@ -23,7 +16,7 @@ import {
 import { bsTunings, csTunings, grTunings, satelliteScanTunings } from '../tuning';
 import type { ChannelItem } from '../types';
 import { channelsSync } from '../channel-source';
-import { loadQ3U4Identifiers } from '../../usb/px4-identity';
+import { loadPx4Models, usbFilters } from '../../usb/px4-identity';
 import { getTheme, setTheme, type ThemeMode } from '../theme-manager';
 import { allowLnb15v, setAllowLnb15v } from '../lnb-setting';
 import { getZipcode, normalizeZipcode, setZipcode } from '../bml-receiver-info';
@@ -56,9 +49,6 @@ export class SettingsView {
 
     // 2. データ放送 地域・郵便番号設定（任意） カード
     this.element.append(this.createZipcodeCard());
-
-    // 3. ファームウェアを取得・設定 カード
-    this.element.append(this.createFirmwareCard(state.firmware));
 
     // 3. 地域設定・チャンネルスキャン カード
     this.element.append(this.createScanCard());
@@ -250,136 +240,6 @@ export class SettingsView {
         handleSave();
       }
     });
-
-    return card;
-  }
-
-  private createFirmwareCard(firmwareState: { needed: boolean; detail: string }): HTMLElement {
-    const card = document.createElement('div');
-    card.className = 'settings-card';
-
-    const isOk = !firmwareState.needed;
-
-    card.innerHTML = `
-      <div class="settings-card-header">
-        <div class="settings-card-title">
-          <svg viewBox="0 0 24 24" style="width:20px;height:20px;fill:currentColor">
-            <path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/>
-          </svg>
-          <span>ファームウェアを取得・設定</span>
-        </div>
-        <span class="status-badge ${isOk ? 'ok' : 'warning'}">
-          ${isOk ? '設定完了' : '要設定'}
-        </span>
-      </div>
-
-      <p class="settings-card-desc">
-        PX-Q3U4 / PX-W3U4 内部の IT930x デモジュレータを初期化するためにファームウェア (2,169 bytes) が必要です。
-        メーカー提供の公式ドライバパッケージからブラウザ内で自動抽出され、端末内の IndexedDB に安全に保存されます。
-      </p>
-
-      <div class="form-group" style="margin-bottom: 12px;">
-        <span class="form-label">メーカー公式ドライバ配布元:</span>
-        <a href="${FIRMWARE_SOURCE.archiveUrl}" target="_blank" rel="noreferrer" style="color: var(--primary-light); font-size: 0.8125rem;">
-          PLEX PX-W3U4 ドライバパッケージ (ZIP)
-        </a>
-        <span style="font-size: 0.75rem; color: var(--text-secondary); margin-left: 6px;">
-          （PX-Q3U4 でも共通の IT930x ファームウェアを使用します）
-        </span>
-      </div>
-
-      <div class="drop-zone" id="fw-drop-zone">
-        <svg viewBox="0 0 24 24" style="width:40px;height:40px;fill:var(--text-secondary);margin-bottom:8px">
-          <path d="M19.35 10.04C18.67 6.59 15.64 4 12 4 9.11 4 6.6 5.64 5.35 8.04 2.34 8.36 0 10.91 0 14c0 3.31 2.69 6 6 6h13c2.76 0 5-2.24 5-5 0-2.64-2.05-4.78-4.65-4.96zM14 13v4h-4v-4H7l5-5 5 5h-3z"/>
-        </svg>
-        <div style="font-weight: 600; font-size: 0.875rem; margin-bottom: 4px;">
-          ダウンロードしたドライバ ZIP または .sys ファイルをここにドラッグ＆ドロップ
-        </div>
-        <div style="font-size: 0.75rem; color: var(--text-secondary); margin-bottom: 12px;">
-          またはクリックしてファイルを選択
-        </div>
-        <input type="file" id="fw-file-picker" accept=".zip,.sys" style="display:none;" />
-        <button type="button" class="btn btn-secondary" id="fw-browse-btn">
-          ファイルを選択
-        </button>
-      </div>
-
-      <div id="fw-status-box" style="margin-top: 12px; font-size: 0.8125rem; display: none;"></div>
-
-      ${isOk ? `
-        <div style="margin-top: 16px; display: flex; justify-content: flex-end;">
-          <button type="button" class="btn btn-secondary" id="fw-clear-btn" style="color: var(--error);">
-            ファームウェアを消去
-          </button>
-        </div>
-      ` : ''}
-    `;
-
-    const picker = card.querySelector<HTMLInputElement>('#fw-file-picker')!;
-    const browseBtn = card.querySelector<HTMLButtonElement>('#fw-browse-btn')!;
-    const dropZone = card.querySelector<HTMLElement>('#fw-drop-zone')!;
-    const statusBox = card.querySelector<HTMLElement>('#fw-status-box')!;
-    const clearBtn = card.querySelector<HTMLButtonElement>('#fw-clear-btn');
-
-    browseBtn.addEventListener('click', () => picker.click());
-    dropZone.addEventListener('click', (e) => {
-      if (e.target !== browseBtn) picker.click();
-    });
-
-    dropZone.addEventListener('dragover', (e) => {
-      e.preventDefault();
-      dropZone.classList.add('drag-over');
-    });
-
-    dropZone.addEventListener('dragleave', () => {
-      dropZone.classList.remove('drag-over');
-    });
-
-    dropZone.addEventListener('drop', (e) => {
-      e.preventDefault();
-      dropZone.classList.remove('drag-over');
-      const file = e.dataTransfer?.files[0];
-      if (file) void handleFile(file);
-    });
-
-    picker.addEventListener('change', () => {
-      const file = picker.files?.[0];
-      if (file) void handleFile(file);
-    });
-
-    clearBtn?.addEventListener('click', async () => {
-      await clearCachedFirmware();
-      this.onStateChanged();
-      void this.render();
-    });
-
-    const handleFile = async (file: File) => {
-      statusBox.style.display = 'block';
-      statusBox.innerHTML = '<span style="color:var(--primary-light);">ファームウェアを抽出中...</span>';
-
-      try {
-        const bytes = new Uint8Array(await file.arrayBuffer());
-        const stages: FirmwareStage[] = [];
-        const result = await extractFirmware(bytes, (stage) => {
-          stages.push(stage);
-          statusBox.innerHTML = `<div>${stages.map((s) => `✔ ${s}`).join('<br>')}</div>`;
-        });
-        await cacheFirmware(result.bytes);
-        statusBox.innerHTML = `
-          <div style="color: var(--success); font-weight: 600;">
-            ✔ ファームウェア (${result.bytes.length} bytes) の抽出・IndexedDB保存が完了しました！
-          </div>
-        `;
-        this.onStateChanged();
-        setTimeout(() => void this.render(), 1200);
-      } catch (err) {
-        statusBox.innerHTML = `
-          <div style="color: var(--error);">
-            ✖ 抽出エラー: ${err instanceof Error ? err.message : String(err)}
-          </div>
-        `;
-      }
-    };
 
     return card;
   }
@@ -737,13 +597,10 @@ export class SettingsView {
       }
       statusText.textContent = 'デバイスの選択を待機中...';
       try {
-        // VID/PID は上流の定数をモジュールから取る。TypeScript 側に書き写さない。
-        const identifiers = await loadQ3U4Identifiers();
+        // 候補は上流が知っている全機種。VID/PID と機種の表はモジュールから
+        // 取り、TypeScript 側に書き写さない。
         const device = await navigator.usb.requestDevice({
-          filters: [{
-            vendorId: identifiers.vendorId,
-            productId: identifiers.productId,
-          }],
+          filters: usbFilters(await loadPx4Models()),
         });
         statusText.textContent = `接続完了: ${device.productName ?? 'PX-Series'}`;
         this.onStateChanged();

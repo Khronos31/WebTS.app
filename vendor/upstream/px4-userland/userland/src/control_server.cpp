@@ -83,19 +83,6 @@ ErrorCode ipc_error(Error error) noexcept
     return ErrorCode::INTERNAL;
 }
 
-std::array<ReceiverRecord, kReceiverCount> receiver_records() noexcept
-{
-    return std::array<ReceiverRecord, kReceiverCount>{
-        ReceiverRecord{0U, 1U, 0U, System::ISDB_S},
-        ReceiverRecord{1U, 1U, 1U, System::ISDB_S},
-        ReceiverRecord{2U, 1U, 2U, System::ISDB_T},
-        ReceiverRecord{3U, 1U, 3U, System::ISDB_T},
-        ReceiverRecord{4U, 2U, 0U, System::ISDB_S},
-        ReceiverRecord{5U, 2U, 1U, System::ISDB_S},
-        ReceiverRecord{6U, 2U, 2U, System::ISDB_T},
-        ReceiverRecord{7U, 2U, 3U, System::ISDB_T}};
-}
-
 int timeout_to_poll(Timeout timeout) noexcept
 {
     return timeout.milliseconds > static_cast<std::uint32_t>(INT_MAX) ?
@@ -561,15 +548,22 @@ struct PosixControlServer::Impl final {
          CardService& service,
          TunerService& tuner, std::unique_ptr<ControlWorkerLanes> workers_value,
          TunerStreamControl* stream_control_value, std::string_view serial,
-         bool ready_value, std::uint8_t usb_mask) noexcept
+         bool ready_value, std::uint8_t usb_mask,
+         const std::array<ReceiverRecord, kReceiverCount>& records,
+         std::uint8_t receiver_count_value) noexcept
         : listener(std::move(listener_value)), stream_listener(std::move(stream_listener_value)),
           card_service(service),
           tuner_service(tuner), workers(std::move(workers_value)),
           stream_control(stream_control_value), base_serial(serial),
           ready(ready_value), usb_present_mask(usb_mask),
+          receiver_records(records), receiver_count(receiver_count_value),
           next_presence_poll(std::chrono::steady_clock::now())
     {
         known_receiver_states.fill(ReceiverState::free);
+        // TunerService reports receivers beyond the enclosure as absent from
+        // construction; seeding them avoids a spurious state_changed event.
+        for (std::size_t index = receiver_count; index < kReceiverCount; ++index)
+            known_receiver_states[index] = ReceiverState::absent;
     }
 
     void observe_tuner(const TunerStatus& status) noexcept
@@ -751,7 +745,7 @@ struct PosixControlServer::Impl final {
                     ByteView{reinterpret_cast<const std::uint8_t*>(base_serial.data()),
                              base_serial.size()},
                     static_cast<std::uint8_t>(ready ? 1U : 0U), usb_present_mask,
-                    receiver_records()});
+                    receiver_records, receiver_count});
         }
         case MessageType::STATUS: {
             if (!decode_empty_payload(request.payload))
@@ -1596,6 +1590,8 @@ struct PosixControlServer::Impl final {
     bool client_ids_exhausted = false;
     bool ready;
     std::uint8_t usb_present_mask;
+    std::array<ReceiverRecord, kReceiverCount> receiver_records;
+    std::uint8_t receiver_count;
     bool card_presence_known = false;
     bool known_card_present = false;
     bool presence_poll_pending = false;
@@ -2193,10 +2189,12 @@ void PosixControlServer::Impl::process_stream_clients(
 Result<std::unique_ptr<PosixControlServer>> PosixControlServer::create(
     const EndpointConfig& endpoint, CardService& card_service,
     TunerService& tuner_service, std::string_view base_serial, bool ready,
-    std::uint8_t usb_present_mask, TunerStreamControl* stream_control) noexcept
+    std::uint8_t usb_present_mask, TunerStreamControl* stream_control,
+    std::uint8_t receiver_count) noexcept
 {
+    const auto records = receiver_records(receiver_count);
     if (base_serial.empty() || base_serial.size() > 0xffffU ||
-        (usb_present_mask & 0xfcU) != 0U) {
+        (usb_present_mask & 0xfcU) != 0U || !records) {
         return Result<std::unique_ptr<PosixControlServer>>::failure(
             Error::INVALID_ARGUMENT);
     }
@@ -2221,7 +2219,7 @@ Result<std::unique_ptr<PosixControlServer>> PosixControlServer::create(
     std::unique_ptr<Impl> impl(new (std::nothrow) Impl(
         std::move(listener.value()), std::move(stream_listener.value()), card_service,
         tuner_service, std::move(workers.value()), stream_control, base_serial, ready,
-        usb_present_mask));
+        usb_present_mask, records.value(), receiver_count));
     if (!impl) return Result<std::unique_ptr<PosixControlServer>>::failure(Error::INTERNAL);
     std::unique_ptr<PosixControlServer> server(
         new (std::nothrow) PosixControlServer(std::move(impl)));

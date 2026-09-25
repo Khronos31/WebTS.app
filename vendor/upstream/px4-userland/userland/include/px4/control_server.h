@@ -22,7 +22,8 @@ public:
         TunerService& tuner_service,
         std::string_view base_serial, bool ready = true,
         std::uint8_t usb_present_mask = 0x03U,
-        TunerStreamControl* stream_control = nullptr) noexcept;
+        TunerStreamControl* stream_control = nullptr,
+        std::uint8_t receiver_count = kQ3U4ReceiverCount) noexcept;
 
     ~PosixControlServer() noexcept;
     PosixControlServer(const PosixControlServer&) = delete;

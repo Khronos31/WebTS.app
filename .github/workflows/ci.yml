@@ -38,6 +38,11 @@ jobs:
           npm run build:px4-identity
           npm run build:q3u4-descramble
 
+      # 受信機の割り当ては機種の能力表だけで決まる C++ の規則。Emscripten が
+      # あるのはこの段だけなので、ここで試す。
+      - name: Receiver allocation policy
+        run: npm run test:receivers
+
       # 中間生成物は渡さない。patched/ のオブジェクトは1モジュール 1.4 MB
       # あり、配信にも後段の検証にも要らない。
       - uses: actions/upload-artifact@v4

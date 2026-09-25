@@ -16,6 +16,28 @@ namespace px4::userland {
 class TunerServiceBackend {
 public:
     virtual ~TunerServiceBackend() noexcept = default;
+    // Enclosure shape.  The defaults are the fixed PX-Q3U4 layout: eight
+    // receivers, 0/1/4/5 ISDB-S and 2/3/6/7 ISDB-T.  A backend whose
+    // receivers accept both systems keeps the system of the last successful
+    // tune for capture and stop.
+    virtual std::uint8_t receiver_count() const noexcept
+    {
+        return static_cast<std::uint8_t>(ipc::kReceiverCount);
+    }
+    virtual bool receiver_supports(std::uint8_t receiver,
+                                   ipc::System system) const noexcept
+    {
+        const bool satellite =
+            receiver == 0U || receiver == 1U || receiver == 4U || receiver == 5U;
+        return system == (satellite ? ipc::System::ISDB_S : ipc::System::ISDB_T);
+    }
+    // PX-MLT boards select the ISDB-S slot/TSID before the frontend tune
+    // (px4_drv PTX_CHRDEV_SAT_SET_STREAM_ID_BEFORE_TUNE); Q3U4 selects it
+    // after lock.
+    virtual bool selects_satellite_stream_before_tune() const noexcept
+    {
+        return false;
+    }
     virtual Result<void> open_receiver(std::uint8_t receiver) noexcept = 0;
     virtual Result<void> tune_terrestrial(std::uint8_t receiver,
                                           std::uint32_t frequency_khz,
@@ -298,8 +320,8 @@ private:
     };
 
     static bool valid_client(std::uint64_t client_id) noexcept;
-    static bool valid_receiver(std::uint8_t receiver) noexcept;
-    static ipc::System receiver_system(std::uint8_t receiver) noexcept;
+    bool valid_receiver(std::uint8_t receiver) const noexcept;
+    ipc::System initial_system(std::uint8_t receiver) const noexcept;
     static bool valid_tune(const ipc::TuneRequestPayload& request) noexcept;
     int find_lease_locked(std::uint64_t client_id,
                           std::uint64_t lease_id) const noexcept;

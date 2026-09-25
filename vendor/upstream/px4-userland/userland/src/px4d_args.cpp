@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-only
 #include "px4d_args.h"
 
+#include "px4/identity.h"
+
 #include <charconv>
 #include <cstdint>
 #include <limits>
@@ -41,11 +43,7 @@ bool parse_fd(std::string_view value, int& output) noexcept
 
 bool valid_px4d_base_serial(std::string_view value) noexcept
 {
-    if (value.size() != 14U) return false;
-    for (const char character : value) {
-        if (character < '0' || character > '9') return false;
-    }
-    return true;
+    return valid_device_instance(value);
 }
 
 Px4dArguments parse_px4d_arguments(int argc,
@@ -104,7 +102,7 @@ Px4dArguments parse_px4d_arguments(int argc,
             result.runtime_directory = value;
         } else {
             if (result.file_descriptor_count >= result.file_descriptors.size()) {
-                return invalid("exactly two --fd values are supported");
+                return invalid("at most two --fd values are supported");
             }
             int fd = -1;
             if (!parse_fd(value, fd)) return invalid("--fd is invalid");
@@ -118,15 +116,11 @@ Px4dArguments parse_px4d_arguments(int argc,
         }
     }
 
-    if (result.file_descriptor_count != 0U &&
-        result.file_descriptor_count != result.file_descriptors.size()) {
-        return invalid("exactly two --fd values are required");
-    }
     if (result.file_descriptor_count == 0U && !have_device) {
         return invalid("native mode requires --device");
     }
     if (have_device && !valid_px4d_base_serial(result.device)) {
-        return invalid("--device requires a 14-digit base serial");
+        return invalid("--device requires a 14-digit base serial or 15-digit serial");
     }
     if (!have_firmware || result.firmware.empty()) {
         return invalid("--firmware is required");
@@ -140,9 +134,8 @@ Px4dArguments parse_px4d_arguments(int argc,
 
 Px4dOpenMode px4d_open_mode(const Px4dArguments& arguments) noexcept
 {
-    return arguments.file_descriptor_count == arguments.file_descriptors.size()
-               ? Px4dOpenMode::file_descriptors
-               : Px4dOpenMode::native;
+    return arguments.file_descriptor_count != 0U ? Px4dOpenMode::file_descriptors
+                                                 : Px4dOpenMode::native;
 }
 
 }  // namespace px4::userland

@@ -10,13 +10,20 @@
 | 対象 | 固定 | ライセンス | 用途 | 改変 |
 |---|---|---|---|---|
 | [libusb](https://github.com/libusb/libusb) | v1.0.30 / `87a55632db62c9bdc58cd31d3ccfa673f1bb017f` | LGPL-2.1-or-later | 公式 Emscripten/WebUSB backend と、それが必要とする core | **あり（2ファイル）** |
-| [Khronos31/px4-userland](https://github.com/Khronos31/px4-userland) | `10a373dbda0603b2d8180bb2508e2d88dd70eb2d` | GPL-2.0-only | PX-Q3U4 のコア。IT930x ブリッジ、identity grouping、tagged TS demux、stream data plane、内蔵カード | なし |
+| [Khronos31/px4-userland](https://github.com/Khronos31/px4-userland) | v0.1.5-beta / `16b2bdbbcf5e3d992a24f284422628def1390aa9` | GPL-2.0-only | PX4 系（PX-Q3U4、PX-W3U4、PX-MLT5PE、DTV02A-5TS-P）のコア。IT930x ブリッジ、identity grouping、tagged TS demux、stream data plane、内蔵カード | なし |
 | [shirow-github/libaribb25](https://github.com/shirow-github/libaribb25) | v0.2.10 / `b978fe5caf6bfe162e944ad4d323b7c0205276e3` | ISC | TS section parser、MULTI2、`arib_std_b25` facade、`b_cas_card` | なし |
 | [libmpeg2 (mpeg2dec)](https://code.videolan.org/videolan/libmpeg2) | 0.5.1+ / `946bf4b518aacc224f845e73708f99e394744499` | GPL-2.0-or-later | MPEG-2 映像の復号。ブラウザ内蔵デコーダが対応しないため必須 | なし |
 
 PX-S1UD 向けの [Khronos31/siano-userland](https://github.com/Khronos31/siano-userland)
 （GPL-2.0-or-later）は、0.1.0 が PX-Q3U4 から始まるため**まだ同梱していない**。S1UD に
 着手する時点で同じ手順で追加する。
+
+### px4-userland の px4d から写したもの
+
+同梱しているのは px4-userland の `userland/src` と `userland/include` だけで、改変はしていない。
+ただし **PX-W3U4 の組み立て**（`AbsentBridgePower`、`W3U4TunerBackend`、`run_w3u4` の手順）は
+上流では `userland/tools/px4d.cpp` の中にしか無いので、同じ内容を `native/px4-enclosure.cpp` に
+写している（v0.1.5-beta、commit `e71d22a`）。ライセンスは同じ GPL-2.0-only である。
 
 ### libusb の改変
 
@@ -133,7 +140,8 @@ npm の直接・推移依存は `package-lock.json` に固定する。成果物�
 
 ## ファームウェアと収録データ
 
-- ファームウェアは、再配布条件と取得元を確認して明示的に許可するまでコミットしない。
-- PX-Q3U4 の IT930x ファームウェアは配布対象外とする。
+- IT930x ファームウェア（2,169 バイト）は Git リポジトリには含めない。デプロイ時に GitHub Actions がプレクスの PX-W3U4 用公式ドライバパッケージ（`https://plex-net.co.jp/plex/pxw3u4/pxw3u4_BDA_ver1x64.zip`）を取得し、ZIP と .sys の SHA-256 固定値照合および同梱している上流 px4-userland（`FirmwareProvider::load()`。サイズ・SHA-256・scatter image を見る）による検証を経てファームウェアを取り出し、配布サーバの配信物（`/firmware/it930x-firmware.bin`）に配置して配信する。
+- ファームウェアのライセンス上の再配布の可否は解決していない（本プロジェクトの判断により、実行時の利便性を優先して配布サーバから配信している）。
+- ファームウェアは WebTS.app の GPL-2.0-only には含まれず、GPL の対応ソース一式にも含めない。SBOM には別個の成果物としてライセンス不明（`NOASSERTION`）で記録する。
 - 放送 TS、カード dump、ECM/EMM 応答、カード番号、鍵をコミットしない。
 - テスト fixture は仕様から生成した人工データを原則とし、由来を記録する。

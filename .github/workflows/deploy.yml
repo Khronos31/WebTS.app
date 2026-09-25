@@ -46,6 +46,11 @@ jobs:
           npm run build:px4-identity
           npm run build:q3u4-descramble
 
+      # リポジトリには入れず、デプロイのたびにプレクスのドライバから取り出す。
+      # ZIP・.sys の固定ハッシュか上流の検証のどれかが合わなければ、ここで止まる。
+      - name: Extract the IT930x firmware from the vendor driver
+        run: npm run firmware
+
       # 配る前に全部通す。ここを省くと、壊れたものを公開できてしまう。
       - name: Verify vendor, typecheck, test and build
         run: npm run check
@@ -59,6 +64,7 @@ jobs:
             test -f "dist/build/$module/$module.mjs" || { echo "::error::missing $module.mjs"; exit 1; }
             test -f "dist/build/$module/$module.wasm" || { echo "::error::missing $module.wasm"; exit 1; }
           done
+          test "$(stat -c %s dist/firmware/it930x-firmware.bin)" = 2169             || { echo "::error::missing or wrong-sized firmware"; exit 1; }
 
       # 交差オリジン分離が無いと SharedArrayBuffer が使えず、pthread が動かず、
       # アプリは起動すらしない。**配信物にヘッダ設定が入っていることを確かめる。**

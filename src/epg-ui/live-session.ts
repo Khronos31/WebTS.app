@@ -17,7 +17,7 @@
 
 import { AudioPlayer } from '../video/audio';
 import type { PlayerMessage, PlayerRequest } from '../video/player-worker';
-import { readCachedFirmware } from '../usb/firmware';
+import { loadFirmware } from '../usb/firmware';
 import { ensureTunerAvailable, loadQ3U4Module, type Q3U4Module } from './q3u4-module';
 import { CaptionText } from './caption-text';
 import type { Tuning } from './tuning';
@@ -33,10 +33,12 @@ const POLL_WORDS = 17;
 /** 1回の drain で取り出す上限。live は 2 MB/s 程度なので十分余る。 */
 const DRAIN_BYTES = 1024 * 1024;
 
-/** 上流の global 受信機番号。地上波は 2, 3（dev1）と 6, 7（dev2）。 */
-const TERRESTRIAL_RECEIVERS = [2, 3, 6, 7] as const;
-/** 衛星は各ブリッジの下2つ。0, 1（dev1）と 4, 5（dev2）。 */
-const SATELLITE_RECEIVERS = [0, 1, 4, 5] as const;
+/**
+ * 受信機は C 側に選ばせる。どの受信機がどの波を受けられるかは機種による
+ * ので、JS には番号を持たせない（q3u4-descramble-probe.cpp の claim_receiver）。
+ * 視聴には、その波を受けられる空いた受信機のうち最も若い番号が選ばれる。
+ */
+const ANY_RECEIVER = -1;
 const WAVE_TERRESTRIAL = 0;
 const WAVE_SATELLITE = 1;
 
@@ -222,17 +224,14 @@ export class LiveSession {
   }
 
   /**
-   * 受信を始める。物理操作は要求しない。ファームウェアが未取得、あるいは
-   * チューナーが未許可なら例外を投げる。
+   * 受信を始める。物理操作は要求しない。ファームウェアを配布サーバから
+   * 取れない、あるいはチューナーが未許可なら例外を投げる。
    */
   static async start(options: LiveSessionOptions): Promise<LiveSession> {
     active?.stop();
 
     await ensureTunerAvailable();
-    const firmware = await readCachedFirmware();
-    if (firmware === null) {
-      throw new Error('ファームウェアが設定されていません。設定から取得してください。');
-    }
+    const firmware = await loadFirmware();
     options.onStatus?.('モジュールを読み込んでいます…');
     const module = await loadQ3U4Module();
 
@@ -370,7 +369,7 @@ export class LiveSession {
       ['number', 'number', 'number', 'number', 'number', 'number',
         'number', 'number', 'number'],
       [this.#firmwarePointer, firmwareLength,
-        satellite ? SATELLITE_RECEIVERS[0] : TERRESTRIAL_RECEIVERS[0],
+        ANY_RECEIVER,
         options.tuning.frequencyKhz, 0, 2,
         satellite ? WAVE_SATELLITE : WAVE_TERRESTRIAL,
         options.tuning.tsid ?? 0,

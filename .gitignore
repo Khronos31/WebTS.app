@@ -35,6 +35,10 @@ public/favicon.ico
 # UI のモック用動画。実 live 経路へ繋ぐまでの仮置きで、成果物には載せない。
 public/mock-stream.mp4
 
+# IT930x ファームウェア。デプロイ時に scripts/fetch-firmware.mjs が
+# プレクスのドライバから取り出して置く。**リポジトリには入れない。**
+public/firmware/
+
 # Local configuration and credentials
 .env
 .env.*

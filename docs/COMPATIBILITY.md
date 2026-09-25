@@ -17,6 +17,26 @@ CS の視聴と、テレビと並べたライブ遅延の観測は Linux 側で�
 
 ブラウザは Chromium 系に限る。WebUSB が Firefox と Safari に無い。
 
+## 対応チューナー
+
+| 機種 | USB ID | WebTS での実機確認 | 根拠 |
+| --- | --- | --- | --- |
+| PLEX PX-Q3U4 | `0511:084a` | **確認済み**（上の表） | ─ |
+| PLEX PX-MLT5PE | `0511:024e` | **未確認** | 上流 px4-userland v0.1.4 の対応機種。上流の実機回帰は DTV02A-5TS-P で行われた |
+| e-Better DTV02A-5TS-P | `0511:924e` | **未確認** | 同上（PX-MLT5PE と基板が同じで、USB の product ID だけが違う） |
+| PLEX PX-W3U4 | `0511:083f` | **未確認** | 上流 px4-userland v0.1.5-beta の **Beta**。上流でも実機では確かめていない |
+
+**PX-Q3U4 以外は、手元に実機が無いまま上流に追従して入れた。**デバイスを動かす
+部分は上流のコードをそのまま使い、組み立ては上流 px4d と同じ手順にしてある
+（PX-W3U4 の組み立ては上流では px4d の中にしか無いので、native/px4-enclosure.cpp
+に写した）。WebTS で書いた周り（USB の許可、受信機の割り当て）は試験で確かめた。
+**動いた・動かなかったの報告を募集している。**
+
+機種の違いは上流が知っている。受信機の数と、各受信機が地上波と衛星のどちらを
+受けられるかは上流が答え（PX-Q3U4 は 0/1/4/5 が衛星・2/3/6/7 が地上波、
+PX-W3U4 は 0/1 が衛星・2/3 が地上波、PX-MLT5PE は 0〜4 のどれでも両方）、
+WebTS はそれに従って視聴用に1本を空け、残りを走査に回す。
+
 ## 前提条件
 
 ### すべての環境
@@ -29,7 +49,9 @@ CS の視聴と、テレビと並べたライブ遅延の観測は Linux 側で�
   `public/_headers` と `vite.config.ts` が設定している。
 - **PX-Q3U4 は USB 機器2つとして列挙される**。ブラウザの選択ダイアログには
   同じに見える行が2つ並び、一度では片方しか許可できない。**両方を許可する**
-  まで受信機は開けない。
+  まで受信機は開けない。PX-W3U4 は USB 機器1つ。PX-MLT5PE と DTV02A-5TS-P は
+  PCIe のカードだが、上流によればカード上の USB コントローラの先に USB 機器
+  1つとして見える。
 
 ### macOS
 
@@ -44,8 +66,16 @@ CS の視聴と、テレビと並べたライブ遅延の観測は Linux 側で�
 
 ```
 # /etc/udev/rules.d/70-px4-userland.rules
+# PX-Q3U4
 SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{idVendor}=="0511", ATTR{idProduct}=="084a", MODE="0660", GROUP="video"
+# PX-W3U4（WebTS では未確認）
+SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{idVendor}=="0511", ATTR{idProduct}=="083f", MODE="0660", GROUP="video"
+# PX-MLT5PE / DTV02A-5TS-P（上流 README と同じ。WebTS では未確認）
+SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{idVendor}=="0511", ATTR{idProduct}=="024e", MODE="0660", GROUP="video"
+SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{idVendor}=="0511", ATTR{idProduct}=="924e", MODE="0660", GROUP="video"
 ```
+
+使う機種の行だけを置けばよい。
 
 ```sh
 sudo udevadm control --reload-rules
@@ -86,7 +116,13 @@ sudo udevadm trigger --subsystem-match=usb --action=add
 Linux で `px4_drv` や `dvb_usb_*` が読み込まれている場合はインターフェイスを
 先に claim するため、WebUSB からは開けない。`lsmod` で確認し、必要なら
 `modprobe -r` する。**この環境では読み込まれていなかったので、競合そのものは
-未確認である。**
+未確認である。**上流によれば、PX-MLT5PE / DTV02A-5TS-P は `px4_drv` が
+入っているとそちらへ結び付けられる。
+
+**Windows でもドライバの取り合いがある。**WebUSB から開けるのは WinUSB が
+割り当たった機器だけである。2026-09-25、PX-Q3U4 に製造元の BDA ドライバが
+割り当たり、ブラウザから見えなくなった（そのドライバ自体も読み込みに
+失敗していた）。デバイスマネージャーで割り当てを確かめ、WinUSB に戻す。
 
 ## 未確認
 
@@ -95,6 +131,7 @@ Linux で `px4_drv` や `dvb_usb_*` が読み込まれている場合はイン�
 - **Windows 以外での長時間運転**、切断・再接続。31分の連続視聴とチューナーの
   抜き差しは Windows でしか通していない。
 - **macOS、ChromeOS。**
+- **PX-W3U4、PX-MLT5PE、DTV02A-5TS-P**。上の「対応チューナー」。報告を募集している。
 - **PX-S1UD**。対応を取り下げた。理由は docs/FINDINGS.md 28章。
 
 ## 別の端末から試すとき

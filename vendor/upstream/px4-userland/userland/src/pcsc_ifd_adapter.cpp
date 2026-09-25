@@ -20,9 +20,12 @@ using namespace ipc::posix;
 constexpr std::uint32_t kRequestTimeoutMs = 4000U;
 constexpr std::string_view kDevicePrefix = "px4-userland:";
 
+// The px4d instance: a 14-digit PX-Q3U4 base serial or a 15-digit
+// PX-MLT5PE/DTV02A-5TS-P serial (identity.h valid_device_instance).  The IFD
+// stays free of the device core, so the rule is restated here.
 bool valid_serial(std::string_view value) noexcept
 {
-    if (value.size() != 14U) return false;
+    if (value.size() != 14U && value.size() != 15U) return false;
     for (const char character : value) {
         if (character < '0' || character > '9') return false;
     }
@@ -475,7 +478,7 @@ IfdResult IfdAdapter::get_capability(std::uint64_t lun, std::uint32_t tag,
     std::lock_guard<std::mutex> lock(mutex_);
     if (!valid_lun(lun) || !channel_open()) return IfdResult::no_such_device;
     static constexpr char vendor[] = "Khronos31";
-    static constexpr char type[] = "PX-Q3U4 via px4d";
+    static constexpr char type[] = "PX-Q3U4/PX-MLT5PE via px4d";
     switch (tag) {
     case kTagIfdAtr:
     case kAttrAtrString:

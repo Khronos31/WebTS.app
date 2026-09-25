@@ -77,6 +77,9 @@ enum class ErrorCode : std::uint32_t {
 enum class System : std::uint8_t {
     ISDB_T = 1U,
     ISDB_S = 2U,
+    // LIST receiver capability only: the receiver selects ISDB-T or ISDB-S
+    // per tune (MLT5 family).  Never valid as a TUNE system.
+    ISDB_T_OR_S = 3U,
 };
 
 enum class ReceiverState : std::uint8_t {
@@ -85,7 +88,14 @@ enum class ReceiverState : std::uint8_t {
     tuned = 2U,
     streaming = 3U,
     error = 4U,
+    // STATUS slot beyond the enclosure's receiver count.
+    absent = 5U,
 };
+
+// Receiver counts carried by LIST.  Each count has one fixed record table.
+inline constexpr std::uint8_t kQ3U4ReceiverCount = 8U;
+inline constexpr std::uint8_t kW3U4ReceiverCount = 4U;
+inline constexpr std::uint8_t kMlt5PeReceiverCount = 5U;
 
 enum class ShareMode : std::uint8_t {
     shared = 1U,
@@ -155,8 +165,14 @@ struct ListResponsePayload final {
     ByteView serial_utf8;
     std::uint8_t ready;
     std::uint8_t usb_present_mask;
+    // Only the first receiver_count records are meaningful and encoded.
     std::array<ReceiverRecord, kReceiverCount> receivers;
+    std::uint8_t receiver_count = kQ3U4ReceiverCount;
 };
+
+// The fixed LIST record table for a receiver count accepted by LIST.
+Result<std::array<ReceiverRecord, kReceiverCount>> receiver_records(
+    std::uint8_t receiver_count) noexcept;
 
 struct StatusResponsePayload final {
     std::uint64_t generation;
