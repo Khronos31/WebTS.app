@@ -12,6 +12,7 @@
 import type { ChannelItem, OnAirScheduleItem, ProgramItem } from './types';
 import { readChannels, readPrograms } from './channel-store';
 import { getEnabledChannelIds } from './enabled-channels';
+import { isStaleProgram } from './schedule-merge';
 
 /**
  * 同期に読みたい画面のための控え。視聴画面は DOM を組み立てる時点で
@@ -167,9 +168,15 @@ export async function loadScheduleRange(
   }));
 }
 
-/** 保存している番組情報が何時から何時までを覆っているか。番組表の範囲決めに使う。 */
+/**
+ * 保存している番組情報が何時から何時までを覆っているか。番組表の範囲決めに使う。
+ *
+ * **もう抱えておかなくてよい番組は数えない。**消すのは次に保存するときなので、
+ * それまで残っている古い番組で、日付の選択に過去の日が並ぶ。
+ */
 export async function programCoverage(): Promise<{ from: number; to: number } | null> {
-  const programs = await readPrograms();
+  const now = Date.now();
+  const programs = (await readPrograms()).filter((program) => !isStaleProgram(program, now));
   if (programs.length === 0) return null;
   let from = Number.POSITIVE_INFINITY;
   let to = Number.NEGATIVE_INFINITY;

@@ -1,7 +1,7 @@
 {
   "name": "webts-app",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.2.0",
   "type": "module",
   "license": "GPL-2.0-only",
   "engines": {
@@ -39,6 +39,8 @@
     "vitest": "5.0.0"
   },
   "dependencies": {
-    "aribb24.js": "2.0.25"
+    "aribb24.js": "2.0.25",
+    "web-bml": "1.0.1",
+    "web-bml-fonts": "1.0.0"
   }
 }

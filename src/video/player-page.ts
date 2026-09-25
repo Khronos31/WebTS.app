@@ -1,6 +1,9 @@
 import { AudioPlayer } from './audio';
 import { CaptionOverlay } from './captions';
 import type { PlayerMessage, PlayerRequest } from './player-worker';
+import {
+  DataBroadcast, installDataBroadcastConsole, setCurrentDataBroadcast,
+} from '../epg-ui/data-broadcast';
 
 // 見た目は作り込まない。素の要素のみ。
 //
@@ -43,6 +46,12 @@ url.size = 40;
 url.placeholder = '/local/webts-....ts';
 form.append(field('または URL:', url));
 
+// データ放送を重ねる。キーは JS コンソールの webts.bml.key('d') などで送る。
+const withBml = document.createElement('input');
+withBml.type = 'checkbox';
+form.append(field('データ放送:', withBml));
+installDataBroadcastConsole();
+
 const play = document.createElement('button');
 play.type = 'submit';
 play.textContent = '再生';
@@ -81,7 +90,9 @@ function render(rows: [string, string][]): void {
  * それをそのまま見せると横に潰れる。標本比 4:3 を掛けた 16:9 を
  * aspect-ratio として入れ物に与え、canvas は入れ物いっぱいに伸ばす。
  */
-function freshScreen(): { canvas: OffscreenCanvas; overlay: HTMLDivElement } {
+function freshScreen(): {
+  canvas: OffscreenCanvas; element: HTMLCanvasElement; overlay: HTMLDivElement;
+} {
   const overlay = document.createElement('div');
   overlay.style.position = 'relative';
   overlay.style.width = '100%';
@@ -96,7 +107,7 @@ function freshScreen(): { canvas: OffscreenCanvas; overlay: HTMLDivElement } {
   canvas.style.display = 'block';
   overlay.append(canvas);
   screen.replaceChildren(overlay);
-  return { canvas: canvas.transferControlToOffscreen(), overlay };
+  return { canvas: canvas.transferControlToOffscreen(), element: canvas, overlay };
 }
 
 /** sequence が分かった時点で、標本比を含めた表示比を入れ物へ与える。 */
@@ -111,6 +122,7 @@ function applyAspect(overlay: HTMLDivElement, sequence: {
 let worker: Worker | null = null;
 let audio: AudioPlayer | null = null;
 let captions: CaptionOverlay | null = null;
+let dataBroadcast: DataBroadcast | null = null;
 let clockTimer = 0;
 
 /** Worker が消費したぶんだけ送る。溜め込ませない。 */
@@ -144,13 +156,36 @@ form.addEventListener('submit', async (event) => {
     // AudioContext は利用者の操作から作る。ここは submit の中なので許される。
     audio.start();
     const active_audio = audio;
-    const { canvas, overlay } = freshScreen();
+    const { canvas, element, overlay } = freshScreen();
     // 字幕の座標系は 960x540。表示寸法は renderer が CSS 側で合わせる。
     captions = new CaptionOverlay(overlay, 960, 540);
     const active_captions = captions;
     let aspectApplied = false;
     const active = new Worker(new URL('./player-worker.ts', import.meta.url), { type: 'module' });
     worker = active;
+
+    dataBroadcast?.destroy();
+    dataBroadcast = null;
+    if (withBml.checked) {
+      const created = await DataBroadcast.create({
+        container: overlay,
+        setVideoRect: (rect) => {
+          const style = element.style;
+          style.position = rect === null ? '' : 'absolute';
+          style.left = rect === null ? '' : `${rect.left * 100}%`;
+          style.top = rect === null ? '' : `${rect.top * 100}%`;
+          style.width = rect === null ? '100%' : `${rect.width * 100}%`;
+          style.height = rect === null ? '100%' : `${rect.height * 100}%`;
+        },
+      });
+      dataBroadcast = created;
+      setCurrentDataBroadcast({
+        overlay: () => created,
+        enable: () => Promise.resolve(),
+        disable: () => { created.destroy(); },
+      });
+    }
+    const active_bml = dataBroadcast;
 
     let offset = 0;
     let header: [string, string][] = [
@@ -177,6 +212,8 @@ form.addEventListener('submit', async (event) => {
         active_captions.push(data.pts, new Uint8Array(data.bytes));
         return;
       }
+      if (data.kind === 'bml') { active_bml?.emit(data.messages); return; }
+      if (data.kind === 'bml-failed') { active_bml?.failed(data.message); return; }
       if (data.kind === 'failed') {
         status.textContent = `失敗: ${data.message}`;
         play.disabled = false;
@@ -210,6 +247,7 @@ form.addEventListener('submit', async (event) => {
     });
 
     send({ kind: 'init', canvas }, [canvas]);
+    if (active_bml !== null) send({ kind: 'bml', enabled: true });
     clearInterval(clockTimer);
     clockTimer = self.setInterval(() => {
       const pts = active_audio.clockPts();
@@ -240,6 +278,9 @@ export function progressRows(
       ? `自前の刻み（伸縮 ${(data.rateTrim * 100).toFixed(1)} %）`
       : `音声の時計（ずれ ${data.avSkewMs.toFixed(0)} ms）`],
     ['未復号の映像 ES', `${(data.pendingEsBytes / 1024).toFixed(0)} KiB`],
+    ['フレーム間隔の最大', `${data.maxFrameGapMs.toFixed(0)} ms（直近 30 フレーム）`],
+    ['データ放送の解読', `最大 ${data.bmlMaxMs.toFixed(1)} ms、計 ${data.bmlTotalMs.toFixed(1)} ms`
+      + '（直近 30 フレーム）'],
     ['分離カウンタ', JSON.stringify(data.counters)],
   ];
 }

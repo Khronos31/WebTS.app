@@ -24,6 +24,10 @@ import type { Tuning } from './tuning';
 import { STAGE_LABEL } from './stage-label';
 import { allowLnb15v } from './lnb-setting';
 import { ChannelScan } from './channel-scan';
+import {
+  DataBroadcast, dataBroadcastWanted, releaseCurrentDataBroadcast, setCurrentDataBroadcast,
+  type DataBroadcastControl, type DataBroadcastHost,
+} from './data-broadcast';
 
 const POLL_WORDS = 17;
 /** 1回の drain で取り出す上限。live は 2 MB/s 程度なので十分余る。 */
@@ -73,6 +77,14 @@ export interface LiveStats {
   readonly audioDropped: number;
   readonly captions: number;
   readonly demux: Record<string, number>;
+  /** 直近 30 フレームで、描いたフレームどうしの間隔の最大 (ms)。 */
+  readonly maxFrameGapMs: number;
+  /** 直近 30 フレームで、データ放送の解読1回あたりの最大 (ms)。 */
+  readonly bmlMaxMs: number;
+  /** 音声の時計を置き直した回数（累計）。音が途切れると増える。 */
+  readonly audioReanchors: number;
+  /** 映像が時計に合わせ直した回数（累計）。 */
+  readonly videoResyncs: number;
 }
 
 export interface LiveSessionOptions {
@@ -86,6 +98,8 @@ export interface LiveSessionOptions {
   readonly onCaption?: ((text: string) => void) | undefined;
   readonly onStats?: ((stats: LiveStats) => void) | undefined;
   readonly onEnded?: ((reason: string) => void) | undefined;
+  /** データ放送を重ねる先。無ければデータ放送は出さない。 */
+  readonly dataBroadcast?: DataBroadcastHost | undefined;
 }
 
 /**
@@ -169,7 +183,17 @@ export class LiveSession {
   #stopped = false;
   #paused = false;
   #frames = 0;
+  /** 「映像が出ません」を出したか。映像が出たら消すために覚えておく。 */
+  #silentWarned = false;
   #stats: LiveStats | null = null;
+  #dataBroadcast: DataBroadcast | null = null;
+  #dataBroadcastStarting: Promise<void> | null = null;
+  /** コンソール（`webts.bml`）から、いまの視聴のデータ放送を操作する口。 */
+  readonly #dataBroadcastControl: DataBroadcastControl = {
+    overlay: () => this.#dataBroadcast,
+    enable: () => this.enableDataBroadcast(),
+    disable: () => { this.disableDataBroadcast(); },
+  };
 
   private constructor(
     module: Q3U4Module,
@@ -263,10 +287,41 @@ export class LiveSession {
     return this.#stats;
   }
 
+  /**
+   * データ放送を出し始める。BML ブラウザを作ってから Worker に解読を頼む。
+   * 逆にすると、最初に届いたメッセージ（PMT など）を受け取る先が無い。
+   */
+  enableDataBroadcast(): Promise<void> {
+    const host = this.#options.dataBroadcast;
+    if (this.#stopped || host === undefined || this.#dataBroadcast !== null) {
+      return Promise.resolve();
+    }
+    this.#dataBroadcastStarting ??= DataBroadcast.create(host).then((overlay) => {
+      this.#dataBroadcastStarting = null;
+      if (this.#stopped) { overlay.destroy(); return; }
+      this.#dataBroadcast = overlay;
+      const request: PlayerRequest = { kind: 'bml', enabled: true };
+      this.#worker.postMessage(request);
+    });
+    return this.#dataBroadcastStarting;
+  }
+
+  disableDataBroadcast(): void {
+    if (this.#dataBroadcast === null) return;
+    if (!this.#stopped) {
+      const request: PlayerRequest = { kind: 'bml', enabled: false };
+      this.#worker.postMessage(request);
+    }
+    this.#dataBroadcast.destroy();
+    this.#dataBroadcast = null;
+  }
+
   stop(): void {
     if (this.#stopped) return;
     this.#stopped = true;
     if (active === this) active = null;
+    this.disableDataBroadcast();
+    releaseCurrentDataBroadcast(this.#dataBroadcastControl);
     clearInterval(this.#retry);
     clearInterval(this.#poll);
     clearInterval(this.#clock);
@@ -295,6 +350,11 @@ export class LiveSession {
       ? { kind: 'init', canvas: options.canvas }
       : { kind: 'init', canvas: options.canvas, programNumber: options.serviceId };
     this.#worker.postMessage(init, [options.canvas]);
+
+    if (options.dataBroadcast !== undefined) {
+      setCurrentDataBroadcast(this.#dataBroadcastControl);
+      if (dataBroadcastWanted()) void this.enableDataBroadcast();
+    }
 
     // 衛星は TSID を指定しないと、中継器のどの TS が出るか決まらない。
     // 走査で控えていない局は、周波数だけで合わせに行かない。
@@ -353,11 +413,23 @@ export class LiveSession {
       case 'caption':
         this.#captions.push(message.pts, new Uint8Array(message.bytes));
         return;
+      case 'bml':
+        this.#dataBroadcast?.emit(message.messages);
+        return;
+      case 'bml-failed':
+        this.#dataBroadcast?.failed(message.message);
+        return;
       case 'started':
         this.#options.onStatus?.('');
         return;
       case 'progress':
         this.#frames = message.frames;
+        // 遅れて映像が出たら、出しておいた「映像が出ません」を消す。
+        // 消さないと、映っているのに出ないと言い続ける。
+        if (this.#silentWarned && message.frames > 0) {
+          this.#silentWarned = false;
+          this.#options.onStatus?.('');
+        }
         this.#publishStats(message);
         return;
       case 'failed':
@@ -386,6 +458,10 @@ export class LiveSession {
       audioDropped: audio.dropped,
       captions: this.#captions.stats().rendered,
       demux: message.counters,
+      maxFrameGapMs: message.maxFrameGapMs,
+      bmlMaxMs: message.bmlMaxMs,
+      audioReanchors: audio.reanchors,
+      videoResyncs: message.resyncs,
     };
     this.#options.onStats?.(this.#stats);
   }
@@ -431,6 +507,7 @@ export class LiveSession {
     const unpurchased = words[14] ?? -1;
     const reading = words[5] ?? 0;
     if (state === 1 && stage >= 11 && this.#frames === 0 && reading > kSilentMs) {
+      this.#silentWarned = true;
       this.#options.onStatus?.(unpurchased > 0
         ? `映像が出ません。この TS には契約対象外の番組が含まれます`
           + `（未契約の ECM ${unpurchased} 件）。`

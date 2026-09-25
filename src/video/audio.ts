@@ -13,6 +13,8 @@
 // ずれが許容を超えたら置き直す。置き直しは音が飛ぶので、回数を数えて出す。
 
 const SAMPLE_RATE = 48_000;
+/** ブラウザが「利用者の操作」とみなし、音を鳴らし始めてよくなるイベント。 */
+const UNLOCK_EVENTS = ['pointerdown', 'pointerup', 'touchend', 'keydown'] as const;
 /** 最初の音を今からどれだけ先に置くか。詰め込みの余裕。 */
 const LEAD_SECONDS = 0.3;
 /** これより過去に置くことになったら置き直す。 */
@@ -141,6 +143,19 @@ export class AudioPlayer {
     if (this.#context !== null) return;
     const context = new AudioContext({ sampleRate: SAMPLE_RATE, latencyHint: 'playback' });
     void context.resume();
+    // **操作の外から始まったときは、最初の操作で鳴らし始める。**視聴画面を
+    // 開いたまま再読み込みすると、利用者の操作が無いまま視聴が始まり、
+    // ブラウザは音を止めたままにする。音が出ず、映像も止まった時計に
+    // 合わせてカクついた。一覧から選局し直すと直った（実機、2026-09-25）。
+    // この修正の後、再読み込みしても映像は滑らかで、クリックで音が出た。
+    if (context.state !== 'running') {
+      for (const type of UNLOCK_EVENTS) {
+        globalThis.addEventListener(type, this.#unlock, { capture: true, passive: true });
+      }
+      context.addEventListener('statechange', () => {
+        if (context.state === 'running') this.#removeUnlock();
+      });
+    }
     const gain = context.createGain();
     gain.gain.value = this.#level();
     gain.connect(context.destination);
@@ -150,6 +165,17 @@ export class AudioPlayer {
       output: (data) => this.#play(data),
       error: () => { this.#recover(); },
     });
+  }
+
+  /** 利用者の操作の中で呼ばれる。ここでなら resume() が許される。 */
+  readonly #unlock = (): void => {
+    void this.#context?.resume();
+  };
+
+  #removeUnlock(): void {
+    for (const type of UNLOCK_EVENTS) {
+      globalThis.removeEventListener(type, this.#unlock, { capture: true });
+    }
   }
 
   /**
@@ -267,7 +293,11 @@ export class AudioPlayer {
 
   /** いま鳴っている位置を PTS で返す。未再生なら null。 */
   clockPts(): number | null {
-    if (!this.#anchored || this.#context === null) return null;
+    // 止まっている間の currentTime は進まない。それを時計として渡すと、映像が
+    // 止まった時計に合わせようとしてカクつく。時計が無ければ映像は自分で刻む。
+    if (!this.#anchored || this.#context === null || this.#context.state !== 'running') {
+      return null;
+    }
     return this.#anchorPts + (this.#context.currentTime - this.#anchorTime) * 90_000;
   }
 
@@ -287,6 +317,7 @@ export class AudioPlayer {
   async close(): Promise<void> {
     if (this.#closed) return;
     this.#closed = true;
+    this.#removeUnlock();
     try { this.#decoder?.close(); } catch { /* 既に閉じている */ }
     this.#decoder = null;
     this.#gain = null;
@@ -298,6 +329,13 @@ export class AudioPlayer {
   #play(data: AudioData): void {
     const context = this.#context;
     if (context === null || this.#closed) { data.close(); return; }
+    // 鳴っていない（ブラウザが止めている）間は並べない。並べると、鳴り始めた
+    // ときに古い音をまとめて鳴らす。鳴り始めてから置き直す。
+    if (context.state !== 'running') {
+      this.#anchored = false;
+      data.close();
+      return;
+    }
     try {
       const pts = (data.timestamp / 1_000_000) * 90_000;
       const seconds = data.numberOfFrames / data.sampleRate;

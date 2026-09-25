@@ -19,6 +19,7 @@
 // 目に見えない範囲で吸収できる。PCR から時計を復元するのが本筋だが、
 // 滞留を見るほうが仕組みが少なく、入力が途切れても壊れない。
 
+import type { ResponseMessage } from 'web-bml/protocol';
 import { STREAM_TYPE, TsDemuxer, type Program } from '../ts/demux';
 import { Mpeg2Decoder, PICTURE_TAGS, STEP, type Mpeg2Sequence } from './mpeg2';
 
@@ -43,6 +44,11 @@ export interface PlayerProgress {
   readonly avSkewMs: number | null;
   readonly sequence: Mpeg2Sequence | null;
   readonly counters: Record<string, number>;
+  /** 前回の報告からの、描いたフレームどうしの間隔の最大 (ms)。カクつきの目安。 */
+  readonly maxFrameGapMs: number;
+  /** 前回の報告からの、データ放送の解読1回あたりの最大と合計 (ms)。映像と同じ Worker で動く。 */
+  readonly bmlMaxMs: number;
+  readonly bmlTotalMs: number;
 }
 
 /** 音声は main でしか鳴らせないので、ADTS をそのまま渡す。 */
@@ -59,12 +65,24 @@ export interface PlayerCaption {
   readonly bytes: ArrayBuffer;
 }
 
+/**
+ * データ放送。web-bml の `decodeTS()` が出したものを、chunk ごとにまとめて渡す。
+ * BML ブラウザは DOM に描くので main に置くしかない。
+ */
+export interface PlayerBml {
+  readonly kind: 'bml';
+  readonly messages: readonly ResponseMessage[];
+}
+
+/** データ放送の解読が止まった。映像は止めない。 */
+export interface PlayerBmlFailed { readonly kind: 'bml-failed'; readonly message: string }
+
 export interface PlayerWant { readonly kind: 'want' }
 export interface PlayerDone { readonly kind: 'done'; readonly frames: number }
 export interface PlayerFailed { readonly kind: 'failed'; readonly message: string }
 
 export type PlayerMessage =
-  PlayerStarted | PlayerProgress | PlayerAudio | PlayerCaption
+  PlayerStarted | PlayerProgress | PlayerAudio | PlayerCaption | PlayerBml | PlayerBmlFailed
   | PlayerWant | PlayerDone | PlayerFailed;
 
 export type PlayerRequest =
@@ -83,9 +101,14 @@ export type PlayerRequest =
   /** 音声の時計。これが来ている間は映像はこれに追随する。 */
   | { readonly kind: 'clock'; readonly pts: number }
   | { readonly kind: 'paused'; readonly value: boolean }
+  /** データ放送の解読を始める・やめる。既定ではしない。 */
+  | { readonly kind: 'bml'; readonly enabled: boolean }
   | { readonly kind: 'end' };
 
 const post = (message: PlayerMessage): void => { self.postMessage(message); };
+
+/** データ放送の解読にかかった時間。進み具合の報告のたびに読んで戻す。 */
+const bmlTiming = { maxMs: 0, totalMs: 0 };
 
 function sleep(milliseconds: number): Promise<void> {
   return new Promise((resolve) => { setTimeout(resolve, milliseconds); });
@@ -142,6 +165,8 @@ class Player {
   #trim = 0;
   #sequence: Mpeg2Sequence | null = null;
   #sized = false;
+  #lastDrawAt = 0;
+  #maxFrameGapMs = 0;
   /** 一時停止。描画だけを止める。受信と復号は続ける。 */
   #paused = false;
 
@@ -348,6 +373,11 @@ class Player {
       });
       this.#context.drawImage(picture, 0, 0, this.#canvas.width, this.#canvas.height);
       picture.close();
+      const drawnAt = performance.now();
+      if (this.#lastDrawAt !== 0) {
+        this.#maxFrameGapMs = Math.max(this.#maxFrameGapMs, drawnAt - this.#lastDrawAt);
+      }
+      this.#lastDrawAt = drawnAt;
     }
 
     this.#frames += 1;
@@ -362,7 +392,13 @@ class Player {
         avSkewMs: this.#avSkewMs,
         sequence: this.#sequence,
         counters: { ...this.#demuxer.counters },
+        maxFrameGapMs: this.#maxFrameGapMs,
+        bmlMaxMs: bmlTiming.maxMs,
+        bmlTotalMs: bmlTiming.totalMs,
       });
+      this.#maxFrameGapMs = 0;
+      bmlTiming.maxMs = 0;
+      bmlTiming.totalMs = 0;
     }
   }
 
@@ -427,20 +463,97 @@ class Player {
   }
 }
 
+/**
+ * データ放送の解読。**映像とは別に TS を丸ごと読む。**映像の分離器は選んだ
+ * PID しか通さないが、データ放送はカルーセル（DSM-CC）、BIT、TOT など
+ * 別の PID に載っている。web-bml の `decodeTS()` に TS をそのまま流す。
+ *
+ * web-bml は使うときだけ読む。使わない視聴では Worker の起動を重くしない。
+ * 読み終わる前に来た chunk は捨てる。カルーセルは繰り返し送られてくる。
+ */
+class BmlDecoder {
+  #reader: { push(block: Uint8Array): void; close(): void } | null = null;
+  #pending: ResponseMessage[] = [];
+  #closed = false;
+
+  constructor(serviceId: number | null) {
+    import('web-bml/ts').then(({ decodeTS }) => {
+      if (this.#closed) return;
+      const send = (message: ResponseMessage): void => { this.#pending.push(message); };
+      this.#reader = serviceId === null
+        ? decodeTS({ sendCallback: send })
+        : decodeTS({ sendCallback: send, serviceId });
+    }).catch((error: unknown) => { this.#fail(error); });
+  }
+
+  push(bytes: Uint8Array): void {
+    if (this.#reader === null) return;
+    const started = performance.now();
+    try {
+      this.#reader.push(bytes);
+    } catch (error) {
+      this.#fail(error);
+      return;
+    }
+    this.#flush();
+    const elapsed = performance.now() - started;
+    bmlTiming.maxMs = Math.max(bmlTiming.maxMs, elapsed);
+    bmlTiming.totalMs += elapsed;
+  }
+
+  close(): void {
+    this.#closed = true;
+    this.#reader?.close();
+    this.#reader = null;
+    this.#pending = [];
+  }
+
+  /**
+   * chunk 1つぶんをまとめて送る。**PCR は最後の1つだけ残す。**chunk は
+   * 数百 ms ぶんの TS なので PCR が何十個も入っているが、BML 側が使うのは
+   * 今の時刻だけである。
+   */
+  #flush(): void {
+    if (this.#pending.length === 0) return;
+    let lastPcr = -1;
+    this.#pending.forEach((message, index) => { if (message.type === 'pcr') lastPcr = index; });
+    const messages = this.#pending.filter(
+      (message, index) => message.type !== 'pcr' || index === lastPcr);
+    this.#pending = [];
+    post({ kind: 'bml', messages });
+  }
+
+  #fail(error: unknown): void {
+    this.close();
+    post({ kind: 'bml-failed', message: error instanceof Error ? error.message : String(error) });
+  }
+}
+
 let player: Player | null = null;
+let wantedProgram: number | null = null;
+let bml: BmlDecoder | null = null;
 
 self.addEventListener('message', (event: MessageEvent<PlayerRequest>) => {
   const request = event.data;
   try {
+    if (request.kind === 'bml') {
+      bml?.close();
+      bml = request.enabled ? new BmlDecoder(wantedProgram) : null;
+      return;
+    }
+    if (request.kind === 'chunk') {
+      const bytes = new Uint8Array(request.bytes);
+      // どちらも bytes を読むだけで書き換えない。
+      bml?.push(bytes);
+      player?.push(bytes, request.backlogBytes ?? 0);
+      return;
+    }
     if (request.kind === 'init') {
+      wantedProgram = request.programNumber ?? null;
       player = new Player(request.canvas, request.programNumber ?? null);
       player.run().catch((error: unknown) => {
         post({ kind: 'failed', message: error instanceof Error ? error.message : String(error) });
       });
-      return;
-    }
-    if (request.kind === 'chunk') {
-      player?.push(new Uint8Array(request.bytes), request.backlogBytes ?? 0);
       return;
     }
     if (request.kind === 'clock') { player?.clock(request.pts); return; }

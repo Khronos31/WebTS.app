@@ -9,6 +9,7 @@
 import { loadScheduleRange, programCoverage, type ChannelSchedule } from '../channel-source';
 import { onRefreshStatus } from '../epg-refresh';
 import { readScheduleFetchedAt } from '../channel-store';
+import { KEEP_ENDED_MS } from '../schedule-merge';
 import type { ProgramDialog } from '../components/program-dialog';
 import type { StreamDialog } from '../components/stream-dialog';
 import type { BroadcastType, ChannelItem, ProgramItem } from '../types';
@@ -91,10 +92,14 @@ export function calculateScheduleBounds(
   const today = new Date(now);
   today.setHours(0, 0, 0, 0);
 
-  // 過去の下限: 本日0時、または保存されている番組の最過去の日の0時
+  // 過去の下限: 本日0時、または保存されている番組の最過去の日の0時。
+  // **ただし「終わった番組を残す時間」より前の日までは戻らない。**日付を
+  // またいで未明に終わった番組が残っているだけで、朝になっても「昨日」を
+  // 丸ごと選べた（実機、7:37 に、昨夜始まり今日の 2〜4 時に終わった番組で）。深夜なら
+  // 昨日を残し、ついさっきまでの番組を見返せるようにする。
   let minMidnight = today.getTime();
   if (coverage && coverage.from < minMidnight) {
-    const covStartDay = new Date(coverage.from);
+    const covStartDay = new Date(Math.max(coverage.from, now - KEEP_ENDED_MS));
     covStartDay.setHours(0, 0, 0, 0);
     minMidnight = covStartDay.getTime();
   }

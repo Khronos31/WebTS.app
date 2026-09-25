@@ -98,6 +98,30 @@ function wasmModules(): Plugin {
   };
 }
 
+/**
+ * データ放送のフォント（web-bml-fonts、Apache-2.0）のライセンスを配信物へ添える。
+ *
+ * フォント本体は `?url` の import で `assets/` へ出る。Apache-2.0 は受け取った人に
+ * ライセンス本文を渡すことを求めるので、同じ配信物へ入れる。README には、
+ * 太丸ゴシックが原本を機械的に太らせた派生物であることが書いてある
+ * （第4条(b)の変更告知にあたる）。
+ */
+function fontLicenses(): Plugin {
+  return {
+    name: 'webts-font-licenses',
+    apply: 'build',
+    closeBundle() {
+      const root = import.meta.dirname;
+      const from = resolve(root, 'node_modules', 'web-bml-fonts');
+      const to = resolve(root, 'dist', 'licenses', 'web-bml-fonts');
+      mkdirSync(to, { recursive: true });
+      for (const file of ['LICENSE.txt', 'AUTHORS.txt', 'README.md']) {
+        cpSync(resolve(from, file), resolve(to, file));
+      }
+    },
+  };
+}
+
 function localCapture(): Plugin {
   const directory = resolve(import.meta.dirname, 'local');
   return {
@@ -153,7 +177,18 @@ function localCapture(): Plugin {
 }
 
 export default defineConfig({
-  plugins: [localCapture(), wasmModules()],
+  plugins: [localCapture(), wasmModules(), fontLicenses()],
+  resolve: {
+    alias: [
+      // **Apache-2.0 の `crc-32` を成果物へ入れない。**web-bml が PNG の CRC に
+      // 使うだけなので、同じ値を返す自前の実装へ向ける（src/bml/crc32.ts）。
+      { find: /^crc-32$/, replacement: resolve(import.meta.dirname, 'src/bml/crc32.ts') },
+    ],
+  },
+  // web-bml は Worker と、呼ばれてから読む動的 import からしか使わないので、
+  // dev サーバーの事前走査では見つからない。途中で見つかると依存を束ね直して
+  // ページを読み直すので、最初から束ねておく。
+  optimizeDeps: { include: ['web-bml', 'web-bml/ts'] },
   build: {
     target: 'es2022',
     outDir: 'dist',

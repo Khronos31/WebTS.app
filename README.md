@@ -7,6 +7,11 @@ PX-Q3U4 を利用者の端末へ直接つなぎ、WebUSB 対応ブラウザだ�
 地上波・BS・CS の視聴、字幕、チャンネル走査、番組表の取得が Windows・Linux・
 macOS・Android で動く。M0〜M3 の受け入れ条件は満たしている（[受け入れ結果](docs/ACCEPTANCE.md)）。
 
+0.2.0 でデータ放送（BML）を足した。視聴を始めると裏で受信し、d ボタンで開く。
+**放送で届く分だけを扱い、双方向（通信）には対応しない**。局のサーバーへは何も
+送らない。地上波・BS・110度CS を Windows の Chrome と PX-Q3U4 で確かめた
+（[docs/FINDINGS.md](docs/FINDINGS.md) の36章）。
+
 ## 状態
 
 | 項目 | 内容 |
