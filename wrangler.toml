@@ -1,8 +1,7 @@
 # Cloudflare Pages（webts-app）の設定。deploy.yml の `wrangler pages deploy` が読む。
 #
-# **beta の動作報告の保存先（D1）は Preview だけに結び付ける。**本番には
-# 結び付けないので、本番の functions/api/report.ts は何も保存できない
-# （本番のビルドはそもそも送らない。src/reports/beta-reports.ts）。
+# 動作報告の保存先（D1）は本番と Preview（beta）の両方に結び付ける。本番は
+# 利用者がオンにしたときだけ送る（src/reports/reports.ts）。
 #
 # database_id は秘密ではない。書き込めるのはこのプロジェクトの Functions だけ。
 
@@ -15,5 +14,3 @@ binding = "REPORTS_DB"
 database_name = "webts-beta-reports"
 database_id = "25a7c0f0-70d6-42ef-86e3-646f6df9bd40"
 
-[env.production]
-d1_databases = []

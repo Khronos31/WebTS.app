@@ -3,7 +3,7 @@
 
 import { describeEnvironment } from '../../platform/environment';
 import { APP_VERSION } from '../version';
-import { REPORTS_BUILT } from '../../reports/beta-reports';
+import { IS_BETA_BUILD } from '../../reports/reports';
 
 const SOURCE_URL = 'https://github.com/Khronos31/WebTS.app';
 
@@ -129,9 +129,9 @@ export class AboutView {
           </a>
         </div>
         <div style="font-size: 0.8125rem; color: var(--text-secondary); background: var(--surface-color-variant); padding: 12px; border-radius: 6px;">
-          ${REPORTS_BUILT
+          ${IS_BETA_BUILD
             ? '<strong>プライバシー保護:</strong> 本アプリケーションは純粋なクライアントサイド駆動です。受信した放送波TSパケットやスマートカードとの通信データはすべて端末内で完結して処理されます（IT930x ファームウェアは本アプリの配布サーバから取得します。また、beta 版では動作実績の確認のため個人情報を含まない動作報告を送信します。設定ページから無効化できます）。'
-            : '<strong>プライバシー保護:</strong> 本アプリケーションは純粋なクライアントサイド駆動です。受信した放送波TSパケットやスマートカードとの通信データはすべて端末内で完結して処理され、外部サーバーへ送信されることはありません（IT930x ファームウェアは本アプリの配布サーバから取得しますが、端末側のデータが送信されることはありません）。'}
+            : '<strong>プライバシー保護:</strong> 本アプリケーションは純粋なクライアントサイド駆動です。受信した放送波TSパケットやスマートカードとの通信データはすべて端末内で完結して処理されます（IT930x ファームウェアは本アプリの配布サーバから取得します。また、動作報告をオンにした場合のみ、動作実績確認のため個人情報を含まない動作報告を送信します。設定ページからいつでも切り替えられます）。'}
         </div>
       </div>
     `;

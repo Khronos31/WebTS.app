@@ -74,9 +74,17 @@ describe('report endpoint', () => {
       'view', 'GR', 'ok', -1, 0]);
   });
 
+  it('accepts reports from production too (opt-in there)', async () => {
+    const { env, rows } = fakeDatabase();
+    for (const host of ['webts.app', 'webts-app.pages.dev']) {
+      expect((await handleReport(post(host, JSON.stringify(ok)), env)).status).toBe(204);
+    }
+    expect(rows).toHaveLength(2);
+  });
+
   it('does not accept reports on other hosts', async () => {
     const { env, rows } = fakeDatabase();
-    for (const host of ['webts.app', 'webts-app.pages.dev', 'evil.example']) {
+    for (const host of ['evil.example', 'webts.app.evil.example', '87acda07.webts-app.pages.dev']) {
       expect((await handleReport(post(host, JSON.stringify(ok)), env)).status).toBe(404);
     }
     expect(rows).toHaveLength(0);

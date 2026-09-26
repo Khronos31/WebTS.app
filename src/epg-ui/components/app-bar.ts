@@ -1,8 +1,9 @@
 import {
-  REPORTS_BUILT,
+  IS_BETA_BUILD,
   reportsEnabled,
+  reportsIndicatorVisible,
   subscribeReports,
-} from '../../reports/beta-reports';
+} from '../../reports/reports';
 
 export interface AppBarOptions {
   title: string;
@@ -64,17 +65,25 @@ export class AppBar {
       this.setRefreshAction(options.onRefresh);
     }
 
-    if (REPORTS_BUILT) {
+    {
+      // beta は常に出す。本番は送っているあいだだけ出す（reports.ts）。
       const reportsBtn = document.createElement('button');
       reportsBtn.type = 'button';
       reportsBtn.className = 'reports-status-pill';
       const updateReportsBtn = () => {
         const enabled = reportsEnabled();
-        reportsBtn.textContent = enabled ? 'ログ収集: 許可' : 'ログ収集: 停止';
-        reportsBtn.classList.toggle('stopped', !enabled);
-        reportsBtn.setAttribute('title', enabled
-          ? 'beta版の動作報告: 許可（クリックで設定へ）'
-          : 'beta版の動作報告: 停止（クリックで設定へ）');
+        reportsBtn.style.display = reportsIndicatorVisible() ? '' : 'none';
+        if (IS_BETA_BUILD) {
+          reportsBtn.textContent = enabled ? 'ログ収集: 許可' : 'ログ収集: 停止';
+          reportsBtn.classList.toggle('stopped', !enabled);
+          reportsBtn.setAttribute('title', enabled
+            ? 'beta版の動作報告: 許可（クリックで設定へ）'
+            : 'beta版の動作報告: 停止（クリックで設定へ）');
+        } else {
+          reportsBtn.textContent = 'ログ収集中';
+          reportsBtn.classList.remove('stopped');
+          reportsBtn.setAttribute('title', '動作ログ収集中（クリックで設定へ）');
+        }
       };
       updateReportsBtn();
       reportsBtn.addEventListener('click', () => {

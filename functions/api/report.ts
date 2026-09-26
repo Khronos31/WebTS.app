@@ -1,11 +1,10 @@
-// beta 版の動作報告を受け取る（Cloudflare Pages Functions）。
+// 動作報告を受け取る（Cloudflare Pages Functions）。
 //
 // 受け取るのは src/reports/report-schema.ts が決めた項目だけで、1つでも
 // 違えば捨てる。**IP アドレスも User-Agent も保存しない。**日付は日単位にする。
 //
-// beta 以外のホストでは受け付けない。関数は本番のデプロイにも入るが、
-// 本番から報告が届くことはない（本番のビルドは送らない）ので、届いたら
-// 何かがおかしい。保存先（D1）の結び付けも beta（Preview）にだけある。
+// 受け付けるのは WebTS のホストだけ。本番は利用者がオンにしたとき（オプトイン）、
+// beta は既定で送る（src/reports/reports.ts）。どちらも同じ D1 に入る。
 
 import { parseReport } from '../../src/reports/report-schema';
 
@@ -22,11 +21,14 @@ export interface ReportEnv {
   readonly REPORTS_DB?: D1Database;
 }
 
-const BETA_HOSTS = new Set(['beta.webts.app', 'beta.webts-app.pages.dev']);
+const HOSTS = new Set([
+  'webts.app', 'webts-app.pages.dev',
+  'beta.webts.app', 'beta.webts-app.pages.dev',
+]);
 const MAX_BODY_BYTES = 1024;
 
 export async function handleReport(request: Request, env: ReportEnv): Promise<Response> {
-  if (!BETA_HOSTS.has(new URL(request.url).hostname) || env.REPORTS_DB === undefined) {
+  if (!HOSTS.has(new URL(request.url).hostname) || env.REPORTS_DB === undefined) {
     return new Response(null, { status: 404 });
   }
   if (!(request.headers.get('Content-Type') ?? '').startsWith('application/json')) {

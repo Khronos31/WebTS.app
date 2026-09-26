@@ -22,7 +22,7 @@ import { applyTunerSelection, ensureTunerAvailable, loadQ3U4Module } from './q3u
 import { stageLabel } from './stage-label';
 import { sleepUnthrottled } from './tick';
 import type { ChannelItem, ProgramItem } from './types';
-import { reportOutcome } from '../reports/beta-reports';
+import { reportOutcome } from '../reports/reports';
 import {
   LiveBlocksScanError, liveHoldsReceiver, takeScanTurn, tunerHasOneReceiver,
 } from './receiver-gate';

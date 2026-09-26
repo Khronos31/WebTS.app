@@ -21,7 +21,13 @@ import {
 } from './epg-refresh';
 import { requestPersistentStorage } from './persist-storage';
 import { installDataBroadcastConsole } from './data-broadcast';
-import { markReportsNoticeShown, reportsNoticeNeeded } from '../reports/beta-reports';
+import {
+  markReportsNoticeShown,
+  reportsInviteModel,
+  reportsNoticeNeeded,
+} from '../reports/reports';
+import { subscribeTuners } from '../usb/px4-identity';
+import { showReportsInviteDialog } from './components/reports-invite-dialog';
 
 initTheme();
 // データ放送は視聴と一緒に自動で動く。キーの UI はまだ無いので、
@@ -116,6 +122,24 @@ export class EpgApp {
     if (reportsNoticeNeeded()) {
       this.showBetaNotice();
     }
+
+    // 本番で未確認の機種がつながったときの案内ダイアログ
+    let inviteShowing = false;
+    const checkReportsInvite = async () => {
+      if (inviteShowing) return;
+      const model = await reportsInviteModel();
+      if (model === null || inviteShowing) return;
+      inviteShowing = true;
+      try {
+        await showReportsInviteDialog(model);
+      } finally {
+        inviteShowing = false;
+      }
+    };
+    void checkReportsInvite();
+    subscribeTuners(() => {
+      void checkReportsInvite();
+    });
   }
 
   private showBetaNotice(): void {

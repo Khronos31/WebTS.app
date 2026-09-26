@@ -7,7 +7,7 @@ PX4 系のチューナーを利用者の端末へ直接つなぎ、WebUSB 対応
 対応チューナーは PLEX PX-Q3U4（実機確認済み）と、上流 px4-userland v0.1.6 で対応した計16機種
 （PX-Q3PE4 / PX-Q3PE5 / PX-W3U4 / PX-W3PE4 / PX-W3PE5 / PX-MLT5PE / PX-MLT8PE3 /
 PX-MLT8PE5 / PX-M1UR / PX-S1UR、e-Better DTV02A-5TS-P / DTV02A-4TS-P / DTV03A-1TU /
-DTV02-1T1S-U / DTV02A-1T1S-U）。**PX-Q3U4 以外は WebTS でも上流でも実機未確認のため「未確認・報告募集」としており、beta 版（beta.webts.app）で動作報告を受け付けています**。詳しくは [動作環境](docs/COMPATIBILITY.md)。
+DTV02-1T1S-U / DTV02A-1T1S-U）。**PX-Q3U4 以外は WebTS でも上流でも実機未確認のため「未確認・報告募集」としており、動作報告を受け付けています（本番はオプトイン、beta 版は既定で有効）**。詳しくは [動作環境](docs/COMPATIBILITY.md)。
 
 地上波・BS・CS の視聴、字幕、チャンネル走査、番組表の取得が Windows・Linux・
 macOS・Android で動く。M0〜M3 の受け入れ条件は満たしている（[受け入れ結果](docs/ACCEPTANCE.md)）。

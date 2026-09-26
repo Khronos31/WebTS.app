@@ -24,7 +24,7 @@ import {
 import { CaptionCanvas } from './caption-canvas';
 import type { Tuning } from './tuning';
 import { STAGE_LABEL } from './stage-label';
-import { reportOutcome } from '../reports/beta-reports';
+import { reportOutcome } from '../reports/reports';
 import { setLiveHoldsReceiver, tunerHasOneReceiver } from './receiver-gate';
 import { allowLnb15v } from './lnb-setting';
 import { ChannelScan } from './channel-scan';

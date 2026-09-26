@@ -31,11 +31,11 @@ import { getTheme, setTheme, type ThemeMode } from '../theme-manager';
 import { allowLnb15v, setAllowLnb15v } from '../lnb-setting';
 import { getZipcode, normalizeZipcode, setZipcode } from '../bml-receiver-info';
 import {
-  REPORTS_BUILT,
+  IS_BETA_BUILD,
   lastSentReport,
   reportsEnabled,
   setReportsEnabled,
-} from '../../reports/beta-reports';
+} from '../../reports/reports';
 
 export interface SettingsViewOptions {
   onStateChanged: () => void;
@@ -83,10 +83,8 @@ export class SettingsView {
     // 6. 受信状態 (Signal Monitor) カード
     this.element.append(this.createSignalCard());
 
-    // 7. 動作報告（beta版） カード
-    if (REPORTS_BUILT) {
-      this.element.append(this.createBetaReportsCard());
-    }
+    // 7. 動作報告 カード（本番は既定で送らない、beta は既定で送る。reports.ts）
+    this.element.append(this.createBetaReportsCard());
   }
 
   private createThemeCard(): HTMLElement {
@@ -911,13 +909,22 @@ export class SettingsView {
 
     const enabled = reportsEnabled();
 
+    const title = IS_BETA_BUILD ? '動作報告（beta版）' : '動作報告';
+    const desc = IS_BETA_BUILD
+      ? 'beta 版（beta.webts.app）限定で、「その機種で動いたか」を確認するために最小限の動作ログを配布サーバへ送信します。本機能は既定で有効ですが、オプトアウト（停止）できます。'
+      : '「その機種で動いたか」を確認するために、最小限の動作ログを配布サーバへ送信します。本機能は既定で無効（オプトイン）ですが、動作改善へのご協力のためオンにすることができます。';
+    const toggleLabel = IS_BETA_BUILD
+      ? '動作報告の送信を許可する（既定で有効）'
+      : '動作報告の送信を許可する（既定で無効）';
+    const footerNote = '※ 同じ内容の報告は1回しか送信されません。';
+
     card.innerHTML = `
       <div class="settings-card-header">
         <div class="settings-card-title">
           <svg viewBox="0 0 24 24" style="width:20px;height:20px;fill:currentColor">
             <path d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm-5 14H7v-2h7v2zm3-4H7v-2h10v2zm0-4H7V7h10v2z"/>
           </svg>
-          <span>動作報告（beta版）</span>
+          <span>${title}</span>
         </div>
         <span class="status-badge ${enabled ? 'ok' : ''}" id="beta-reports-status-badge">
           ${enabled ? '許可' : '停止'}
@@ -925,14 +932,13 @@ export class SettingsView {
       </div>
 
       <p class="settings-card-desc">
-        beta 版（beta.webts.app）限定で、「その機種で動いたか」を確認するために最小限の動作ログを配布サーバへ送信します。
-        本機能は既定で有効ですが、オプトアウト（停止）できます。
+        ${desc}
       </p>
 
       <div style="margin-bottom: 16px;">
         <label class="checkbox-label" style="font-size: 0.9375rem; font-weight: 600; cursor: pointer;">
           <input type="checkbox" id="beta-reports-toggle" ${enabled ? 'checked' : ''} style="width: 18px; height: 18px; cursor: pointer;" />
-          <span>動作報告の送信を許可する（既定で有効）</span>
+          <span>${toggleLabel}</span>
         </label>
       </div>
 
@@ -951,7 +957,7 @@ export class SettingsView {
           <li>詳細な時刻（サーバ側の保存は日付単位のみ）。受け側はIPアドレスも保存しません</li>
         </ul>
         <div style="font-size: 0.75rem; color: var(--text-secondary);">
-          ※ 同じ内容の報告は1回しか送信されません。本番（webts.app）のビルドには送信処理自体が入りません。
+          ${footerNote}
         </div>
       </div>
 
