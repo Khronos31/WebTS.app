@@ -21,12 +21,7 @@ Result<GroupingResult> RuntimeTestAccess::enumerate_native(
     if (!discovered) {
         return Result<GroupingResult>::failure(discovered.error());
     }
-    std::vector<DeviceObservation> observations;
-    observations.reserve(discovery.candidates().size());
-    for (const DeviceCandidate& candidate : discovery.candidates()) {
-        observations.push_back(candidate.observation);
-    }
-    return group_q3u4_devices(observations);
+    return group_discovery(discovery);
 }
 
 Result<std::unique_ptr<Q3U4Runtime>> RuntimeTestAccess::open_native(

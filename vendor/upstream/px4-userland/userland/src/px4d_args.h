@@ -12,12 +12,16 @@ namespace px4::userland {
 
 enum class Px4dOpenMode : std::uint8_t {
     native,
+    // One --fd per USB device of the enclosure: two for a PX-Q3U4, one for a
+    // PX-MLT5PE/DTV02A-5TS-P.
     file_descriptors,
 };
 
 struct Px4dArguments final {
     bool valid = false;
     bool help = false;
+    // `px4d --list`: enumerate supported enclosures and exit (SPEC 4.6).
+    bool list = false;
     bool group = false;
     bool allow_lnb_power = false;
     std::string device;

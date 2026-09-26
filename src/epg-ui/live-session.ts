@@ -17,11 +17,15 @@
 
 import { AudioPlayer } from '../video/audio';
 import type { PlayerMessage, PlayerRequest } from '../video/player-worker';
-import { readCachedFirmware } from '../usb/firmware';
-import { ensureTunerAvailable, loadQ3U4Module, type Q3U4Module } from './q3u4-module';
-import { CaptionText } from './caption-text';
+import { loadFirmware } from '../usb/firmware';
+import {
+  applyTunerSelection, ensureTunerAvailable, loadQ3U4Module, type Q3U4Module,
+} from './q3u4-module';
+import { CaptionCanvas } from './caption-canvas';
 import type { Tuning } from './tuning';
 import { STAGE_LABEL } from './stage-label';
+import { reportOutcome } from '../reports/reports';
+import { setLiveHoldsReceiver, tunerHasOneReceiver } from './receiver-gate';
 import { allowLnb15v } from './lnb-setting';
 import { ChannelScan } from './channel-scan';
 import {
@@ -33,10 +37,12 @@ const POLL_WORDS = 17;
 /** 1回の drain で取り出す上限。live は 2 MB/s 程度なので十分余る。 */
 const DRAIN_BYTES = 1024 * 1024;
 
-/** 上流の global 受信機番号。地上波は 2, 3（dev1）と 6, 7（dev2）。 */
-const TERRESTRIAL_RECEIVERS = [2, 3, 6, 7] as const;
-/** 衛星は各ブリッジの下2つ。0, 1（dev1）と 4, 5（dev2）。 */
-const SATELLITE_RECEIVERS = [0, 1, 4, 5] as const;
+/**
+ * 受信機は C 側に選ばせる。どの受信機がどの波を受けられるかは機種による
+ * ので、JS には番号を持たせない（q3u4-descramble-probe.cpp の claim_receiver）。
+ * 視聴には、その波を受けられる空いた受信機のうち最も若い番号が選ばれる。
+ */
+const ANY_RECEIVER = -1;
 const WAVE_TERRESTRIAL = 0;
 const WAVE_SATELLITE = 1;
 
@@ -95,7 +101,12 @@ export interface LiveSessionOptions {
   /** 見たいサービス。多重化されたチャンネルから1つ選ぶ。 */
   readonly serviceId?: number | undefined;
   readonly onStatus?: ((text: string) => void) | undefined;
-  readonly onCaption?: ((text: string) => void) | undefined;
+  /**
+   * 字幕を重ねる要素。**映像と同じ位置・大きさ**にしておくこと。字幕は放送の
+   * 指定どおりの位置・大きさ・色・表示時間でここへ描く（caption-canvas.ts）。
+   * 無ければ字幕は出さない。
+   */
+  readonly captionHost?: HTMLElement | undefined;
   readonly onStats?: ((stats: LiveStats) => void) | undefined;
   readonly onEnded?: ((reason: string) => void) | undefined;
   /** データ放送を重ねる先。無ければデータ放送は出さない。 */
@@ -168,7 +179,9 @@ export class LiveSession {
   readonly #module: Q3U4Module;
   readonly #worker: Worker;
   readonly #audio: AudioPlayer;
-  readonly #captions: CaptionText;
+  readonly #captions: CaptionCanvas | null;
+  /** 利用者が字幕を出したいか（字幕 ON/OFF）。 */
+  #captionsWanted = true;
   readonly #options: LiveSessionOptions;
   readonly #drainPointer: number;
   readonly #pollPointer: number;
@@ -185,6 +198,10 @@ export class LiveSession {
   #frames = 0;
   /** 「映像が出ません」を出したか。映像が出たら消すために覚えておく。 */
   #silentWarned = false;
+  /** beta の動作報告を済ませたか。1回の視聴で1回だけ送る。 */
+  #reported = false;
+  /** 1本しかない受信機を押さえているか（receiver-gate.ts）。 */
+  #holdsOnlyReceiver = false;
   #stats: LiveStats | null = null;
   #dataBroadcast: DataBroadcast | null = null;
   #dataBroadcastStarting: Promise<void> | null = null;
@@ -210,11 +227,8 @@ export class LiveSession {
     this.#drainPointer = module._malloc(DRAIN_BYTES);
     this.#pollPointer = module._malloc(POLL_WORDS * 4);
     this.#audio = new AudioPlayer();
-    // 一時停止中は字幕も更新しない。絵が止まっているのに字幕だけ進むと、
-    // 画面の中で言っていることと出ている字が合わなくなる。
-    this.#captions = new CaptionText((text) => {
-      if (!this.#paused) options.onCaption?.(text);
-    });
+    this.#captions = options.captionHost === undefined ? null
+      : new CaptionCanvas(options.captionHost);
   }
 
   static isActive(): boolean {
@@ -222,35 +236,54 @@ export class LiveSession {
   }
 
   /**
-   * 受信を始める。物理操作は要求しない。ファームウェアが未取得、あるいは
-   * チューナーが未許可なら例外を投げる。
+   * 受信を始める。物理操作は要求しない。ファームウェアを配布サーバから
+   * 取れない、あるいはチューナーが未許可なら例外を投げる。
    */
   static async start(options: LiveSessionOptions): Promise<LiveSession> {
     active?.stop();
 
     await ensureTunerAvailable();
-    const firmware = await readCachedFirmware();
-    if (firmware === null) {
-      throw new Error('ファームウェアが設定されていません。設定から取得してください。');
+
+    // **受信機が1本なら、視聴が優先。**動いている走査を止め、視聴が終わる
+    // まで新しい走査を始めさせない（receiver-gate.ts）。
+    const holdsOnlyReceiver = await tunerHasOneReceiver();
+    if (holdsOnlyReceiver) {
+      setLiveHoldsReceiver(true);
+      options.onStatus?.('番組表の取得を止めています…');
+      await ChannelScan.stopAll();
     }
-    options.onStatus?.('モジュールを読み込んでいます…');
-    const module = await loadQ3U4Module();
+    try {
+      const firmware = await loadFirmware();
+      options.onStatus?.('モジュールを読み込んでいます…');
+      const module = await loadQ3U4Module();
+      await applyTunerSelection(module);
 
-    // **前の視聴が受信機を手放すまで待つ。**`stop()` は停止を頼むだけで、
-    // 手放すのは driver スレッドが後始末を終えてからである。
-    await settlePrevious(module, () => {
-      options.onStatus?.('前のチャンネルを片付けています…');
-    });
+      // **前の視聴が受信機を手放すまで待つ。**`stop()` は停止を頼むだけで、
+      // 手放すのは driver スレッドが後始末を終えてからである。
+      await settlePrevious(module, () => {
+        options.onStatus?.('前のチャンネルを片付けています…');
+      });
 
-    const firmwarePointer = module._malloc(firmware.length);
-    module.HEAPU8.set(firmware, firmwarePointer);
+      const firmwarePointer = module._malloc(firmware.length);
+      module.HEAPU8.set(firmware, firmwarePointer);
 
-    const worker = new Worker(new URL('../video/player-worker.ts', import.meta.url),
-      { type: 'module' });
-    const session = new LiveSession(module, worker, options, firmwarePointer, firmware.length);
-    active = session;
-    session.#begin(firmware.length);
-    return session;
+      const worker = new Worker(new URL('../video/player-worker.ts', import.meta.url),
+        { type: 'module' });
+      const session = new LiveSession(module, worker, options, firmwarePointer, firmware.length);
+      session.#holdsOnlyReceiver = holdsOnlyReceiver;
+      active = session;
+      session.#begin(firmware.length);
+      return session;
+    } catch (error) {
+      if (holdsOnlyReceiver) setLiveHoldsReceiver(false);
+      throw error;
+    }
+  }
+
+  /** 字幕 ON/OFF。受け取りと時刻の追従は続けるので、ON に戻せばすぐ出る。 */
+  setCaptionsVisible(visible: boolean): void {
+    this.#captionsWanted = visible;
+    this.#captions?.setVisible(visible && !this.#paused);
   }
 
   /** 音量。0 で無音。Web Audio 側に効かせる。 */
@@ -279,6 +312,9 @@ export class LiveSession {
     if (this.#stopped || this.#paused === paused) return;
     this.#paused = paused;
     this.#audio.setPaused(paused);
+    // 一時停止中は字幕を隠す。絵が止まっているのに字幕だけ進むと、画面の中で
+    // 言っていることと出ている字が合わなくなる。
+    this.#captions?.setVisible(this.#captionsWanted && !paused);
     const request: PlayerRequest = { kind: 'paused', value: paused };
     this.#worker.postMessage(request);
   }
@@ -320,6 +356,9 @@ export class LiveSession {
     if (this.#stopped) return;
     this.#stopped = true;
     if (active === this) active = null;
+    // 受信機を手放すのは driver スレッドの後始末の後だが、走査は同じ
+    // セッションの上で取り合いを C 側が防ぐので、ここで譲ってよい。
+    if (this.#holdsOnlyReceiver) setLiveHoldsReceiver(false);
     this.disableDataBroadcast();
     releaseCurrentDataBroadcast(this.#dataBroadcastControl);
     clearInterval(this.#retry);
@@ -329,7 +368,7 @@ export class LiveSession {
     this.#module.ccall('webts_q3u4_descramble_stop', null, [], []);
     this.#worker.terminate();
     void this.#audio.close();
-    this.#captions.destroy();
+    this.#captions?.destroy();
     this.#module.HEAPU8.fill(0, this.#firmwarePointer,
       this.#firmwarePointer + this.#firmwareLength);
     this.#module._free(this.#firmwarePointer);
@@ -370,7 +409,7 @@ export class LiveSession {
       ['number', 'number', 'number', 'number', 'number', 'number',
         'number', 'number', 'number'],
       [this.#firmwarePointer, firmwareLength,
-        satellite ? SATELLITE_RECEIVERS[0] : TERRESTRIAL_RECEIVERS[0],
+        ANY_RECEIVER,
         options.tuning.frequencyKhz, 0, 2,
         satellite ? WAVE_SATELLITE : WAVE_TERRESTRIAL,
         options.tuning.tsid ?? 0,
@@ -378,6 +417,7 @@ export class LiveSession {
     if (started !== 0) {
       const name = String(this.#module.ccall(
         'webts_q3u4_descramble_error_name', 'string', ['number'], [started]));
+      this.#report('failed', 0, started);
       this.stop();
       options.onEnded?.(`受信を開始できません: ${name} (${started})`);
       return;
@@ -395,7 +435,7 @@ export class LiveSession {
       if (pts === null) return;
       const clock: PlayerRequest = { kind: 'clock', pts };
       this.#worker.postMessage(clock);
-      this.#captions.tick(pts);
+      this.#captions?.tick(pts);
     }, 100);
 
     this.#poll = self.setInterval(() => { this.#pollDriver(); }, 250);
@@ -411,7 +451,7 @@ export class LiveSession {
         this.#audio.push({ pts: message.pts, bytes: new Uint8Array(message.bytes) });
         return;
       case 'caption':
-        this.#captions.push(message.pts, new Uint8Array(message.bytes));
+        this.#captions?.push(message.pts, new Uint8Array(message.bytes));
         return;
       case 'bml':
         this.#dataBroadcast?.emit(message.messages);
@@ -424,6 +464,7 @@ export class LiveSession {
         return;
       case 'progress':
         this.#frames = message.frames;
+        if (message.frames > 0) this.#report('ok');
         // 遅れて映像が出たら、出しておいた「映像が出ません」を消す。
         // 消さないと、映っているのに出ないと言い続ける。
         if (this.#silentWarned && message.frames > 0) {
@@ -443,6 +484,16 @@ export class LiveSession {
     }
   }
 
+  /**
+   * 映ったか、どこで止まったかを beta の動作報告に出す。映らないまま利用者が
+   * 止めた場合や、放送側の事情（未契約など）で映らない場合は送らない。
+   */
+  #report(result: 'ok' | 'failed', stage = -1, code = 0): void {
+    if (this.#reported) return;
+    this.#reported = true;
+    reportOutcome({ kind: 'view', wave: this.#options.tuning.wave, result, stage, code });
+  }
+
   #publishStats(message: Extract<PlayerMessage, { kind: 'progress' }>): void {
     const audio = this.#audio.stats();
     this.#stats = {
@@ -456,7 +507,7 @@ export class LiveSession {
         this.#module.ccall('webts_q3u4_descramble_dropped', 'number', [], [])),
       audioFrames: audio.decoded,
       audioDropped: audio.dropped,
-      captions: this.#captions.stats().rendered,
+      captions: this.#captions?.stats().rendered ?? 0,
       demux: message.counters,
       maxFrameGapMs: message.maxFrameGapMs,
       bmlMaxMs: message.bmlMaxMs,
@@ -523,6 +574,7 @@ export class LiveSession {
       const end: PlayerRequest = { kind: 'end' };
       this.#worker.postMessage(end);
       if (state === 3) {
+        this.#report('failed', stage, error);
         // **復号の失敗は番号だけでは何も分からない。**C 側は B25 の戻り値と
         // ECM の状況を持っているのに、ここで読まずに捨てていた。
         this.#options.onEnded?.(`受信が止まりました: ${name} (${error})`

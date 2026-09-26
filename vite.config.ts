@@ -189,6 +189,12 @@ export default defineConfig({
   // dev サーバーの事前走査では見つからない。途中で見つかると依存を束ね直して
   // ページを読み直すので、最初から束ねておく。
   optimizeDeps: { include: ['web-bml', 'web-bml/ts'] },
+  // **beta の動作報告は beta のビルドにだけ入れる**（src/reports/beta-reports.ts）。
+  // import.meta.env の値は、設定されていないと定数に畳まれず、送る処理が本番の
+  // 成果物にも残る。定数として埋め込み、使われない側を落とさせる。
+  define: {
+    __WEBTS_BETA__: JSON.stringify(process.env.VITE_WEBTS_CHANNEL === 'beta'),
+  },
   build: {
     target: 'es2022',
     outDir: 'dist',

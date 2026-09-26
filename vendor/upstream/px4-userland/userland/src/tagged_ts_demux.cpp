@@ -1,8 +1,8 @@
-// Modified/ported for px4-userland on 2026-09-02.
+// Modified/ported for px4-userland on 2026-09-02; MLT5 support added on 2026-09-24.
 //
 // Copyright (c) 2018-2021 nns779
-// Derived from tsukumijima/px4_drv commit 9eedea8c502875a788697984b93b50032339b9aa.
-// Origin paths: driver/px4_device.c, driver/ts_sync.h,
+// Derived from tsukumijima/px4_drv commit d748866f0da1cb3656106a520de4e9d7f073aacd (v0.6.1).
+// Origin paths: driver/px4_device.c, driver/pxmlt_device.c, driver/ts_sync.h,
 // winusb/src/DriverHost_PX4/px4_device.cpp,
 // winusb/tests/ts_sync_condition_test.cpp.
 // Source snapshot maintained by tsukumijima.
@@ -15,14 +15,16 @@
 
 namespace px4::userland {
 
-TaggedTsDemux::TaggedTsDemux() noexcept
-    : pending_(new (std::nothrow) std::uint8_t[kPendingCapacity])
+TaggedTsDemux::TaggedTsDemux(std::uint8_t max_tag, bool plain_ts) noexcept
+    : max_tag_(max_tag > 7U ? std::uint8_t{7U} : max_tag),
+      plain_ts_(plain_ts),
+      pending_(new (std::nothrow) std::uint8_t[kPendingCapacity])
 {
 }
 
-bool TaggedTsDemux::is_packet_boundary(std::uint8_t value) noexcept
+bool TaggedTsDemux::is_packet_boundary(std::uint8_t value) const noexcept
 {
-    return (value & 0x0fU) == 0x07U;
+    return plain_ts_ ? value == 0x47U : (value & 0x0fU) == 0x07U;
 }
 
 void TaggedTsDemux::compact_pending() noexcept
@@ -130,9 +132,17 @@ Result<void> TaggedTsDemux::push(ByteView input, PacketSink sink, void* context,
         }
 
         const std::uint8_t wire_sync = pending_[pending_offset_];
+        if (plain_ts_) {
+            const Result<void> result = sink(context, 0U,
+                ByteView{pending_.get() + pending_offset_, kPacketSize});
+            if (!result) return result;
+            ++emitted_packets_;
+            consume_packet();
+            continue;
+        }
         const std::uint8_t tag =
             static_cast<std::uint8_t>((wire_sync >> 4U) & 0x07U);
-        if (tag == 0U || tag > 4U || (wire_sync & 0x80U) != 0U) {
+        if (tag == 0U || tag > max_tag_ || (wire_sync & 0x80U) != 0U) {
             ++invalid_tag_packets_;
             if ((wire_sync & 0x80U) != 0U && observer != nullptr)
                 observer(observer_context, wire_sync);

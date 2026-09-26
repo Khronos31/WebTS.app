@@ -16,6 +16,11 @@
 /assets/*
   Cache-Control: public, max-age=31536000, immutable
 
+# ファームウェアも名前が変わらない。デプロイ時に取り出して置く。
+/firmware/*
+  Content-Type: application/octet-stream
+  Cache-Control: no-cache
+
 # Service Worker と Manifest は常に最新を問い合わせる。
 /sw.js
   Cache-Control: no-cache

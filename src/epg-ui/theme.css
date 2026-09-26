@@ -293,6 +293,39 @@ body {
   }
 }
 
+/* beta 動作報告ステータス表示（AppBar） */
+.reports-status-pill {
+  background: rgba(255, 255, 255, 0.18);
+  border: 1px solid rgba(255, 255, 255, 0.35);
+  color: #ffffff;
+  font-size: 0.75rem;
+  font-weight: 500;
+  padding: 4px 10px;
+  border-radius: 12px;
+  cursor: pointer;
+  white-space: nowrap;
+  display: inline-flex;
+  align-items: center;
+  transition: background-color 0.15s ease, border-color 0.15s ease;
+  line-height: 1.4;
+}
+
+.reports-status-pill:hover {
+  background-color: rgba(255, 255, 255, 0.28);
+  border-color: rgba(255, 255, 255, 0.6);
+}
+
+.reports-status-pill.stopped {
+  background: rgba(0, 0, 0, 0.25);
+  border-color: rgba(255, 255, 255, 0.25);
+  color: rgba(255, 255, 255, 0.85);
+}
+
+.reports-status-pill.stopped:hover {
+  background: rgba(0, 0, 0, 0.35);
+  border-color: rgba(255, 255, 255, 0.45);
+}
+
 /* ==========================================================
    Navigation Drawer (Sidebar) & Responsive Permanent/Temporary
    ========================================================== */
@@ -898,7 +931,18 @@ body {
   color: #ffb74d;
 }
 
-.status-badge:not(.ok):not(.warning) {
+.status-badge.error {
+  background-color: rgba(255, 82, 82, 0.15);
+  color: #c62828;
+}
+
+:root[data-theme="dark"] .status-badge.error,
+:root:not([data-theme="light"]) .status-badge.error {
+  background-color: rgba(255, 82, 82, 0.2);
+  color: #ff8a80;
+}
+
+.status-badge:not(.ok):not(.warning):not(.error) {
   background-color: var(--ripple);
   color: var(--text-secondary);
 }
@@ -1052,6 +1096,54 @@ body {
 .btn:disabled {
   opacity: 0.4;
   cursor: not-allowed;
+}
+
+/* 接続済みのチューナー一覧 */
+.tuner-table-container {
+  overflow-x: auto;
+  border: 1px solid var(--surface-border);
+  border-radius: 6px;
+  background-color: var(--surface-color-variant);
+}
+
+.tuner-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.8125rem;
+  text-align: left;
+}
+
+.tuner-table th {
+  background-color: var(--surface-color);
+  padding: 8px 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  border-bottom: 1px solid var(--divider);
+  white-space: nowrap;
+}
+
+.tuner-table td {
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--divider);
+  color: var(--text-primary);
+  vertical-align: middle;
+}
+
+.tuner-table tr:last-child td {
+  border-bottom: none;
+}
+
+.tuner-table tr:hover td {
+  background-color: var(--ripple);
+}
+
+.tuner-empty-notice {
+  font-size: 0.8125rem;
+  color: var(--text-secondary);
+  padding: 12px;
+  border: 1px solid var(--surface-border);
+  border-radius: 6px;
+  background-color: var(--surface-color-variant);
 }
 
 /* ==========================================================
@@ -1789,32 +1881,13 @@ body {
   display: block;
 }
 
-/* ARIB STD-B24 風字幕オーバーレイ */
-.video-subtitle-overlay {
+/* ARIB STD-B24 字幕描画レイヤー */
+.video-caption-layer {
   position: absolute;
   inset: 0;
-  display: flex;
-  justify-content: center;
-  align-items: flex-end;
-  padding-bottom: 56px;
-  pointer-events: none;
   z-index: 10;
-}
-
-.video-subtitle-text {
-  background-color: rgba(0, 0, 0, 0.78);
-  color: #ffeb3b;
-  font-family: 'Hiragino Sans', 'Meiryo', sans-serif;
-  font-size: clamp(14px, 2.2vw, 22px);
-  font-weight: 700;
-  padding: 6px 14px;
-  border-radius: 4px;
-  letter-spacing: 0.05em;
-  max-width: 86%;
-  text-align: center;
-  line-height: 1.4;
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.5);
-  border: 1px solid rgba(255, 255, 255, 0.15);
+  pointer-events: none;
+  overflow: hidden;
 }
 
 /* コントロールバー */

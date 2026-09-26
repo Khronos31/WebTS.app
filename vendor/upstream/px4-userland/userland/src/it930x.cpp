@@ -1,12 +1,14 @@
-// Modified/ported for px4-userland on 2026-09-03.
+// Modified/ported for px4-userland on 2026-09-03; MLT5 support added on 2026-09-24.
 //
 // Copyright (c) 2018-2021 nns779
-// Derived from tsukumijima/px4_drv commit 9eedea8c502875a788697984b93b50032339b9aa.
+// Derived from tsukumijima/px4_drv commit d748866f0da1cb3656106a520de4e9d7f073aacd (v0.6.1).
 // Origin paths: driver/it930x.c, driver/it930x.h, driver/itedtv_bus.c,
-// driver/px4_device.c, winusb/src/DriverHost_PX4/px4_device.cpp.
+// driver/px4_device.c, driver/pxmlt_device.c,
+// winusb/src/DriverHost_PX4/px4_device.cpp.
 // Source snapshot maintained by tsukumijima.
 // SPDX-License-Identifier: GPL-2.0-only
 #include "px4/it930x.h"
+#include "mlt5pe_frontend.h"
 
 #include "it930x_protocol.h"
 #include "q3u4_power.h"
@@ -90,6 +92,11 @@ enum Q3U4Register : std::uint32_t {
     i2c_bus_slave2 = 0x496fU,
     i2c_addr_slave3 = 0x4972U,
     i2c_bus_slave3 = 0x496eU,
+    i2c_addr_slave4 = 0x4964U,
+    i2c_bus_slave4 = 0x4963U,
+    stream_serial_port0 = 0xda58U,
+    stream_aggregate_port0 = 0xda73U,
+    stream_sync_port0 = 0xda78U,
     stream_disable_port0 = 0xda4cU,
     stream_serial_port1 = 0xda59U,
     stream_aggregate_port1 = 0xda74U,
@@ -110,6 +117,9 @@ enum Q3U4Register : std::uint32_t {
     gpio2_mode = 0xd8b8U,
     gpio2_enable = 0xd8b9U,
     gpio2_output = 0xd8b7U,
+    gpio3_mode = 0xd8b4U,
+    gpio3_enable = 0xd8b5U,
+    gpio3_output = 0xd8b3U,
     gpio11_mode = 0xd8d4U,
     gpio11_enable = 0xd8d5U,
     gpio11_output = 0xd8d3U,
@@ -121,6 +131,29 @@ enum Q3U4Register : std::uint32_t {
     gpio14_output = 0xd8e3U,
 };
 
+// One IT930x TS input: the demodulator's I2C slave slot, the bridge TS port it
+// feeds, and the aggregation sync byte that tags its packets.
+struct StreamInput final {
+    std::uint8_t slave;
+    std::uint8_t port;
+    std::uint8_t i2c_bus;
+    std::uint8_t i2c_address;
+    std::uint8_t sync_byte;
+};
+
+constexpr std::array<std::uint32_t, 5U> kI2cAddressRegisters{
+    0x4975U, 0x4974U, 0x4973U, 0x4972U, 0x4964U};
+constexpr std::array<std::uint32_t, 5U> kI2cBusRegisters{
+    0x4971U, 0x4970U, 0x496fU, 0x496eU, 0x4963U};
+
+// The four Q3U4 TC90522 demodulators share I2C bus 2 and use ports 1..4;
+// port 0 is unused and disabled after the enabled inputs.
+constexpr std::array<StreamInput, 4U> kQ3U4Inputs{{
+    {0U, 1U, 2U, 0x11U, 0x17U},
+    {1U, 2U, 2U, 0x13U, 0x27U},
+    {2U, 3U, 2U, 0x10U, 0x37U},
+    {3U, 4U, 2U, 0x12U, 0x47U},
+}};
 std::uint8_t register_length(std::uint32_t reg) noexcept
 {
     if ((reg & 0xff000000U) != 0U) {
@@ -416,9 +449,10 @@ Result<void> It930xController::configure_q3u4_stream_output_locked() noexcept
                                     : Result<void>::failure(first_error);
 }
 
-Result<void> It930xController::warm_initialize_q3u4_locked() noexcept
+Result<void> It930xController::warm_initialize_locked(BoardLayout layout,
+                                                      DeviceModel model) noexcept
 {
-    // PX-Q3U4のIT9305E warm初期化は、既存ドライバの固定順序と値を保つ。
+    // IT930x warm初期化は、既存ドライバの機種別固定順序と値を保つ。
     // 任意レジスタ列を受け取る設計にすると、機種差と失敗位置を呼び出し側へ漏らす。
     const auto write = [this](std::uint32_t reg, std::uint8_t value) noexcept {
         return write_q3u4_register_locked(reg, value);
@@ -492,82 +526,117 @@ Result<void> It930xController::warm_initialize_q3u4_locked() noexcept
         return i2c_speed;
     }
 
-    // 4入力のslave番号とI2CアドレスはQ3U4基板の配線に対応する固定対応表。
-    constexpr std::array<Q3U4Register, 4U> i2c_address_registers{
-        Q3U4Register::i2c_addr_slave0, Q3U4Register::i2c_addr_slave1,
-        Q3U4Register::i2c_addr_slave2, Q3U4Register::i2c_addr_slave3};
-    constexpr std::array<Q3U4Register, 4U> i2c_bus_registers{
-        Q3U4Register::i2c_bus_slave0, Q3U4Register::i2c_bus_slave1,
-        Q3U4Register::i2c_bus_slave2, Q3U4Register::i2c_bus_slave3};
-    constexpr std::array<std::uint8_t, 4U> i2c_addresses{0x22U, 0x26U, 0x20U, 0x24U};
-    for (std::size_t index = 0U; index < i2c_address_registers.size(); ++index) {
-        const auto address = write(i2c_address_registers[index], i2c_addresses[index]);
+    const auto inputs = configure_stream_inputs_locked(layout, model);
+    if (!inputs) {
+        return inputs;
+    }
+    // warm初期化直後は電源参照を扱わず、次の利用者へ安全なアイドル状態だけを渡す。
+    return configure_idle_gpio_locked(layout);
+}
+
+Result<void> It930xController::configure_stream_inputs_locked(BoardLayout layout,
+                                                              DeviceModel model) noexcept
+{
+    const auto write = [this](std::uint32_t reg, std::uint8_t value) noexcept {
+        return write_q3u4_register_locked(reg, value);
+    };
+    std::array<StreamInput, 5U> model_inputs{};
+    const StreamInput* inputs = kQ3U4Inputs.data();
+    std::size_t input_count = kQ3U4Inputs.size();
+    if (layout == BoardLayout::mlt5pe) {
+        const MltModelLayout profile = mlt_model_layout(model);
+        input_count = profile.receiver_count;
+        for (std::size_t index = 0U; index < input_count; ++index) {
+            const MltReceiverInput& receiver = profile.receivers[index];
+            const std::uint8_t tag = static_cast<std::uint8_t>(receiver.port_number + 1U);
+            model_inputs[index] = StreamInput{
+                static_cast<std::uint8_t>(index), receiver.port_number, receiver.i2c_bus,
+                receiver.i2c_address, static_cast<std::uint8_t>((tag << 4U) | 0x07U)};
+        }
+        inputs = model_inputs.data();
+    } else if (layout == BoardLayout::single_receiver) {
+        const std::uint8_t port = model == DeviceModel::dtv03a_1tu ? 4U : 0U;
+        model_inputs[0] = StreamInput{0U, port, 3U,
+            static_cast<std::uint8_t>(model == DeviceModel::dtv03a_1tu ? 0x18U : 0x10U),
+            0x47U};
+        inputs = model_inputs.data();
+        input_count = 1U;
+    }
+
+    // 各入力のslave番号とI2Cアドレスは基板の配線に対応する固定対応表。
+    for (std::size_t index = 0U; index < input_count; ++index) {
+        const StreamInput& input = inputs[index];
+        const auto address = write(kI2cAddressRegisters[input.slave],
+                                   static_cast<std::uint8_t>(input.i2c_address << 1U));
         if (!address) {
             return address;
         }
-        const auto bus = write(i2c_bus_registers[index], 2U);
+        const auto bus = write(kI2cBusRegisters[input.slave], input.i2c_bus);
         if (!bus) {
             return bus;
         }
     }
 
-    const auto serial_mode = write(Q3U4Register::stream_serial_port1, 0U);
-    if (!serial_mode) {
-        return serial_mode;
-    }
-    constexpr std::array<Q3U4Register, 4U> aggregation_registers{
-        Q3U4Register::stream_aggregate_port1, Q3U4Register::stream_aggregate_port2,
-        Q3U4Register::stream_aggregate_port3, Q3U4Register::stream_aggregate_port4};
-    constexpr std::array<Q3U4Register, 4U> sync_registers{
-        Q3U4Register::stream_sync_port1, Q3U4Register::stream_sync_port2,
-        Q3U4Register::stream_sync_port3, Q3U4Register::stream_sync_port4};
-    constexpr std::array<Q3U4Register, 4U> enable_registers{
-        Q3U4Register::stream_enable_port1, Q3U4Register::stream_enable_port2,
-        Q3U4Register::stream_enable_port3, Q3U4Register::stream_enable_port4};
-    constexpr std::array<std::uint8_t, 4U> sync_bytes{0x17U, 0x27U, 0x37U, 0x47U};
-    for (std::size_t index = 0U; index < aggregation_registers.size(); ++index) {
-        const auto aggregation = write(aggregation_registers[index], 1U);
+    for (std::size_t index = 0U; index < input_count; ++index) {
+        const StreamInput& input = inputs[index];
+        if (input.port < 2U) {
+            // Ports 0 and 1 also select parallel input; every supported
+            // demodulator is serial.
+            const auto serial_mode = write(Q3U4Register::stream_serial_port0 + input.port, 0U);
+            if (!serial_mode) {
+                return serial_mode;
+            }
+        }
+        const auto aggregation = write(Q3U4Register::stream_aggregate_port0 + input.port, 1U);
         if (!aggregation) {
             return aggregation;
         }
-        const auto sync = write(sync_registers[index], sync_bytes[index]);
+        const auto sync = write(Q3U4Register::stream_sync_port0 + input.port, input.sync_byte);
         if (!sync) {
             return sync;
         }
-        const auto enable = write(enable_registers[index], 1U);
+        const auto enable = write(Q3U4Register::stream_disable_port0 + input.port, 1U);
         if (!enable) {
             return enable;
         }
     }
-    const auto disable_port0 = write(Q3U4Register::stream_disable_port0, 0U);
-    if (!disable_port0) {
-        return disable_port0;
+    if (layout == BoardLayout::q3u4) {
+        return write(Q3U4Register::stream_disable_port0, 0U);
     }
+    return Result<void>::success();
+}
 
-    // warm初期化直後は電源参照を扱わず、次の利用者へ安全なアイドル状態だけを渡す。
-    const auto gpio7_mode = write(Q3U4Register::gpio7_mode, 1U);
-    if (!gpio7_mode) {
-        return gpio7_mode;
+Result<void> It930xController::configure_idle_gpio_locked(BoardLayout layout) noexcept
+{
+    const auto write = [this](std::uint32_t reg, std::uint8_t value) noexcept {
+        return write_q3u4_register_locked(reg, value);
+    };
+    // GPIO 7 high holds the demodulators in reset, GPIO 2 low keeps backend
+    // power off, and GPIO 11 low keeps the LNB supply off.  px4_drv programs
+    // the lines in a different order per board; both orders are preserved.
+    const std::array<std::pair<std::uint32_t, std::uint8_t>, 6U> q3u4_order{{
+        {Q3U4Register::gpio7_mode, 1U}, {Q3U4Register::gpio7_enable, 1U},
+        {Q3U4Register::gpio2_mode, 1U}, {Q3U4Register::gpio2_enable, 1U},
+        {Q3U4Register::gpio2_output, 0U}, {Q3U4Register::gpio7_output, 1U}}};
+    const std::array<std::pair<std::uint32_t, std::uint8_t>, 6U> mlt5pe_order{{
+        {Q3U4Register::gpio7_mode, 1U}, {Q3U4Register::gpio7_enable, 1U},
+        {Q3U4Register::gpio7_output, 1U}, {Q3U4Register::gpio2_mode, 1U},
+        {Q3U4Register::gpio2_enable, 1U}, {Q3U4Register::gpio2_output, 0U}}};
+    if (layout != BoardLayout::single_receiver) for (const auto& step : layout == BoardLayout::q3u4 ? q3u4_order : mlt5pe_order) {
+        const auto written = write(step.first, step.second);
+        if (!written) {
+            return written;
+        }
     }
-    const auto gpio7_enable = write(Q3U4Register::gpio7_enable, 1U);
-    if (!gpio7_enable) {
-        return gpio7_enable;
-    }
-    const auto gpio2_mode = write(Q3U4Register::gpio2_mode, 1U);
-    if (!gpio2_mode) {
-        return gpio2_mode;
-    }
-    const auto gpio2_enable = write(Q3U4Register::gpio2_enable, 1U);
-    if (!gpio2_enable) {
-        return gpio2_enable;
-    }
-    const auto backend_idle = write(Q3U4Register::gpio2_output, 0U);
-    if (!backend_idle) {
-        return backend_idle;
-    }
-    const auto reset_idle = write(Q3U4Register::gpio7_output, 1U);
-    if (!reset_idle) {
-        return reset_idle;
+    if (layout == BoardLayout::single_receiver) {
+        const std::array<std::pair<std::uint32_t, std::uint8_t>, 6U> single_order{{
+            {Q3U4Register::gpio3_mode, 1U}, {Q3U4Register::gpio3_enable, 1U},
+            {Q3U4Register::gpio3_output, 1U}, {Q3U4Register::gpio2_mode, 1U},
+            {Q3U4Register::gpio2_enable, 1U}, {Q3U4Register::gpio2_output, 0U}}};
+        for (const auto& step : single_order) {
+            const auto written = write(step.first, step.second);
+            if (!written) return written;
+        }
     }
     const auto gpio11_mode = write(Q3U4Register::gpio11_mode, 1U);
     if (!gpio11_mode) {
@@ -942,6 +1011,24 @@ Result<void> It930xController::set_q3u4_backend_power(bool on, Q3U4Delay& delay)
                                     : Result<void>::failure(first_error);
 }
 
+Result<void> It930xController::set_single_receiver_backend_power(
+    bool on, Q3U4Delay& delay) noexcept
+{
+    std::lock_guard<std::mutex> lock(transaction_mutex_);
+    if (on) {
+        const auto reset = write_q3u4_register_locked(Q3U4Register::gpio3_output, 0U);
+        if (!reset) return reset;
+        delay.sleep_ms(100U);
+        const auto backend = write_q3u4_register_locked(Q3U4Register::gpio2_output, 1U);
+        if (!backend) return backend;
+        delay.sleep_ms(20U);
+        return Result<void>::success();
+    }
+    const auto backend = write_q3u4_register_locked(Q3U4Register::gpio2_output, 0U);
+    if (!backend) return backend;
+    return write_q3u4_register_locked(Q3U4Register::gpio3_output, 1U);
+}
+
 Result<std::vector<std::uint8_t>> It930xController::i2c_read(
     std::uint8_t bus, std::uint8_t address, std::size_t length) noexcept
 {
@@ -1036,7 +1123,7 @@ Result<FirmwareLoadResult> It930xController::load_firmware_image_locked(
     return Result<FirmwareLoadResult>::success(FirmwareLoadResult{false, version.value(), false});
 }
 
-Result<void> It930xController::verify_q3u4_state_locked() noexcept
+Result<void> It930xController::verify_q3u4_state_locked(BoardLayout layout) noexcept
 {
     const auto verify_mask = [this](std::uint32_t reg, std::uint8_t mask,
                                     std::uint8_t expected) noexcept {
@@ -1116,8 +1203,11 @@ Result<void> It930xController::verify_q3u4_state_locked() noexcept
         return result;
     }
     constexpr std::array<std::uint8_t, 1U> one{1U};
+    const std::uint32_t reset_register = layout == BoardLayout::single_receiver
+        ? static_cast<std::uint32_t>(Q3U4Register::gpio3_output)
+        : static_cast<std::uint32_t>(Q3U4Register::gpio7_output);
     if (const auto result = verify_exact(
-            static_cast<std::uint32_t>(Q3U4Register::gpio7_output),
+            reset_register,
             ByteView{one.data(), one.size()});
         !result) {
         return result;
@@ -1130,6 +1220,42 @@ Result<FirmwareLoadResult> It930xController::initialize_q3u4(
     const FirmwareImage& image, InitializationPolicy policy) noexcept
 {
     std::lock_guard<std::mutex> lock(transaction_mutex_);
+    return initialize_locked(image, policy, BoardLayout::q3u4);
+}
+
+Result<FirmwareLoadResult> It930xController::initialize_mlt5pe(
+    const FirmwareImage& image, InitializationPolicy policy) noexcept
+{
+    return initialize_mlt_family(image, DeviceModel::px_mlt5pe, policy);
+}
+
+Result<FirmwareLoadResult> It930xController::initialize_mlt_family(
+    const FirmwareImage& image, DeviceModel model, InitializationPolicy policy) noexcept
+{
+    std::lock_guard<std::mutex> lock(transaction_mutex_);
+    if (model != DeviceModel::px_mlt5pe && model != DeviceModel::dtv02a_5ts_p &&
+        model != DeviceModel::px_mlt8pe3 && model != DeviceModel::px_mlt8pe5 &&
+        model != DeviceModel::dtv02a_4ts_p) {
+        return Result<FirmwareLoadResult>::failure(Error::UNSUPPORTED);
+    }
+    return initialize_locked(image, policy, BoardLayout::mlt5pe, model);
+}
+
+Result<FirmwareLoadResult> It930xController::initialize_single_receiver(
+    const FirmwareImage& image, DeviceModel model, InitializationPolicy policy) noexcept
+{
+    std::lock_guard<std::mutex> lock(transaction_mutex_);
+    if (model != DeviceModel::px_m1ur && model != DeviceModel::px_s1ur &&
+        model != DeviceModel::dtv03a_1tu && model != DeviceModel::dtv02_1t1s_u &&
+        model != DeviceModel::dtv02a_1t1s_u)
+        return Result<FirmwareLoadResult>::failure(Error::UNSUPPORTED);
+    return initialize_locked(image, policy, BoardLayout::single_receiver, model);
+}
+
+Result<FirmwareLoadResult> It930xController::initialize_locked(
+    const FirmwareImage& image, InitializationPolicy policy, BoardLayout layout,
+    DeviceModel model) noexcept
+{
     // Initialization writes the backend power GPIOs directly. Invalidate the
     // logical cache before any validation or I/O so every failure leaves a
     // conservative unknown state.
@@ -1153,11 +1279,11 @@ Result<FirmwareLoadResult> It930xController::initialize_q3u4(
         if (policy == InitializationPolicy::require_cold) {
             return Result<FirmwareLoadResult>::failure(Error::NOT_READY);
         }
-        const auto warm = warm_initialize_q3u4_locked();
+        const auto warm = warm_initialize_locked(layout, model);
         if (!warm) {
             return Result<FirmwareLoadResult>::failure(warm.error());
         }
-        const auto verified = verify_q3u4_state_locked();
+        const auto verified = verify_q3u4_state_locked(layout);
         if (!verified) {
             return Result<FirmwareLoadResult>::failure(verified.error());
         }
@@ -1169,11 +1295,11 @@ Result<FirmwareLoadResult> It930xController::initialize_q3u4(
     if (!loaded) {
         return Result<FirmwareLoadResult>::failure(loaded.error());
     }
-    const auto warm = warm_initialize_q3u4_locked();
+    const auto warm = warm_initialize_locked(layout, model);
     if (!warm) {
         return Result<FirmwareLoadResult>::failure(warm.error());
     }
-    const auto verified = verify_q3u4_state_locked();
+    const auto verified = verify_q3u4_state_locked(layout);
     if (!verified) {
         return Result<FirmwareLoadResult>::failure(verified.error());
     }

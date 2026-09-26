@@ -1,7 +1,7 @@
-// Modified/ported for px4-userland on 2026-09-02.
+// Modified/ported for px4-userland on 2026-09-02; MLT5 support added on 2026-09-24.
 //
 // Copyright (c) 2018-2021 nns779
-// Derived from tsukumijima/px4_drv commit 9eedea8c502875a788697984b93b50032339b9aa.
+// Derived from tsukumijima/px4_drv commit d748866f0da1cb3656106a520de4e9d7f073aacd (v0.6.1).
 // Origin paths: driver/i2c_comm.h, driver/it930x.c, driver/tc90522.c.
 // Source snapshot maintained by tsukumijima.
 // SPDX-License-Identifier: GPL-2.0-only
@@ -54,8 +54,11 @@ public:
 
 class It930xBridgeI2cMaster final : public BridgeI2cMaster {
 public:
-    explicit It930xBridgeI2cMaster(It930xController& controller) noexcept
-        : controller_(controller)
+    // Q3U4 wires all demodulators to bridge I2C bus 2; the MLT5 family uses
+    // buses 1 and 3, one master per bus.
+    explicit It930xBridgeI2cMaster(It930xController& controller,
+                                   std::uint8_t bus = 2U) noexcept
+        : controller_(controller), bus_(bus)
     {
     }
 
@@ -66,6 +69,7 @@ public:
 
 private:
     It930xController& controller_;
+    std::uint8_t bus_;
     mutable std::mutex mutex_;
     BridgeI2cFailureDetail failure_detail_{};
 };

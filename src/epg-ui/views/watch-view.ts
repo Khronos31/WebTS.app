@@ -7,6 +7,7 @@ import { VideoPlayer } from '../components/video-player';
 import { LiveSession, type LiveStats } from '../live-session';
 import { tuningForChannel } from '../tuning';
 import { isDataBroadcastVisible, sendDataBroadcastKey } from '../data-broadcast';
+import { confirmLiveBlocksGuideIfNeeded } from '../components/live-guide-notice-dialog';
 
 export interface WatchViewOptions {
   channelId: number;
@@ -120,7 +121,7 @@ export class WatchView {
         this.session?.setMuted(muted);
       },
       onSubtitleToggle: (enabled) => {
-        if (!enabled) this.player.setSubtitleText('');
+        this.session?.setCaptionsVisible(enabled);
       },
     });
 
@@ -209,9 +210,12 @@ export class WatchView {
     // クイック選局ボタンのイベント
     const chips = detailsSection.querySelectorAll<HTMLButtonElement>('.channel-chip');
     chips.forEach((chip) => {
-      chip.addEventListener('click', () => {
+      chip.addEventListener('click', async () => {
         const id = Number(chip.dataset.channelId);
         if (id && id !== this.channel.id) {
+          if (!(await confirmLiveBlocksGuideIfNeeded())) {
+            return;
+          }
           options.onSwitchChannel(id);
         }
       });
@@ -420,6 +424,10 @@ export class WatchView {
    */
   private async startLive(): Promise<void> {
     this.stopLive();
+    if (!(await confirmLiveBlocksGuideIfNeeded())) {
+      this.showStatus('視聴はキャンセルされました。');
+      return;
+    }
     // 走査は止めない。各系統の1本目は視聴のために空けてある（channel-scan.ts）。
     const tuning = tuningForChannel(this.channel);
     if (tuning === null) {
@@ -434,7 +442,7 @@ export class WatchView {
         serviceId: this.channel.serviceId,
         onStatus: (text) => { this.showStatus(text); },
         onStats: (stats) => { this.showStats(stats); },
-        onCaption: (text) => { this.player.setSubtitleText(text); },
+        captionHost: this.player.captionHost,
         onEnded: (reason) => { if (reason !== '') this.showStatus(reason); },
         dataBroadcast: {
           container: this.player.element,
@@ -454,7 +462,6 @@ export class WatchView {
   private stopLive(): void {
     this.session?.stop();
     this.session = null;
-    this.player.setSubtitleText('');
     this.player.setStatusText('');
   }
 

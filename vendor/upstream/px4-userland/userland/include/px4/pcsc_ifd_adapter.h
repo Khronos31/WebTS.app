@@ -158,8 +158,10 @@ public:
 
 private:
     bool valid_lun(std::uint64_t lun) const noexcept { return lun == 0U; }
-    bool channel_open() const noexcept { return client_ != nullptr; }
+    bool channel_configured() const noexcept { return channel_configured_; }
+    Result<void> ensure_client() noexcept;
     void clear_card_state() noexcept;
+    void invalidate_client() noexcept;
     void invalidate_channel() noexcept;
     IfdResult fail(Error error, IfdOperation operation) noexcept;
     Result<IfdCardStatus> refresh_status() noexcept;
@@ -170,6 +172,7 @@ private:
     std::mutex mutex_;
     std::unique_ptr<IfdCardClient> client_;
     IfdEndpoint endpoint_{};
+    bool channel_configured_ = false;
     std::uint64_t card_handle_ = 0U;
     std::uint64_t reader_generation_ = 0U;
     std::array<std::uint8_t, kIfdAtrMaxLength> atr_{};

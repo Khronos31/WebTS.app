@@ -1,4 +1,4 @@
-import { readCachedFirmware } from '../usb/firmware';
+import { loadFirmware } from '../usb/firmware';
 import { AudioPlayer } from './audio';
 import { CaptionOverlay } from './captions';
 import type { PlayerMessage, PlayerRequest } from './player-worker';
@@ -267,10 +267,11 @@ form.addEventListener('submit', async (event) => {
   status.textContent = 'ファームウェアを読み出しています…';
 
   try {
-    const firmware = await readCachedFirmware();
-    if (!firmware) {
-      status.textContent =
-        'ファームウェアがキャッシュされていません。先に /firmware.html で取り込んでください。';
+    let firmware: Uint8Array;
+    try {
+      firmware = await loadFirmware();
+    } catch (error) {
+      status.textContent = error instanceof Error ? error.message : String(error);
       start.disabled = false;
       return;
     }

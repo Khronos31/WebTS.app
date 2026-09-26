@@ -9,7 +9,7 @@
 // 終わっても**選局し直さずに1番組ぶんは追随できる**。ここを呼ぶのは、その
 // 先まで尽きたときだけでよい。
 
-import { ChannelScan, type ScanProgress } from './channel-scan';
+import { ChannelScan, WaveUnsupportedError, type ScanProgress } from './channel-scan';
 import type { ChannelItem, ProgramItem } from './types';
 import {
   applySchedule, mergeChannels, mergePrograms, readScheduleFetchedAt, writeScheduleFetchedAt,
@@ -24,6 +24,7 @@ import {
 import { LiveSession } from './live-session';
 import { planByNetwork, planRetry, type SchedulePlan } from './schedule-plan';
 import { allowLnb15v } from './lnb-setting';
+import { LiveBlocksScanError, liveHoldsReceiver } from './receiver-gate';
 
 /** 自動更新の間隔の下限。失敗しても次の試行まではこれだけ空ける。 */
 const COOLDOWN_MS = 10 * 60 * 1000;
@@ -157,6 +158,11 @@ export async function maybeAutoRefresh(
   try {
     return { ran: true, programs: await refreshPrograms(onProgress, false) };
   } catch (error) {
+    // 視聴に受信機を譲って止まったなら、取りに行かなかったことにする。
+    if (error instanceof LiveBlocksScanError) {
+      lastAttempt = 0;
+      return { ran: false };
+    }
     return { ran: true, error: error instanceof Error ? error.message : String(error) };
   }
 }
@@ -246,6 +252,8 @@ export async function tickAutoRefresh(): Promise<void> {
 
 async function tick(): Promise<void> {
   if (running.size > 0 || ChannelScan.isActive()) return;
+  // 受信機が1本のチューナーで視聴している間は取りに行かない（receiver-gate.ts）。
+  if (liveHoldsReceiver()) return;
   // 裏のタブでも回す。走査の待ちは Worker で数えるので絞られない（33章）。
   if (knownTunings().length === 0) return;
 
@@ -264,6 +272,12 @@ async function tick(): Promise<void> {
       emitStatus('');
       if (result.stopped) lastScheduleAttempt = 0;
     } catch (error) {
+      // 視聴に受信機を譲って止まったなら、失敗とは言わず、あとでやり直す。
+      if (error instanceof LiveBlocksScanError) {
+        emitStatus('');
+        lastScheduleAttempt = 0;
+        return;
+      }
       emitStatus(`番組表の取得に失敗しました: ${
         error instanceof Error ? error.message : String(error)}`);
     }
@@ -431,6 +445,11 @@ export interface FullScanResult {
   readonly programs: readonly ProgramItem[];
   /** 波ごとの失敗。空なら全部通った。 */
   readonly failures: readonly { wave: WaveType; error: string }[];
+  /**
+   * このチューナーでは受信できないので飛ばした波（PX-S1UR・DTV03A-1TU の
+   * BS・CS）。**失敗ではない。**
+   */
+  readonly unsupported: readonly WaveType[];
 }
 
 function fullScanTunings(wave: WaveType): Tuning[] {
@@ -464,6 +483,7 @@ export async function scanAllWaves(
   await takeOver();
   const byWave = new Map<WaveType, { channels: ChannelItem[]; programs: ProgramItem[] }>();
   const failures: { wave: WaveType; error: string }[] = [];
+  const unsupported: WaveType[] = [];
   const total = ALL_WAVES.reduce((sum, wave) => sum + fullScanTunings(wave).length, 0);
   let done = 0;
   let found = 0;
@@ -488,9 +508,13 @@ export async function scanAllWaves(
       });
       byWave.set(wave, { channels: [...result.channels], programs: [...result.programs] });
     } catch (error) {
-      failures.push({
-        wave, error: error instanceof Error ? error.message : String(error),
-      });
+      if (error instanceof WaveUnsupportedError) {
+        unsupported.push(wave);
+      } else {
+        failures.push({
+          wave, error: error instanceof Error ? error.message : String(error),
+        });
+      }
     } finally {
       end(scan);
     }
@@ -507,5 +531,5 @@ export async function scanAllWaves(
     channels.push(...(byWave.get(wave)?.channels ?? []));
     programs.push(...(byWave.get(wave)?.programs ?? []));
   }
-  return { channels, programs, failures };
+  return { channels, programs, failures, unsupported };
 }
