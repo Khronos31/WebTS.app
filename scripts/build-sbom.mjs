@@ -11,7 +11,7 @@
 // checking what they are running should not have to guess which is which.
 
 import { createHash } from 'node:crypto';
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { execFileSync } from 'node:child_process';
@@ -120,6 +120,35 @@ npmPackages(Object.keys(pkg.dependencies ?? {}), 'Bundled into the shipped JavaS
   'CONTAINS');
 npmPackages(Object.keys(pkg.devDependencies ?? {}), 'Build and test only. Not shipped.',
   'BUILD_DEPENDENCY_OF');
+
+// IT930x ファームウェア。デプロイ時に取り出して同じオリジンから配るが、
+// WebTS.app の GPL には含まれない。CONTAINS にせず、別物として並べる。
+const firmwarePath = join(root, 'dist', 'firmware', 'it930x-firmware.bin');
+if (existsSync(firmwarePath)) {
+  const id = spdxId('Package', 'it930x-firmware');
+  packages.push({
+    SPDXID: id,
+    name: 'it930x-firmware',
+    versionInfo: 'NOASSERTION',
+    downloadLocation: 'NOASSERTION',
+    sourceInfo: 'Extracted at deploy time from the PLEX PX-W3U4 BDA driver '
+      + 'by scripts/fetch-firmware.mjs. Not in the repository.',
+    filesAnalyzed: false,
+    checksums: [{
+      algorithm: 'SHA256',
+      checksumValue: createHash('sha256').update(readFileSync(firmwarePath)).digest('hex'),
+    }],
+    licenseConcluded: 'NOASSERTION',
+    licenseDeclared: 'NOASSERTION',
+    copyrightText: 'NOASSERTION',
+    comment: 'Served from the same origin at /firmware/it930x-firmware.bin. '
+      + 'Not covered by the GPL of WebTS.app.',
+  });
+  relationships.push({
+    spdxElementId: rootId, relationshipType: 'OTHER', relatedSpdxElement: id,
+    comment: 'Served alongside; not part of the application.',
+  });
+}
 
 const document = {
   spdxVersion: 'SPDX-2.3',

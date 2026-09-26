@@ -65,6 +65,8 @@ interface USBDevice {
   readonly opened: boolean;
   readonly configuration: USBConfiguration | null;
   readonly configurations: readonly USBConfiguration[];
+  /** この機器の許可を取り消す。一覧の「許可を取り消す」に使う。 */
+  forget(): Promise<void>;
 }
 
 interface USBConnectionEvent extends Event {

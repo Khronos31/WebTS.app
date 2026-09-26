@@ -15,13 +15,17 @@ import { ServiceInfoReader, type NetworkEntry, type ServiceEntry } from '../ts/s
 import { EitReader } from '../ts/eit';
 import { serviceKey } from '../ts/eit-schedule-state';
 import { decodeAribText } from '../ts/arib-text';
-import { readCachedFirmware } from '../usb/firmware';
+import { loadFirmware } from '../usb/firmware';
 import { toProgramItem } from './program-item';
 import { grTunings, tuningKey, type Tuning } from './tuning';
-import { ensureTunerAvailable, loadQ3U4Module } from './q3u4-module';
+import { applyTunerSelection, ensureTunerAvailable, loadQ3U4Module } from './q3u4-module';
 import { stageLabel } from './stage-label';
 import { sleepUnthrottled } from './tick';
 import type { ChannelItem, ProgramItem } from './types';
+import { reportOutcome } from '../reports/reports';
+import {
+  LiveBlocksScanError, liveHoldsReceiver, takeScanTurn, tunerHasOneReceiver,
+} from './receiver-gate';
 
 const DRAIN_BYTES = 512 * 1024;
 /** state, stage, error, cursor, workers, entries。 */
@@ -32,9 +36,11 @@ const WAVE_TERRESTRIAL = 0;
 const WAVE_SATELLITE = 1;
 /** C 側が立てられる作業者の上限。 */
 const MAX_WORKERS = 4;
-/** 上流の global 受信機番号。各ブリッジの下2つが ISDB-S、上2つが ISDB-T。 */
-const TERRESTRIAL_RECEIVERS = [2, 3, 6, 7];
-const SATELLITE_RECEIVERS = [0, 1, 4, 5];
+/**
+ * 受信機は C 側に選ばせる（q3u4-descramble-probe.cpp の claim_receiver）。
+ * どの受信機がどの波を受けられるかは機種によるので、JS には番号を持たせない。
+ */
+const ANY_RECEIVER = -1;
 
 interface WorkerState {
   index: number;
@@ -238,6 +244,21 @@ function toChannelItem(
  * 上流が BUSY を返す（FINDINGS 12章）。地上波と衛星は受信機が別なので、
  * 同時に回してよい（C 側も系統ごとにジョブを持つ）。
  */
+/** 上流の Error の番号（px4/error.h）。 */
+const ERROR_BUSY = 4;
+const ERROR_UNSUPPORTED = 11;
+
+/**
+ * この機種ではその波を受けられない（PX-S1UR・DTV03A-1TU の衛星）。
+ * **失敗ではない。**フルスキャンはこの波を飛ばして続ける。
+ */
+export class WaveUnsupportedError extends Error {
+  constructor(readonly wave: Tuning['wave']) {
+    super('このチューナーはこの放送を受信できません。');
+    this.name = 'WaveUnsupportedError';
+  }
+}
+
 const active: { terrestrial: ChannelScan | null; satellite: ChannelScan | null } = {
   terrestrial: null, satellite: null,
 };
@@ -248,10 +269,24 @@ function isSatellite(options: ScanOptions): boolean {
 
 export class ChannelScan {
   #stopped = false;
+  /** 受信機が1本のチューナーで回しているか。BUSY の意味が変わる。 */
+  #singleReceiver = false;
 
   /** どちらかの系統で走査が動いているか。 */
   static isActive(): boolean {
     return active.terrestrial !== null || active.satellite !== null;
+  }
+
+  /**
+   * 動いている走査を全部止め、止まるまで待つ。受信機が1本のチューナーで
+   * 視聴を始めるときに使う（receiver-gate.ts）。
+   */
+  static async stopAll(): Promise<void> {
+    active.terrestrial?.stop();
+    active.satellite?.stop();
+    while (active.terrestrial !== null || active.satellite !== null) {
+      await sleepUnthrottled(100);
+    }
   }
 
   stop(): void {
@@ -268,7 +303,18 @@ export class ChannelScan {
     if (active[receiverClass] !== null) throw new Error('ほかの走査が動いています。');
     active[receiverClass] = this;
     try {
-      return await this.#run(options);
+      // **受信機が1本のチューナーでは、視聴中は回さず、走査どうしは順番に
+      // 回す**（receiver-gate.ts）。
+      this.#singleReceiver = await tunerHasOneReceiver();
+      if (!this.#singleReceiver) return await this.#run(options);
+      if (liveHoldsReceiver()) throw new LiveBlocksScanError();
+      const release = await takeScanTurn();
+      try {
+        if (liveHoldsReceiver()) throw new LiveBlocksScanError();
+        return await this.#run(options);
+      } finally {
+        release();
+      }
     } finally {
       if (active[receiverClass] === this) active[receiverClass] = null;
     }
@@ -286,20 +332,20 @@ export class ChannelScan {
       throw new Error('衛星の走査には相対 TS 番号が要ります。');
     }
     await ensureTunerAvailable();
-    const firmware = await readCachedFirmware();
-    if (firmware === null) {
-      throw new Error('ファームウェアが設定されていません。設定から取得してください。');
-    }
+    const firmware = await loadFirmware();
     const module = await loadQ3U4Module();
+    await applyTunerSelection(module);
 
-    // **各系統の1本目は視聴のために空けておく。**視聴はいつも1本目を使う
-    // （live-session.ts）。以前は視聴中のときだけ避けていたので、先に走査が
-    // 4本とも掴むと視聴が始められず、選局のたびに走査を止めていた。番組表を
-    // 定期的に取るようになると、それでは選局するたびに取り直しになる。
-    const pool = satellite ? SATELLITE_RECEIVERS : TERRESTRIAL_RECEIVERS;
+    // **視聴用の1本は C 側が空けておく。**以前は視聴中のときだけ避けていた
+    // ので、先に走査が全部掴むと視聴が始められず、選局のたびに走査を止めて
+    // いた。番組表を定期的に取るようになると、それでは選局するたびに取り
+    // 直しになる。作業者の数だけ頼み、受信機は C 側が機種に合わせて割り
+    // 当てる。回せる受信機が少ない機種では、取れなかった作業者は何もせずに
+    // 終わり、残りの作業者が全部の中継器を回す。
     const override = import.meta.env.DEV
       ? (globalThis as { __webtsScanReceivers?: number[] }).__webtsScanReceivers : undefined;
-    const receivers = (override ?? pool.slice(1)).slice(0, Math.min(MAX_WORKERS, tunings.length));
+    const receivers = (override ?? Array<number>(MAX_WORKERS).fill(ANY_RECEIVER))
+      .slice(0, Math.min(MAX_WORKERS, tunings.length));
     if (receivers.length === 0) {
       throw new Error('空いている受信機がありません。');
     }
@@ -328,6 +374,20 @@ export class ChannelScan {
     /** C 側のジョブを選ぶ番号。系統ごとに1つある。 */
     const wave = satellite ? WAVE_SATELLITE : WAVE_TERRESTRIAL;
     let completed = 0;
+    /** beta の動作報告のため。波ごとに、1つでもロックしたか。 */
+    const lockedWaves = new Set<Tuning['wave']>();
+    const report = (result: 'ok' | 'no-signal' | 'failed', stage = -1, code = 0): void => {
+      // その波を受けられない機種（UNSUPPORTED）と、視聴に受信機を取られていた
+      // とき（BUSY）は、動いたかどうかの判断に使えないので送らない。
+      if (result === 'failed' && (code === ERROR_UNSUPPORTED || code === ERROR_BUSY)) return;
+      for (const scanned of new Set(tunings.map((tuning) => tuning.wave))) {
+        reportOutcome({
+          kind: 'scan', wave: scanned,
+          result: result === 'failed' ? result : lockedWaves.has(scanned) ? 'ok' : 'no-signal',
+          stage, code,
+        });
+      }
+    };
     try {
       const started = module.ccall('webts_q3u4_scan_start', 'number',
         ['number', 'number', 'number', 'number', 'number',
@@ -340,6 +400,7 @@ export class ChannelScan {
       if (started !== 0) {
         const name = String(module.ccall(
           'webts_q3u4_scan_error_name', 'string', ['number'], [started]));
+        report('failed', 0, started);
         throw new Error(`スキャンを開始できません: ${name} (${started})`);
       }
 
@@ -442,6 +503,7 @@ export class ChannelScan {
             }
             completed += 1;
             const locked = lockedAt(index) === 1;
+            if (locked && base_tuning !== undefined) lockedWaves.add(base_tuning.wave);
             const label = base_tuning?.label ?? '?';
             if (base_tuning !== undefined) {
               options.onProgress?.({
@@ -468,6 +530,9 @@ export class ChannelScan {
             const code = words[2] ?? 0;
             const name = String(module.ccall(
               'webts_q3u4_scan_error_name', 'string', ['number'], [code]));
+            report('failed', stage, code);
+            if (code === ERROR_UNSUPPORTED) throw new WaveUnsupportedError(tunings[0]?.wave ?? 'GR');
+            if (code === ERROR_BUSY && this.#singleReceiver) throw new LiveBlocksScanError();
             throw new Error(`スキャンが止まりました: ${name} (${code})`);
           }
           break;
@@ -492,6 +557,8 @@ export class ChannelScan {
       }
 
       module.ccall('webts_q3u4_scan_join', 'number', ['number'], [wave]);
+      // 利用者が止めた走査は、動いたかどうかの判断に使えないので送らない。
+      if (!this.#stopped) report('ok');
     } finally {
       module.HEAPU8.fill(0, firmwarePointer, firmwarePointer + firmware.length);
       module._free(firmwarePointer);

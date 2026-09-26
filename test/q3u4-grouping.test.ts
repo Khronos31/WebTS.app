@@ -21,6 +21,7 @@ function deviceWithBulk(packetSize: number): USBDevice {
     deviceProtocol: 0, usbVersionMajor: 2, usbVersionMinor: 0, usbVersionSubminor: 0,
     deviceVersionMajor: 0, deviceVersionMinor: 0, deviceVersionSubminor: 0,
     opened: false, configuration, configurations: [configuration],
+    forget: async () => undefined,
   } as USBDevice;
 }
 

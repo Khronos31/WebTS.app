@@ -5,14 +5,15 @@
 #include "px4/identity.h"
 #include "px4/transport.h"
 
+#include <cstddef>
 #include <memory>
 #include <string_view>
 #include <vector>
 
 namespace px4::userland {
 
-// The runtime owns the libusb implementation, session/context, shared state, and both
-// transports. References returned here are valid only while this runtime remains alive.
+// The runtime owns the libusb implementation, session/context, shared state, and the
+// enclosure's transports (two for PX-Q3U4, one for the MLT5 family). References returned here are valid only while this runtime remains alive.
 class Q3U4Runtime final {
 public:
     static Result<GroupingResult> enumerate_native() noexcept;
@@ -32,10 +33,14 @@ public:
     Q3U4Runtime& operator=(Q3U4Runtime&&) = delete;
 
     Transport& dev1() noexcept;
+    // Only valid when bridge_count() == 2 (PX-Q3U4).
     Transport& dev2() noexcept;
     const Transport& dev1() const noexcept;
     const Transport& dev2() const noexcept;
+    // The selected enclosure's instance identifier (see identity.h).
     std::string_view base_serial() const noexcept;
+    DeviceModel model() const noexcept;
+    std::size_t bridge_count() const noexcept;
     bool quarantined() const noexcept;
 
 private:

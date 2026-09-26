@@ -1,7 +1,7 @@
-// Modified/ported for px4-userland on 2026-09-03.
+// Modified/ported for px4-userland on 2026-09-03; MLT5 support added on 2026-09-24.
 //
 // Copyright (c) 2018-2021 nns779
-// Derived from tsukumijima/px4_drv commit 9eedea8c502875a788697984b93b50032339b9aa.
+// Derived from tsukumijima/px4_drv commit d748866f0da1cb3656106a520de4e9d7f073aacd (v0.6.1).
 // Origin paths: driver/itedtv_bus.c, driver/itedtv_bus.h, driver/px4_usb.c,
 // driver/px4_usb.h, winusb/src/DriverHost_PX4/itedtv_bus_winusb.c,
 // winusb/src/DriverHost_PX4/px4_device.cpp.
@@ -628,6 +628,28 @@ DeviceDiscovery::~DeviceDiscovery() noexcept
     clear();
 }
 
+Result<GroupingResult> group_discovery(const DeviceDiscovery& discovery) noexcept
+{
+    std::vector<DeviceObservation> observations;
+    std::vector<RejectedObservation> unopened;
+    observations.reserve(discovery.candidates().size());
+    for (const DeviceCandidate& candidate : discovery.candidates()) {
+        if (candidate.status == ObservationStatus::open_failed) {
+            unopened.push_back(RejectedObservation{candidate.status, candidate.observation});
+            continue;
+        }
+        observations.push_back(candidate.observation);
+    }
+    auto grouping = group_q3u4_devices(observations);
+    if (!grouping) {
+        return grouping;
+    }
+    for (RejectedObservation& rejected : unopened) {
+        grouping.value().rejected.push_back(std::move(rejected));
+    }
+    return grouping;
+}
+
 Result<void> NativeEnumerator::discover(DeviceDiscovery& discovery) noexcept
 {
     discovery.clear();
@@ -647,7 +669,8 @@ Result<void> NativeEnumerator::discover(DeviceDiscovery& discovery) noexcept
         if (info_result != 0) {
             continue;
         }
-        if (observation.vendor_id != kQ3U4VendorId || observation.product_id != kQ3U4ProductId) {
+        if (device_profile_for_usb_id(observation.vendor_id, observation.product_id) ==
+            nullptr) {
             continue;
         }
         DeviceCandidate candidate;
@@ -1503,22 +1526,26 @@ Result<std::unique_ptr<Q3U4Enclosure>> FdTransportFactory::wrap_and_claim_enclos
         return Result<std::unique_ptr<Q3U4Enclosure>>::failure(selected.error());
     }
     const Q3U4Group& group = grouping.value().groups[selected.value()];
+    const std::size_t bridge_count = device_profile(group.model).bridge_count;
     std::array<std::size_t, 2U> selected_indices{
         std::numeric_limits<std::size_t>::max(), std::numeric_limits<std::size_t>::max()};
     for (std::size_t index = 0U; index < pending.size(); ++index) {
-        const auto parsed = parse_q3u4_serial(pending[index].observation.serial);
-        if (!parsed || parsed.value().base_serial != group.base_serial) {
-            continue;
+        for (std::size_t slot = 0U; slot < bridge_count; ++slot) {
+            if (group.devices[slot].has_value() &&
+                pending[index].observation.serial == group.devices[slot]->serial) {
+                selected_indices[slot] = index;
+            }
         }
-        selected_indices[static_cast<std::size_t>(parsed.value().dev_id - 1U)] = index;
     }
-    if (selected_indices[0U] == std::numeric_limits<std::size_t>::max() ||
-        selected_indices[1U] == std::numeric_limits<std::size_t>::max()) {
-        cleanup();
-        return Result<std::unique_ptr<Q3U4Enclosure>>::failure(Error::INTERNAL);
+    for (std::size_t slot = 0U; slot < bridge_count; ++slot) {
+        if (selected_indices[slot] == std::numeric_limits<std::size_t>::max()) {
+            cleanup();
+            return Result<std::unique_ptr<Q3U4Enclosure>>::failure(Error::INTERNAL);
+        }
     }
 
-    for (const std::size_t index : selected_indices) {
+    for (std::size_t slot = 0U; slot < bridge_count; ++slot) {
+        const std::size_t index = selected_indices[slot];
         const int claim_result = api_.claim_interface(pending[index].handle, 0);
         if (claim_result != 0) {
             cleanup();
@@ -1533,7 +1560,8 @@ Result<std::unique_ptr<Q3U4Enclosure>> FdTransportFactory::wrap_and_claim_enclos
         return Result<std::unique_ptr<Q3U4Enclosure>>::failure(Error::INTERNAL);
     }
     enclosure->base_serial = group.base_serial;
-    for (std::size_t slot = 0U; slot < selected_indices.size(); ++slot) {
+    enclosure->model = group.model;
+    for (std::size_t slot = 0U; slot < bridge_count; ++slot) {
         Pending& member = pending[selected_indices[slot]];
         enclosure->transports[slot].reset(new (std::nothrow) LibusbTransport(
             api_, context_, member.handle, member.retained.fd()));
@@ -1566,12 +1594,7 @@ Result<GroupingResult> Q3U4Runtime::enumerate_native() noexcept
     if (!discovered) {
         return Result<GroupingResult>::failure(discovered.error());
     }
-    std::vector<DeviceObservation> observations;
-    observations.reserve(discovery.candidates().size());
-    for (const DeviceCandidate& candidate : discovery.candidates()) {
-        observations.push_back(candidate.observation);
-    }
-    return group_q3u4_devices(observations);
+    return group_discovery(discovery);
 }
 
 Q3U4Runtime::Q3U4Runtime(std::unique_ptr<Impl> impl) noexcept : impl_(std::move(impl))
@@ -1601,6 +1624,16 @@ const Transport& Q3U4Runtime::dev2() const noexcept
 std::string_view Q3U4Runtime::base_serial() const noexcept
 {
     return impl_->base_serial_;
+}
+
+DeviceModel Q3U4Runtime::model() const noexcept
+{
+    return impl_->model_;
+}
+
+std::size_t Q3U4Runtime::bridge_count() const noexcept
+{
+    return device_profile(impl_->model_).bridge_count;
 }
 
 bool Q3U4Runtime::quarantined() const noexcept
@@ -1708,13 +1741,8 @@ Result<void> Q3U4Runtime::Impl::acquire_native(std::string_view base_serial) noe
     // Validate caller input before discovery errors are considered.  A malformed
     // requested base serial must remain an argument error even when USB
     // discovery also encounters an operational failure.
-    if (!base_serial.empty() && base_serial.size() != 14U) {
+    if (!base_serial.empty() && !valid_device_instance(base_serial)) {
         return Result<void>::failure(Error::INVALID_ARGUMENT);
-    }
-    for (const char character : base_serial) {
-        if (character < '0' || character > '9') {
-            return Result<void>::failure(Error::INVALID_ARGUMENT);
-        }
     }
 
     DeviceDiscovery discovery;
@@ -1752,19 +1780,23 @@ Result<void> Q3U4Runtime::Impl::acquire_native(std::string_view base_serial) noe
         return Result<void>::failure(selected.error());
     }
     const Q3U4Group& group = grouping.value().groups[selected.value()];
+    const std::size_t bridge_count = device_profile(group.model).bridge_count;
     std::array<const DeviceCandidate*, 2U> candidates{nullptr, nullptr};
     for (const DeviceCandidate& candidate : discovery.candidates()) {
-        for (std::size_t slot = 0U; slot < candidates.size(); ++slot) {
+        for (std::size_t slot = 0U; slot < bridge_count; ++slot) {
             if (group.devices[slot].has_value() &&
                 candidate.observation.serial == group.devices[slot]->serial) {
                 candidates[slot] = &candidate;
             }
         }
     }
-    if (candidates[0U] == nullptr || candidates[1U] == nullptr) {
-        return Result<void>::failure(Error::INTERNAL);
+    for (std::size_t slot = 0U; slot < bridge_count; ++slot) {
+        if (candidates[slot] == nullptr) {
+            return Result<void>::failure(Error::INTERNAL);
+        }
     }
-    for (const DeviceCandidate* candidate : candidates) {
+    for (std::size_t slot = 0U; slot < bridge_count; ++slot) {
+        const DeviceCandidate* candidate = candidates[slot];
         if (candidate->status != ObservationStatus::usable) {
             if (candidate->discovery_error != Error::OK) {
                 return Result<void>::failure(candidate->discovery_error);
@@ -1791,14 +1823,14 @@ Result<void> Q3U4Runtime::Impl::acquire_native(std::string_view base_serial) noe
         }
     };
 
-    for (std::size_t slot = 0U; slot < pending.size(); ++slot) {
+    for (std::size_t slot = 0U; slot < bridge_count; ++slot) {
         const int result = api_->open(candidates[slot]->device, &pending[slot].handle);
         if (result != 0 || pending[slot].handle == nullptr) {
             cleanup();
             return Result<void>::failure(result == 0 ? Error::INTERNAL : map_libusb_error(result));
         }
     }
-    for (std::size_t slot = 0U; slot < pending.size(); ++slot) {
+    for (std::size_t slot = 0U; slot < bridge_count; ++slot) {
         const int result = api_->claim_interface(pending[slot].handle, 0);
         if (result != 0) {
             cleanup();
@@ -1808,7 +1840,7 @@ Result<void> Q3U4Runtime::Impl::acquire_native(std::string_view base_serial) noe
     }
 
     std::array<std::unique_ptr<LibusbTransport>, 2U> transports;
-    for (std::size_t slot = 0U; slot < transports.size(); ++slot) {
+    for (std::size_t slot = 0U; slot < bridge_count; ++slot) {
         transports[slot].reset(new (std::nothrow) LibusbTransport(
             *api_, session_->context(), pending[slot].handle, -1, state_.get()));
         if (!transports[slot]) {
@@ -1819,6 +1851,7 @@ Result<void> Q3U4Runtime::Impl::acquire_native(std::string_view base_serial) noe
         pending[slot].claimed = false;
     }
     base_serial_ = group.base_serial;
+    model_ = group.model;
     transports_[0U] = std::move(transports[0U]);
     transports_[1U] = std::move(transports[1U]);
     cleanup();
@@ -1911,22 +1944,25 @@ Result<void> Q3U4Runtime::Impl::acquire_fds(const std::vector<int>& fds,
         return Result<void>::failure(selected.error());
     }
     const Q3U4Group& group = grouping.value().groups[selected.value()];
+    const std::size_t bridge_count = device_profile(group.model).bridge_count;
     std::array<std::size_t, 2U> selected_indices{
         std::numeric_limits<std::size_t>::max(), std::numeric_limits<std::size_t>::max()};
     for (std::size_t index = 0U; index < pending.size(); ++index) {
-        for (std::size_t slot = 0U; slot < group.devices.size(); ++slot) {
+        for (std::size_t slot = 0U; slot < bridge_count; ++slot) {
             if (group.devices[slot].has_value() &&
                 pending[index].observation.serial == group.devices[slot]->serial) {
                 selected_indices[slot] = index;
             }
         }
     }
-    if (selected_indices[0U] == std::numeric_limits<std::size_t>::max() ||
-        selected_indices[1U] == std::numeric_limits<std::size_t>::max()) {
-        cleanup();
-        return Result<void>::failure(Error::INTERNAL);
+    for (std::size_t slot = 0U; slot < bridge_count; ++slot) {
+        if (selected_indices[slot] == std::numeric_limits<std::size_t>::max()) {
+            cleanup();
+            return Result<void>::failure(Error::INTERNAL);
+        }
     }
-    for (const std::size_t index : selected_indices) {
+    for (std::size_t slot = 0U; slot < bridge_count; ++slot) {
+        const std::size_t index = selected_indices[slot];
         const int result = api_->claim_interface(pending[index].handle, 0);
         if (result != 0) {
             cleanup();
@@ -1936,7 +1972,7 @@ Result<void> Q3U4Runtime::Impl::acquire_fds(const std::vector<int>& fds,
     }
 
     std::array<std::unique_ptr<LibusbTransport>, 2U> transports;
-    for (std::size_t slot = 0U; slot < transports.size(); ++slot) {
+    for (std::size_t slot = 0U; slot < bridge_count; ++slot) {
         Pending& member = pending[selected_indices[slot]];
         transports[slot].reset(new (std::nothrow) LibusbTransport(
             *api_, session_->context(), member.handle, member.retained.fd(), state_.get()));
@@ -1949,6 +1985,7 @@ Result<void> Q3U4Runtime::Impl::acquire_fds(const std::vector<int>& fds,
         member.retained.release();
     }
     base_serial_ = group.base_serial;
+    model_ = group.model;
     transports_[0U] = std::move(transports[0U]);
     transports_[1U] = std::move(transports[1U]);
     cleanup();

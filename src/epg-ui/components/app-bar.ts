@@ -1,4 +1,9 @@
-// EPGStationスタイルのAppBar（ヘッダーバー）
+import {
+  IS_BETA_BUILD,
+  reportsEnabled,
+  reportsIndicatorVisible,
+  subscribeReports,
+} from '../../reports/reports';
 
 export interface AppBarOptions {
   title: string;
@@ -11,6 +16,7 @@ export class AppBar {
   private titleElement: HTMLElement;
   private refreshBtn: HTMLButtonElement;
   private refreshAction: (() => void) | null = null;
+  private unsubscribeReports: (() => void) | null = null;
 
   constructor(options: AppBarOptions) {
     this.element = document.createElement('header');
@@ -59,6 +65,37 @@ export class AppBar {
       this.setRefreshAction(options.onRefresh);
     }
 
+    {
+      // beta は常に出す。本番は送っているあいだだけ出す（reports.ts）。
+      const reportsBtn = document.createElement('button');
+      reportsBtn.type = 'button';
+      reportsBtn.className = 'reports-status-pill';
+      const updateReportsBtn = () => {
+        const enabled = reportsEnabled();
+        reportsBtn.style.display = reportsIndicatorVisible() ? '' : 'none';
+        if (IS_BETA_BUILD) {
+          reportsBtn.textContent = enabled ? 'ログ収集: 許可' : 'ログ収集: 停止';
+          reportsBtn.classList.toggle('stopped', !enabled);
+          reportsBtn.setAttribute('title', enabled
+            ? 'beta版の動作報告: 許可（クリックで設定へ）'
+            : 'beta版の動作報告: 停止（クリックで設定へ）');
+        } else {
+          reportsBtn.textContent = 'ログ収集中';
+          reportsBtn.classList.remove('stopped');
+          reportsBtn.setAttribute('title', '動作ログ収集中（クリックで設定へ）');
+        }
+      };
+      updateReportsBtn();
+      reportsBtn.addEventListener('click', () => {
+        location.hash = '#settings';
+        setTimeout(() => {
+          document.getElementById('reports-setting-card')?.scrollIntoView({ behavior: 'smooth' });
+        }, 50);
+      });
+      this.unsubscribeReports = subscribeReports(updateReportsBtn);
+      actions.append(reportsBtn);
+    }
+
     this.element.append(toggleBtn, this.titleElement, actions);
   }
 
@@ -90,6 +127,9 @@ export class AppBar {
   }
 
   public destroy(): void {
-    // 破棄処理が必要な場合はここに記述
+    if (this.unsubscribeReports) {
+      this.unsubscribeReports();
+      this.unsubscribeReports = null;
+    }
   }
 }

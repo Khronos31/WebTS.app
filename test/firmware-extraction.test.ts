@@ -1,7 +1,7 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { FIRMWARE_SOURCE, extractFirmware } from '../src/usb/firmware';
+import { FIRMWARE_SOURCE, extractFirmware } from '../src/usb/firmware-extract';
 import { readZipEntry } from '../src/usb/zip';
 import type { IdentityModule } from '../src/usb/px4-identity';
 
@@ -24,7 +24,7 @@ describe.skipIf(!runnable)('firmware extraction from the real vendor driver', ()
     const module = await loadModule();
     const archive = new Uint8Array(readFileSync(archivePath!));
     const stages: string[] = [];
-    const result = await extractFirmware(archive, (stage) => stages.push(stage), module);
+    const result = await extractFirmware(archive, module, (stage) => stages.push(stage));
 
     expect(result.bytes.length).toBe(2169);
     expect(result.archiveMatchedPin).toBe(true);

@@ -39,9 +39,11 @@ self.addEventListener('fetch', (event) => {
   // Skip cross-origin requests
   if (url.origin !== self.location.origin) return;
 
-  // Do NOT intercept WASM builds or live TS streams
-  // (/build/* is Emscripten WASM; /stream/* or live capture endpoints must bypass SW cache)
-  if (url.pathname.startsWith('/build/') || url.pathname.includes('/stream/')) {
+  // Do NOT intercept WASM builds, the tuner firmware or live TS streams
+  // (/build/* is Emscripten WASM; /firmware/* is placed at deploy time like /build/*;
+  // /stream/* or live capture endpoints must bypass SW cache)
+  if (url.pathname.startsWith('/build/') || url.pathname.startsWith('/firmware/')
+      || url.pathname.includes('/stream/')) {
     return;
   }
 

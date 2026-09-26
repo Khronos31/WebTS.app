@@ -23,8 +23,8 @@ export class VideoPlayer {
   public readonly element: HTMLElement;
   /** 映像の描画先。制御を Worker へ渡すのは呼び出し側の仕事。 */
   public media: HTMLCanvasElement;
-  private subtitleOverlay: HTMLElement;
-  private subtitleText: HTMLElement;
+  /** 字幕を描く層。映像と同じ位置・大きさに保つ（setVideoRect）。 */
+  private captionLayer: HTMLElement;
   private statusText: HTMLElement;
   private controlsBar: HTMLElement;
   private playBtn: HTMLButtonElement;
@@ -55,17 +55,16 @@ export class VideoPlayer {
     // 1. 映像の描画先
     this.media = this.createMedia();
 
-    // 2. 字幕オーバーレイレイヤー (ARIB STD-B24 風スタイル)
-    this.subtitleOverlay = document.createElement('div');
-    this.subtitleOverlay.className = 'video-subtitle-overlay';
-
-    this.subtitleText = document.createElement('div');
-    this.subtitleText.className = 'video-subtitle-text';
-    this.subtitleText.textContent = '';
-    // 中身が空でも枠と背景は描かれる。字幕の無い番組で下端に黒い帯だけが
-    // 残るので、文字が入っていないあいだは要素ごと出さない。
-    this.subtitleText.style.display = 'none';
-    this.subtitleOverlay.append(this.subtitleText);
+    // 2. 字幕を描く層
+    // 字幕は放送の指定どおりの位置に描く（caption-canvas.ts）。描く先は映像と
+    // 同じ位置・大きさの層で、操作を妨げない。
+    this.captionLayer = document.createElement('div');
+    this.captionLayer.className = 'video-caption-layer';
+    this.captionLayer.style.position = 'absolute';
+    this.captionLayer.style.inset = '0';
+    this.captionLayer.style.zIndex = '10';
+    this.captionLayer.style.pointerEvents = 'none';
+    this.captionLayer.style.overflow = 'hidden';
 
     // 2b. 受信の状況とエラーの表示先。
     // **字幕の枠には混ぜない。**放送から来た字幕とアプリのメッセージが
@@ -184,7 +183,8 @@ export class VideoPlayer {
     this.controlsBar.append(leftGroup, rightGroup);
 
     // プレイヤーコンテナに組み立て
-    this.element.append(this.media, this.subtitleOverlay, this.statusText, this.controlsBar);
+    this.element.append(this.media, this.captionLayer, this.statusText,
+      this.controlsBar);
 
     // イベントバインド
     this.bindEvents(options);
@@ -357,9 +357,14 @@ export class VideoPlayer {
     this.statusText.style.display = text === '' ? 'none' : '';
   }
 
+  /** 字幕を描く先。LiveSession の captionHost に渡す。 */
+  public get captionHost(): HTMLElement {
+    return this.captionLayer;
+  }
+
   public setSubtitlesEnabled(enabled: boolean): void {
     this.isSubtitlesEnabled = enabled;
-    this.subtitleOverlay.style.display = enabled ? 'flex' : 'none';
+    this.captionLayer.style.visibility = enabled ? '' : 'hidden';
     this.subtitleBtn.classList.toggle('active', enabled);
 
     const textSpan = this.subtitleBtn.querySelector('.btn-text');
@@ -368,24 +373,23 @@ export class VideoPlayer {
     }
   }
 
-  /** 放送から取り出した字幕文字列を表示する。空文字で消える。 */
-  public setSubtitleText(text: string): void {
-    this.subtitleText.textContent = text;
-    this.subtitleText.style.display = text === '' ? 'none' : '';
-  }
-
   /**
    * 映像を箱の中の一部へ寄せる。データ放送が映像の位置と大きさを決めるとき
    * に使う。値は箱に対する割合（0〜1）。null で全面へ戻す。
    */
   public setVideoRect(rect: { left: number; top: number; width: number; height: number } | null): void {
     const style = this.media.style;
+    // 字幕の層も映像に付いて行く。字幕の座標は映像の上のもの。
+    const caption = this.captionLayer.style;
     if (rect === null) {
       style.removeProperty('position');
       style.removeProperty('left');
       style.removeProperty('top');
       style.removeProperty('width');
       style.removeProperty('height');
+      caption.inset = '0';
+      caption.removeProperty('width');
+      caption.removeProperty('height');
       return;
     }
     style.position = 'absolute';
@@ -393,6 +397,11 @@ export class VideoPlayer {
     style.top = `${rect.top * 100}%`;
     style.width = `${rect.width * 100}%`;
     style.height = `${rect.height * 100}%`;
+    caption.inset = 'auto';
+    caption.left = style.left;
+    caption.top = style.top;
+    caption.width = style.width;
+    caption.height = style.height;
   }
 
   /** 映像の実寸が分かった時点で表示比を合わせる。 */

@@ -30,16 +30,24 @@ const output = join(root, 'build', 'q3u4-descramble');
 
 const COMMON = ['-O2', '-DPLATFORM_POSIX=1', '-DOS_EMSCRIPTEN=1', '-DENABLE_LOGGING=1', '-pthread'];
 
+// Every model the enclosure table in native/px4-enclosure.cpp can assemble is
+// linked in. The shared core is model-independent; each model adds its own
+// frontend, power, card and tuner backend.
 const upstreamSources = [
+  // Shared core: transport, IT930x bridge, identity, card, data plane.
   'libusb_transport.cpp', 'it930x.cpp', 'it930x_protocol.cpp', 'bridge_i2c.cpp',
   'identity.cpp', 'firmware.cpp', 'error.cpp', 'logging.cpp',
-  'q3u4_frontend.cpp', 'q3u4_power.cpp', 'frontend_probe_support.cpp',
-  // Satellite tuning needs the LNB authority: it is the only thing allowed to
-  // drive GPIO 11, and it reference-counts the two receivers on a bridge.
-  'q3u4_lnb_power.cpp',
-  'tc90522.cpp', 'r850.cpp', 'rt710.cpp',
-  'card.cpp', 'card_service.cpp', 'q3u4_card_backend.cpp', 'ipc.cpp',
+  'card.cpp', 'card_service.cpp', 'ipc.cpp',
   'q3u4_stream.cpp', 'tagged_ts_demux.cpp',
+  // PX-Q3U4. The LNB authority is the only thing allowed to drive GPIO 11,
+  // and it reference-counts the two receivers on a bridge.
+  'q3u4_frontend.cpp', 'q3u4_power.cpp', 'q3u4_lnb_power.cpp',
+  'tc90522.cpp', 'r850.cpp', 'rt710.cpp',
+  'q3u4_card_backend.cpp', 'q3u4_tuner_backend.cpp',
+  // MLT 系（PX-MLT5PE・PX-MLT8PE・DTV02A）と、1受信機の機種。
+  'mlt5pe_frontend.cpp', 'mlt5pe_power.cpp', 'mlt5pe_backend.cpp',
+  'single_receiver_frontend.cpp',
+  'cxd2856er.cpp', 'cxd2858er.cpp',
 ].map((name) => join(upstream, 'src', name));
 
 const { emcc, emxx } = findCompilers();
@@ -74,8 +82,8 @@ for (const name of ['b_cas_card.c', 'arib_std_b25.c', 'multi2.c', 'ts_section_pa
 const cxxShims = [
   join(root, 'native', 'winscard-q3u4.cpp'),
 ];
-for (const source of [join(root, 'native', 'q3u4-descramble-probe.cpp'), ...cxxShims,
-  ...upstreamSources]) {
+for (const source of [join(root, 'native', 'q3u4-descramble-probe.cpp'),
+  join(root, 'native', 'px4-enclosure.cpp'), ...cxxShims, ...upstreamSources]) {
   const object = join(variantRoot, basename(source, '.cpp') + '.px4.o');
   run(emxx, [...COMMON, '-I', join(root, 'native', 'winscard'), '-I', join(b25, 'src'),
     ...include, ...px4Include, '-std=c++20', '-c', source, '-o', object]);
@@ -93,7 +101,7 @@ run(emxx, [
     '"_webts_q3u4_scan_advance","_webts_q3u4_scan_acknowledge",' +
     '"_webts_q3u4_scan_stop","_webts_q3u4_scan_join",' +
     '"_webts_q3u4_scan_error_name",' +
-    '"_webts_q3u4_session_keep_open",' +
+    '"_webts_q3u4_session_keep_open","_webts_q3u4_select_tuner",' +
     '"_webts_q3u4_descramble_join","_webts_q3u4_descramble_error_name",'+
     '"_webts_q3u4_descramble_output","_webts_q3u4_descramble_output_size",'+
     '"_webts_q3u4_descramble_discard","_webts_q3u4_descramble_stop",'+

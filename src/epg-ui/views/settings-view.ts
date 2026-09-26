@@ -5,13 +5,6 @@ import {
   getEnabledChannelIds,
   saveEnabledChannelIds,
 } from '../enabled-channels';
-import {
-  FIRMWARE_SOURCE,
-  cacheFirmware,
-  clearCachedFirmware,
-  extractFirmware,
-  type FirmwareStage,
-} from '../../usb/firmware';
 import { readSetupState } from '../../ui/setup-state';
 import {
   getScanState,
@@ -23,10 +16,26 @@ import {
 import { bsTunings, csTunings, grTunings, satelliteScanTunings } from '../tuning';
 import type { ChannelItem } from '../types';
 import { channelsSync } from '../channel-source';
-import { loadQ3U4Identifiers } from '../../usb/px4-identity';
+import {
+  forgetTuner,
+  listConnectedTuners,
+  loadPx4Models,
+  readTunerPermission,
+  selectTuner,
+  subscribeTuners,
+  tunersChanged,
+  usbFilters,
+  type ConnectedTuner,
+} from '../../usb/px4-identity';
 import { getTheme, setTheme, type ThemeMode } from '../theme-manager';
 import { allowLnb15v, setAllowLnb15v } from '../lnb-setting';
 import { getZipcode, normalizeZipcode, setZipcode } from '../bml-receiver-info';
+import {
+  IS_BETA_BUILD,
+  lastSentReport,
+  reportsEnabled,
+  setReportsEnabled,
+} from '../../reports/reports';
 
 export interface SettingsViewOptions {
   onStateChanged: () => void;
@@ -36,6 +45,7 @@ export class SettingsView {
   public readonly element: HTMLElement;
   private onStateChanged: () => void;
   private unsubscribeScan: (() => void) | null = null;
+  private unsubscribeTuners: (() => void) | null = null;
   private scanTimer: number | null = null;
 
   constructor(options: SettingsViewOptions) {
@@ -47,6 +57,10 @@ export class SettingsView {
   }
 
   private async render(): Promise<void> {
+    if (this.unsubscribeTuners) {
+      this.unsubscribeTuners();
+      this.unsubscribeTuners = null;
+    }
     this.element.replaceChildren();
 
     const state = await readSetupState();
@@ -56,9 +70,6 @@ export class SettingsView {
 
     // 2. データ放送 地域・郵便番号設定（任意） カード
     this.element.append(this.createZipcodeCard());
-
-    // 3. ファームウェアを取得・設定 カード
-    this.element.append(this.createFirmwareCard(state.firmware));
 
     // 3. 地域設定・チャンネルスキャン カード
     this.element.append(this.createScanCard());
@@ -71,6 +82,9 @@ export class SettingsView {
 
     // 6. 受信状態 (Signal Monitor) カード
     this.element.append(this.createSignalCard());
+
+    // 7. 動作報告 カード（本番は既定で送らない、beta は既定で送る。reports.ts）
+    this.element.append(this.createBetaReportsCard());
   }
 
   private createThemeCard(): HTMLElement {
@@ -250,136 +264,6 @@ export class SettingsView {
         handleSave();
       }
     });
-
-    return card;
-  }
-
-  private createFirmwareCard(firmwareState: { needed: boolean; detail: string }): HTMLElement {
-    const card = document.createElement('div');
-    card.className = 'settings-card';
-
-    const isOk = !firmwareState.needed;
-
-    card.innerHTML = `
-      <div class="settings-card-header">
-        <div class="settings-card-title">
-          <svg viewBox="0 0 24 24" style="width:20px;height:20px;fill:currentColor">
-            <path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/>
-          </svg>
-          <span>ファームウェアを取得・設定</span>
-        </div>
-        <span class="status-badge ${isOk ? 'ok' : 'warning'}">
-          ${isOk ? '設定完了' : '要設定'}
-        </span>
-      </div>
-
-      <p class="settings-card-desc">
-        PX-Q3U4 / PX-W3U4 内部の IT930x デモジュレータを初期化するためにファームウェア (2,169 bytes) が必要です。
-        メーカー提供の公式ドライバパッケージからブラウザ内で自動抽出され、端末内の IndexedDB に安全に保存されます。
-      </p>
-
-      <div class="form-group" style="margin-bottom: 12px;">
-        <span class="form-label">メーカー公式ドライバ配布元:</span>
-        <a href="${FIRMWARE_SOURCE.archiveUrl}" target="_blank" rel="noreferrer" style="color: var(--primary-light); font-size: 0.8125rem;">
-          PLEX PX-W3U4 ドライバパッケージ (ZIP)
-        </a>
-        <span style="font-size: 0.75rem; color: var(--text-secondary); margin-left: 6px;">
-          （PX-Q3U4 でも共通の IT930x ファームウェアを使用します）
-        </span>
-      </div>
-
-      <div class="drop-zone" id="fw-drop-zone">
-        <svg viewBox="0 0 24 24" style="width:40px;height:40px;fill:var(--text-secondary);margin-bottom:8px">
-          <path d="M19.35 10.04C18.67 6.59 15.64 4 12 4 9.11 4 6.6 5.64 5.35 8.04 2.34 8.36 0 10.91 0 14c0 3.31 2.69 6 6 6h13c2.76 0 5-2.24 5-5 0-2.64-2.05-4.78-4.65-4.96zM14 13v4h-4v-4H7l5-5 5 5h-3z"/>
-        </svg>
-        <div style="font-weight: 600; font-size: 0.875rem; margin-bottom: 4px;">
-          ダウンロードしたドライバ ZIP または .sys ファイルをここにドラッグ＆ドロップ
-        </div>
-        <div style="font-size: 0.75rem; color: var(--text-secondary); margin-bottom: 12px;">
-          またはクリックしてファイルを選択
-        </div>
-        <input type="file" id="fw-file-picker" accept=".zip,.sys" style="display:none;" />
-        <button type="button" class="btn btn-secondary" id="fw-browse-btn">
-          ファイルを選択
-        </button>
-      </div>
-
-      <div id="fw-status-box" style="margin-top: 12px; font-size: 0.8125rem; display: none;"></div>
-
-      ${isOk ? `
-        <div style="margin-top: 16px; display: flex; justify-content: flex-end;">
-          <button type="button" class="btn btn-secondary" id="fw-clear-btn" style="color: var(--error);">
-            ファームウェアを消去
-          </button>
-        </div>
-      ` : ''}
-    `;
-
-    const picker = card.querySelector<HTMLInputElement>('#fw-file-picker')!;
-    const browseBtn = card.querySelector<HTMLButtonElement>('#fw-browse-btn')!;
-    const dropZone = card.querySelector<HTMLElement>('#fw-drop-zone')!;
-    const statusBox = card.querySelector<HTMLElement>('#fw-status-box')!;
-    const clearBtn = card.querySelector<HTMLButtonElement>('#fw-clear-btn');
-
-    browseBtn.addEventListener('click', () => picker.click());
-    dropZone.addEventListener('click', (e) => {
-      if (e.target !== browseBtn) picker.click();
-    });
-
-    dropZone.addEventListener('dragover', (e) => {
-      e.preventDefault();
-      dropZone.classList.add('drag-over');
-    });
-
-    dropZone.addEventListener('dragleave', () => {
-      dropZone.classList.remove('drag-over');
-    });
-
-    dropZone.addEventListener('drop', (e) => {
-      e.preventDefault();
-      dropZone.classList.remove('drag-over');
-      const file = e.dataTransfer?.files[0];
-      if (file) void handleFile(file);
-    });
-
-    picker.addEventListener('change', () => {
-      const file = picker.files?.[0];
-      if (file) void handleFile(file);
-    });
-
-    clearBtn?.addEventListener('click', async () => {
-      await clearCachedFirmware();
-      this.onStateChanged();
-      void this.render();
-    });
-
-    const handleFile = async (file: File) => {
-      statusBox.style.display = 'block';
-      statusBox.innerHTML = '<span style="color:var(--primary-light);">ファームウェアを抽出中...</span>';
-
-      try {
-        const bytes = new Uint8Array(await file.arrayBuffer());
-        const stages: FirmwareStage[] = [];
-        const result = await extractFirmware(bytes, (stage) => {
-          stages.push(stage);
-          statusBox.innerHTML = `<div>${stages.map((s) => `✔ ${s}`).join('<br>')}</div>`;
-        });
-        await cacheFirmware(result.bytes);
-        statusBox.innerHTML = `
-          <div style="color: var(--success); font-weight: 600;">
-            ✔ ファームウェア (${result.bytes.length} bytes) の抽出・IndexedDB保存が完了しました！
-          </div>
-        `;
-        this.onStateChanged();
-        setTimeout(() => void this.render(), 1200);
-      } catch (err) {
-        statusBox.innerHTML = `
-          <div style="color: var(--error);">
-            ✖ 抽出エラー: ${err instanceof Error ? err.message : String(err)}
-          </div>
-        `;
-      }
-    };
 
     return card;
   }
@@ -704,14 +588,14 @@ export class SettingsView {
           </svg>
           <span>チューナーハードウェア (WebUSB)</span>
         </div>
-        <span class="status-badge ${tunerState.needed ? 'warning' : 'ok'}">
+        <span class="status-badge ${tunerState.needed ? 'warning' : 'ok'}" id="tuner-header-badge">
           ${tunerState.needed ? '未接続' : '認識済'}
         </span>
       </div>
 
       <p class="settings-card-desc">
-        PLEX PX-Q3U4 / PX-W3U4 などの USB 接続デジタルTVチューナーをブラウザの WebUSB API 経由で直接制御します。
-        PX-Q3U4 は 1 台で USB 上に 2 つのデバイスとして列挙されます。
+        対応する USB 接続デジタルTVチューナー（PX-Q3U4 / PX-W3U4 / PX-MLT5PE / DTV02A-5TS-P など）をブラウザの WebUSB API 経由で直接制御します。
+        複数のチューナーが接続・許可されている場合は使用する1台を選択できます（選択は次回受信開始時から反映されます。PX-Q3U4 など一部機種は1台につき複数の USB 機器の許可が必要です）。
       </p>
 
       <div style="display: flex; gap: 12px; align-items: center;">
@@ -725,10 +609,171 @@ export class SettingsView {
           ${tunerState.detail}
         </span>
       </div>
+
+      <div style="border-top: 1px solid var(--divider); padding-top: 16px; margin-top: 16px;">
+        <div style="font-weight: 600; font-size: 0.875rem; margin-bottom: 8px;">
+          接続済みのチューナー
+        </div>
+        <div id="connected-tuners-container"></div>
+        <div style="font-size: 0.75rem; color: var(--text-secondary); margin-top: 8px;">
+          ※ 視聴や走査で使用するチューナーは1台のみです。選択内容は端末内に保存されます。
+        </div>
+      </div>
     `;
 
     const connectBtn = card.querySelector<HTMLButtonElement>('#usb-connect-btn')!;
     const statusText = card.querySelector<HTMLElement>('#usb-status-text')!;
+    const headerBadge = card.querySelector<HTMLElement>('#tuner-header-badge')!;
+    const tunersContainer = card.querySelector<HTMLElement>('#connected-tuners-container')!;
+
+    let renderSeq = 0;
+    const renderTunerList = async () => {
+      const currentSeq = ++renderSeq;
+      let tuners: ConnectedTuner[];
+      try {
+        tuners = await listConnectedTuners();
+      } catch {
+        tuners = [];
+      }
+      if (currentSeq !== renderSeq) return;
+
+      try {
+        const permission = await readTunerPermission();
+        headerBadge.className = `status-badge ${permission.ready ? 'ok' : 'warning'}`;
+        headerBadge.textContent = permission.ready ? '認識済' : '未接続';
+      } catch {
+        // ignore
+      }
+
+      if (tuners.length === 0) {
+        tunersContainer.innerHTML = `
+          <div class="tuner-empty-notice">
+            接続されているチューナーはありません。「チューナーを接続・選択」から機器を許可してください。
+          </div>
+        `;
+        return;
+      }
+
+      const tableContainer = document.createElement('div');
+      tableContainer.className = 'tuner-table-container';
+
+      const table = document.createElement('table');
+      table.className = 'tuner-table';
+      table.innerHTML = `
+        <thead>
+          <tr>
+            <th style="width: 44px; text-align: center;">選択</th>
+            <th>チューナー名</th>
+            <th>状態</th>
+            <th style="width: 120px; text-align: right;">操作</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      `;
+
+      const tbody = table.querySelector('tbody')!;
+
+      for (const tuner of tuners) {
+        const tr = document.createElement('tr');
+
+        // 1. 選択（ラジオボタン）
+        const tdRadio = document.createElement('td');
+        tdRadio.style.textAlign = 'center';
+
+        const radio = document.createElement('input');
+        radio.type = 'radio';
+        radio.name = 'selected-tuner';
+        radio.checked = tuner.selected;
+        radio.disabled = !tuner.ready;
+        radio.style.cursor = tuner.ready ? 'pointer' : 'not-allowed';
+        radio.setAttribute('aria-label', `${tuner.label} を選択`);
+        radio.addEventListener('change', () => {
+          if (radio.checked) {
+            selectTuner(tuner);
+          }
+        });
+        tdRadio.append(radio);
+
+        // 2. チューナー名（ラベル + 未確認バッジ）
+        const tdName = document.createElement('td');
+        const nameSpan = document.createElement('span');
+        nameSpan.textContent = tuner.label;
+        nameSpan.style.fontWeight = tuner.selected ? '600' : '400';
+        if (tuner.ready) {
+          nameSpan.style.cursor = 'pointer';
+          nameSpan.addEventListener('click', () => {
+            if (!radio.checked) {
+              radio.checked = true;
+              selectTuner(tuner);
+            }
+          });
+        }
+        tdName.append(nameSpan);
+
+        if (!tuner.model.verified) {
+          const unverifiedBadge = document.createElement('span');
+          unverifiedBadge.className = 'status-badge warning';
+          unverifiedBadge.style.fontSize = '0.6875rem';
+          unverifiedBadge.style.marginLeft = '8px';
+          unverifiedBadge.textContent = '未確認（報告募集）';
+          tdName.append(unverifiedBadge);
+        }
+
+        // 3. 状態
+        const tdStatus = document.createElement('td');
+        const statusBadge = document.createElement('span');
+        if (tuner.ready) {
+          statusBadge.className = 'status-badge ok';
+          statusBadge.textContent = '使える';
+        } else if (tuner.granted < tuner.required) {
+          statusBadge.className = 'status-badge warning';
+          statusBadge.textContent = `あと ${tuner.required - tuner.granted} つ許可が要る`;
+        } else {
+          statusBadge.className = 'status-badge error';
+          statusBadge.textContent = 'この機器を読めません';
+        }
+        tdStatus.append(statusBadge);
+
+        // 4. 操作（許可を取り消すボタン）
+        const tdAction = document.createElement('td');
+        tdAction.style.textAlign = 'right';
+
+        const forgetBtn = document.createElement('button');
+        forgetBtn.type = 'button';
+        forgetBtn.className = 'btn-small';
+        forgetBtn.style.color = 'var(--error, #c62828)';
+        forgetBtn.textContent = '許可を取り消す';
+        forgetBtn.addEventListener('click', async () => {
+          const confirmed = window.confirm(
+            `${tuner.label} の許可を取り消しますか？\n他の録画ソフトやブラウザ外で利用できるようになります。`
+          );
+          if (!confirmed) return;
+          try {
+            forgetBtn.disabled = true;
+            await forgetTuner(tuner);
+            statusText.textContent = `${tuner.label} の許可を取り消しました`;
+            this.onStateChanged();
+          } catch (err) {
+            alert(`許可の取り消しに失敗しました: ${err instanceof Error ? err.message : String(err)}`);
+            forgetBtn.disabled = false;
+          }
+        });
+        tdAction.append(forgetBtn);
+
+        tr.append(tdRadio, tdName, tdStatus, tdAction);
+        tbody.append(tr);
+      }
+
+      tableContainer.append(table);
+      tunersContainer.replaceChildren(tableContainer);
+    };
+
+    void renderTunerList();
+
+    this.unsubscribeTuners = subscribeTuners(() => {
+      void renderTunerList();
+      this.onStateChanged();
+    });
 
     connectBtn.addEventListener('click', async () => {
       if (!('usb' in navigator)) {
@@ -737,16 +782,15 @@ export class SettingsView {
       }
       statusText.textContent = 'デバイスの選択を待機中...';
       try {
-        // VID/PID は上流の定数をモジュールから取る。TypeScript 側に書き写さない。
-        const identifiers = await loadQ3U4Identifiers();
+        // 候補は上流が知っている全機種。VID/PID と機種の表はモジュールから
+        // 取り、TypeScript 側に書き写さない。
         const device = await navigator.usb.requestDevice({
-          filters: [{
-            vendorId: identifiers.vendorId,
-            productId: identifiers.productId,
-          }],
+          filters: usbFilters(await loadPx4Models()),
         });
         statusText.textContent = `接続完了: ${device.productName ?? 'PX-Series'}`;
         this.onStateChanged();
+        // 接続済みのチューナーの一覧へ知らせる（許可は connect イベントを出さない）。
+        tunersChanged();
       } catch (err) {
         statusText.textContent = `キャンセルまたはエラー: ${err instanceof Error ? err.message : String(err)}`;
       }
@@ -858,6 +902,95 @@ export class SettingsView {
     return card;
   }
 
+  private createBetaReportsCard(): HTMLElement {
+    const card = document.createElement('div');
+    card.className = 'settings-card';
+    card.id = 'reports-setting-card';
+
+    const enabled = reportsEnabled();
+
+    const title = IS_BETA_BUILD ? '動作報告（beta版）' : '動作報告';
+    const desc = IS_BETA_BUILD
+      ? 'beta 版（beta.webts.app）限定で、「その機種で動いたか」を確認するために最小限の動作ログを配布サーバへ送信します。本機能は既定で有効ですが、オプトアウト（停止）できます。'
+      : '「その機種で動いたか」を確認するために、最小限の動作ログを配布サーバへ送信します。本機能は既定で無効（オプトイン）ですが、動作改善へのご協力のためオンにすることができます。';
+    const toggleLabel = IS_BETA_BUILD
+      ? '動作報告の送信を許可する（既定で有効）'
+      : '動作報告の送信を許可する（既定で無効）';
+    const footerNote = '※ 同じ内容の報告は1回しか送信されません。';
+
+    card.innerHTML = `
+      <div class="settings-card-header">
+        <div class="settings-card-title">
+          <svg viewBox="0 0 24 24" style="width:20px;height:20px;fill:currentColor">
+            <path d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm-5 14H7v-2h7v2zm3-4H7v-2h10v2zm0-4H7V7h10v2z"/>
+          </svg>
+          <span>${title}</span>
+        </div>
+        <span class="status-badge ${enabled ? 'ok' : ''}" id="beta-reports-status-badge">
+          ${enabled ? '許可' : '停止'}
+        </span>
+      </div>
+
+      <p class="settings-card-desc">
+        ${desc}
+      </p>
+
+      <div style="margin-bottom: 16px;">
+        <label class="checkbox-label" style="font-size: 0.9375rem; font-weight: 600; cursor: pointer;">
+          <input type="checkbox" id="beta-reports-toggle" ${enabled ? 'checked' : ''} style="width: 18px; height: 18px; cursor: pointer;" />
+          <span>${toggleLabel}</span>
+        </label>
+      </div>
+
+      <div style="font-size: 0.875rem; line-height: 1.6; margin-bottom: 16px;">
+        <div style="font-weight: 600; margin-bottom: 4px;">送信される情報:</div>
+        <ul style="margin: 0 0 12px 20px; padding: 0; color: var(--text-secondary); font-size: 0.8125rem;">
+          <li>アプリのバージョン、チューナーの機種名（例: PX-Q3U4）</li>
+          <li>OSの種類（Windows / macOS / Linux / Android / ChromeOS）、ブラウザの種類とメジャーバージョン（例: Chrome 140）</li>
+          <li>視聴か走査か、受信波（地上波・BS・CS）</li>
+          <li>動作結果（映った・ロックした／信号なし／停止した段階とエラー番号）</li>
+        </ul>
+        <div style="font-weight: 600; margin-bottom: 4px;">送信されない情報:</div>
+        <ul style="margin: 0 0 12px 20px; padding: 0; color: var(--text-secondary); font-size: 0.8125rem;">
+          <li>シリアル番号、USB識別子、B-CASカード情報</li>
+          <li>視聴した局や番組、地域設定・郵便番号、端末固有の識別ID</li>
+          <li>詳細な時刻（サーバ側の保存は日付単位のみ）。受け側はIPアドレスも保存しません</li>
+        </ul>
+        <div style="font-size: 0.75rem; color: var(--text-secondary);">
+          ${footerNote}
+        </div>
+      </div>
+
+      <div style="border-top: 1px solid var(--divider); padding-top: 12px; margin-top: 12px;">
+        <div style="font-weight: 600; font-size: 0.875rem; margin-bottom: 6px;">最後に送信された報告:</div>
+        <div id="beta-reports-last-container"></div>
+      </div>
+    `;
+
+    const toggle = card.querySelector<HTMLInputElement>('#beta-reports-toggle')!;
+    const badge = card.querySelector<HTMLElement>('#beta-reports-status-badge')!;
+    const lastContainer = card.querySelector<HTMLElement>('#beta-reports-last-container')!;
+
+    const renderLastReport = () => {
+      const last = lastSentReport();
+      if (last !== null) {
+        lastContainer.innerHTML = `<pre style="background: var(--code-bg); padding: 10px; border-radius: 4px; font-size: 0.75rem; overflow-x: auto; margin: 0; font-family: monospace;">${escapeHtml(JSON.stringify(last, null, 2))}</pre>`;
+      } else {
+        lastContainer.innerHTML = '<div style="font-size: 0.8125rem; color: var(--text-secondary);">まだ送信されていません。</div>';
+      }
+    };
+    renderLastReport();
+
+    toggle.addEventListener('change', () => {
+      setReportsEnabled(toggle.checked);
+      const isEnabled = reportsEnabled();
+      badge.className = `status-badge ${isEnabled ? 'ok' : ''}`;
+      badge.textContent = isEnabled ? '許可' : '停止';
+    });
+
+    return card;
+  }
+
   public destroy(): void {
     if (this.scanTimer !== null) {
       clearInterval(this.scanTimer);
@@ -866,6 +999,10 @@ export class SettingsView {
     if (this.unsubscribeScan) {
       this.unsubscribeScan();
       this.unsubscribeScan = null;
+    }
+    if (this.unsubscribeTuners) {
+      this.unsubscribeTuners();
+      this.unsubscribeTuners = null;
     }
   }
 }

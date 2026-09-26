@@ -1,7 +1,7 @@
-// Modified/ported for px4-userland on 2026-09-02.
+// Modified/ported for px4-userland on 2026-09-02; MLT5 support added on 2026-09-24.
 //
 // Copyright (c) 2018-2021 nns779
-// Derived from tsukumijima/px4_drv commit 9eedea8c502875a788697984b93b50032339b9aa.
+// Derived from tsukumijima/px4_drv commit d748866f0da1cb3656106a520de4e9d7f073aacd (v0.6.1).
 // Origin paths: driver/i2c_comm.h, driver/it930x.c, driver/tc90522.c.
 // Source snapshot maintained by tsukumijima.
 // SPDX-License-Identifier: GPL-2.0-only
@@ -15,8 +15,6 @@
 
 namespace px4::userland {
 namespace {
-
-constexpr std::uint8_t kQ3U4I2cBus = 2U;
 
 Result<void> validate_request(const BridgeI2cRequest& request) noexcept
 {
@@ -83,7 +81,7 @@ Result<void> It930xBridgeI2cMaster::request(BridgeI2cRequest* requests,
         BridgeI2cRequest& request = requests[index];
         if (request.type == BridgeI2cRequestType::write) {
             const auto result = controller_.i2c_write(
-                kQ3U4I2cBus, request.address, request.write_data);
+                bus_, request.address, request.write_data);
             if (!result) {
                 capture_failure(failure_detail_, index, request);
                 return result;
@@ -92,7 +90,7 @@ Result<void> It930xBridgeI2cMaster::request(BridgeI2cRequest* requests,
         }
 
         const auto result = controller_.i2c_read(
-            kQ3U4I2cBus, request.address, request.read_data.size);
+            bus_, request.address, request.read_data.size);
         if (!result) {
             capture_failure(failure_detail_, index, request);
             return Result<void>::failure(result.error());

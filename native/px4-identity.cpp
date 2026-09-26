@@ -1,8 +1,12 @@
-// PX-Q3U4 の識別を、同梱した上流 (px4/identity.h, identity.cpp) にそのまま
-// 行わせるための境界。ブラウザ側は上流の判定ロジックを書き写さない。
+// PX4 系の識別を、同梱した上流 (px4/identity.h, identity.cpp) にそのまま
+// 行わせるための境界。ブラウザ側は上流の判定ロジックも機種の表も書き写さない。
 //
-// ABI は固定の数値だけを返す。serial は入力としてのみ受け取り、出力には
-// 一切含めない。base_serial も返さない。
+// ABI は固定の数値だけを返す。serial は入力としてのみ受け取る。
+//
+// **例外は webts_px4_tuner_key だけ**で、筐体の識別子（上流の base serial）を
+// 返す。許可されたチューナーが複数あるとき、利用者が選んだ1台を覚えておく
+// ために要る（作者の決定、2026-09-26）。受け取った側は端末内に保存するだけで、
+// 表示も送信もしない。
 
 #include "px4/identity.h"
 
@@ -117,14 +121,85 @@ bool decode(Reader& reader, std::vector<DeviceObservation>& out) {
 
 }  // namespace
 
-extern "C" {
+namespace {
 
-std::uint32_t webts_px4_q3u4_vendor_id(void) {
-    return kQ3U4VendorId;
+/**
+ * 上流の機種の表の長さ。**表そのものは書き写さない。**上流は表を外へ出して
+ * いないが、機種の番号は 0 から順に振られていて、知らない番号には先頭の
+ * 機種を返す（identity.cpp の device_profile）。引いた機種が引いた番号と
+ * 一致するあいだ数えれば、上流が機種を足しても追従する。
+ */
+int model_count() noexcept {
+    constexpr int kLimit = 64;
+    int count = 0;
+    while (count < kLimit) {
+        const auto model = static_cast<DeviceModel>(count);
+        if (device_profile(model).model != model) break;
+        ++count;
+    }
+    return count;
 }
 
-std::uint32_t webts_px4_q3u4_product_id(void) {
-    return kQ3U4ProductId;
+}  // namespace
+
+extern "C" {
+
+/** 上流が知っている PX4 系の機種の数。 */
+int webts_px4_model_count(void) {
+    return model_count();
+}
+
+/**
+ * 機種を1つ読む。output は 4 語：vendor ID、product ID、USB 機器の数
+ * （PX-Q3U4 は 2）、受信機の数。範囲外なら INVALID_ARGUMENT。
+ */
+int webts_px4_model(int index, std::int32_t* output, int output_words) {
+    if (output == nullptr || output_words < 4 || index < 0 || index >= model_count()) {
+        return static_cast<int>(Error::INVALID_ARGUMENT);
+    }
+    const DeviceProfile& profile = device_profile(static_cast<DeviceModel>(index));
+    output[0] = static_cast<std::int32_t>(kQ3U4VendorId);
+    output[1] = static_cast<std::int32_t>(profile.product_id);
+    output[2] = static_cast<std::int32_t>(profile.bridge_count);
+    output[3] = static_cast<std::int32_t>(profile.receiver_count);
+    return static_cast<int>(Error::OK);
+}
+
+/** 機種名。範囲外なら空文字。 */
+const char* webts_px4_model_name(int index) {
+    if (index < 0 || index >= model_count()) return "";
+    return device_profile(static_cast<DeviceModel>(index)).name;
+}
+
+/**
+ * USB 機器1つが属する筐体の識別子（上流の base serial）を output に書く。
+ * PX-Q3U4 の2つの機器は同じ値になる。
+ *
+ * **規則は書き写さない。**機器1つだけを上流の group_q3u4_devices() に通し、
+ * できた組の base_serial を返す。上流が受け付けない serial（桁数や末尾が
+ * 違う、知らない機種）なら INVALID_ARGUMENT、output が小さければ
+ * BUFFER_TOO_SMALL。
+ */
+int webts_px4_tuner_key(int vendor_id, int product_id, const char* serial,
+                        char* output, int capacity) {
+    if (serial == nullptr || output == nullptr || capacity <= 0 ||
+        vendor_id < 0 || vendor_id > 0xffff || product_id < 0 || product_id > 0xffff) {
+        return static_cast<int>(Error::INVALID_ARGUMENT);
+    }
+    output[0] = '\0';
+    DeviceObservation observation;
+    observation.vendor_id = static_cast<std::uint16_t>(vendor_id);
+    observation.product_id = static_cast<std::uint16_t>(product_id);
+    observation.serial = serial;
+    const Result<GroupingResult> grouped = group_q3u4_devices({observation});
+    if (!grouped) return static_cast<int>(grouped.error());
+    if (grouped.value().groups.size() != 1U) return static_cast<int>(Error::INVALID_ARGUMENT);
+    const std::string& key = grouped.value().groups.front().base_serial;
+    if (key.size() + 1U > static_cast<std::size_t>(capacity)) {
+        return static_cast<int>(Error::BUFFER_TOO_SMALL);
+    }
+    std::memcpy(output, key.c_str(), key.size() + 1U);
+    return static_cast<int>(Error::OK);
 }
 
 int webts_px4_identity_output_words(void) {
