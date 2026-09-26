@@ -492,6 +492,12 @@ Result<ipc::TuneResponsePayload> TunerService::tune(
         std::lock_guard<std::mutex> lock(mutex_);
         // receiver_lock keeps this lease in place since it was copied above.
         leases_[receiver].system = request.system;
+        // A successful tune re-arms a lease whose previous stream ended:
+        // STOP_STREAM leaves the lease consumed, and START_STREAM must be
+        // possible again without RELEASE/ACQUIRE.  The attach nonce stays the
+        // one issued at ACQUIRE; its validity is per-arm (see SPEC 6.3).
+        if (leases_[receiver].stream_state == StreamState::consumed)
+            leases_[receiver].stream_state = StreamState::none;
         set_state_locked(receiver, ipc::ReceiverState::tuned);
     }
     return Result<ipc::TuneResponsePayload>::success(

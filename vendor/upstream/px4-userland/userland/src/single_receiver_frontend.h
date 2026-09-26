@@ -1,33 +1,26 @@
 // SPDX-License-Identifier: GPL-2.0-only
-#ifndef PX4_USERLAND_MLT5PE_BACKEND_H
-#define PX4_USERLAND_MLT5PE_BACKEND_H
+#ifndef PX4_USERLAND_SINGLE_RECEIVER_FRONTEND_H
+#define PX4_USERLAND_SINGLE_RECEIVER_FRONTEND_H
 
 #include "px4/card_service.h"
+#include "px4/identity.h"
 #include "px4/tuner_service.h"
-#include "mlt5pe_frontend.h"
-#include "mlt5pe_power.h"
+#include "q3u4_frontend.h"
+
+#include <mutex>
 
 namespace px4::userland {
 
-// Production bridge from the portable tuner seam to a PX-MLT5PE or
-// DTV02A-5TS-P.  Every receiver accepts both systems.
-class Mlt5PeTunerBackend final : public TunerServiceBackend {
+// Dedicated TC90522/R850/RT710 path for the one-receiver USB enclosures.
+class SingleReceiverFrontend final : public TunerServiceBackend,
+                                     public CardServiceBackend {
 public:
-    Mlt5PeTunerBackend(Mlt5PeFrontend& frontend, Mlt5PeLnbPowerCoordinator& lnb_power,
-                       std::uint8_t receiver_count = kMlt5PeReceiverCount,
-                       bool satellite_supported = true,
-                       DeviceModel model = DeviceModel::px_mlt5pe) noexcept
-        : frontend_(frontend), lnb_power_(lnb_power), receiver_count_(receiver_count),
-          satellite_supported_(satellite_supported), model_(model)
-    {
-    }
-
-    std::uint8_t receiver_count() const noexcept override { return receiver_count_; }
+    SingleReceiverFrontend(BridgeI2cMaster& bridge, It930xController& controller,
+                           Q3U4BackendPower& power, Q3U4FrontendDelay& delay,
+                           DeviceModel model, bool allow_lnb_power = false) noexcept;
+    ~SingleReceiverFrontend() noexcept override;
+    std::uint8_t receiver_count() const noexcept override { return 1U; }
     bool receiver_supports(std::uint8_t receiver, ipc::System system) const noexcept override;
-    bool selects_satellite_stream_before_tune() const noexcept override { return true; }
-    // pxmlt_device.c enables PTX_CHRDEV_WAIT_AFTER_LOCK_TC_T.
-    bool requires_terrestrial_lock_settle() const noexcept override { return true; }
-
     Result<void> open_receiver(std::uint8_t receiver) noexcept override;
     Result<void> tune_terrestrial(std::uint8_t receiver, std::uint32_t frequency_khz,
                                   std::uint32_t timeout_ms) noexcept override;
@@ -47,34 +40,35 @@ public:
     Result<void> rollback_tune_power(std::uint8_t receiver) noexcept override;
     void mark_receiver_disconnected(std::uint8_t receiver) noexcept override;
     Result<void> shutdown() noexcept override;
-
-private:
-    Mlt5PeFrontend& frontend_;
-    Mlt5PeLnbPowerCoordinator& lnb_power_;
-    std::uint8_t receiver_count_;
-    bool satellite_supported_;
-    DeviceModel model_;
-};
-
-// CardService owns the protocol session; this class owns only the logical
-// card-power reference and the bridge UART seam.
-class Mlt5PeCardBackend final : public CardServiceBackend {
-public:
-    Mlt5PeCardBackend(It930xController& controller, Mlt5PeFrontend& frontend) noexcept
-        : controller_(controller), frontend_(frontend)
-    {
-    }
-
     Result<void> set_power(bool on) noexcept override;
     Result<void> initialize_uart() noexcept override;
     Result<bool> detect_card() noexcept override;
-
 private:
+    Result<void> acquire_power() noexcept;
+    Result<void> release_power() noexcept;
+    Result<void> initialize_frontend() noexcept;
     It930xController& controller_;
-    Mlt5PeFrontend& frontend_;
-    bool card_power_acquired_ = false;
+    Q3U4BackendPower& power_;
+    Q3U4FrontendDelay& delay_;
+    DeviceModel model_;
+    bool allow_lnb_power_;
+    bool lnb_on_ = false;
+    bool pending_lnb_ = false;
+    bool prior_lnb_on_ = false;
+    Tc90522 tc_t_;
+    Tc90522 tc_s_;
+    Tc90522 tc_s0_;
+    R850 r850_;
+    Rt710 rt710_;
+    bool opened_ = false;
+    bool capturing_ = false;
+    bool card_powered_ = false;
+    bool powered_ = false;
+    bool satellite_ = false;
+    bool disconnected_ = false;
+    std::uint8_t references_ = 0U;
+    std::mutex power_mutex_;
 };
 
 }  // namespace px4::userland
-
-#endif  // PX4_USERLAND_MLT5PE_BACKEND_H
+#endif

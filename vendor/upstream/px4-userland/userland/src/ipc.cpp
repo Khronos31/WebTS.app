@@ -327,8 +327,9 @@ bool valid_tune(const TuneRequestPayload& value) noexcept
 
 bool valid_receiver_count(std::uint8_t count) noexcept
 {
-    return count == kQ3U4ReceiverCount || count == kW3U4ReceiverCount ||
-           count == kMlt5PeReceiverCount;
+    return count == kSingleReceiverCount || count == kMlt3PeReceiverCount ||
+           count == kW3U4ReceiverCount || count == kMlt5PeReceiverCount ||
+           count == kQ3U4ReceiverCount;
 }
 
 // Q3U4 is the only enclosure with two USB devices.
@@ -338,12 +339,15 @@ std::uint8_t usb_present_mask_for(std::uint8_t count) noexcept
 }
 
 // Precondition: valid_receiver_count(count) and global < count.
-ReceiverRecord expected_receiver_record(std::uint8_t count, std::size_t global) noexcept
+ReceiverRecord expected_receiver_record(std::uint8_t count, std::size_t global,
+                                        bool dual_system = false) noexcept
 {
     const auto id = static_cast<std::uint8_t>(global);
-    if (count == kMlt5PeReceiverCount) {
+    if (dual_system || count == kMlt3PeReceiverCount ||
+        count == kMlt5PeReceiverCount) {
         return ReceiverRecord{id, 1U, id, System::ISDB_T_OR_S};
     }
+    if (count == kSingleReceiverCount) return ReceiverRecord{id, 1U, id, System::ISDB_T};
     const auto local = static_cast<std::uint8_t>(global % 4U);
     return ReceiverRecord{id, static_cast<std::uint8_t>((global / 4U) + 1U), local,
                           local < 2U ? System::ISDB_S : System::ISDB_T};
@@ -353,8 +357,12 @@ bool valid_receiver_record(const ReceiverRecord& value, std::uint8_t count,
                            std::size_t global) noexcept
 {
     const ReceiverRecord expected = expected_receiver_record(count, global);
-    return value.global_id == expected.global_id && value.dev_id == expected.dev_id &&
-           value.local_id == expected.local_id && value.system == expected.system;
+    if (value.global_id == expected.global_id && value.dev_id == expected.dev_id &&
+        value.local_id == expected.local_id && value.system == expected.system) return true;
+    const ReceiverRecord flexible = expected_receiver_record(count, global, true);
+    return value.global_id == flexible.global_id && value.dev_id == flexible.dev_id &&
+           value.local_id == flexible.local_id && value.system == flexible.system &&
+           count != kQ3U4ReceiverCount;
 }
 
 void write_counters(Writer& writer, const CountersPayload& value) noexcept
@@ -542,15 +550,16 @@ Result<HelloResponsePayload> decode_hello_response_payload(ByteView input) noexc
 }
 
 Result<std::array<ReceiverRecord, kReceiverCount>> receiver_records(
-    std::uint8_t receiver_count) noexcept
+    std::uint8_t receiver_count, bool dual_system) noexcept
 {
     std::array<ReceiverRecord, kReceiverCount> records{};
     if (!valid_receiver_count(receiver_count)) {
         return Result<std::array<ReceiverRecord, kReceiverCount>>::failure(
             Error::INVALID_ARGUMENT);
     }
-    for (std::size_t index = 0U; index < receiver_count; ++index) {
-        records[index] = expected_receiver_record(receiver_count, index);
+    for (std::size_t index = 0U;
+         index < receiver_count && index < kReceiverCount; ++index) {
+        records[index] = expected_receiver_record(receiver_count, index, dual_system);
     }
     return Result<std::array<ReceiverRecord, kReceiverCount>>::success(records);
 }
@@ -567,7 +576,8 @@ Result<std::size_t> encode_payload(const ListResponsePayload& value,
         (value.usb_present_mask & ~usb_present_mask_for(value.receiver_count)) != 0U) {
         return invalid();
     }
-    for (std::size_t index = 0U; index < value.receiver_count; ++index) {
+    for (std::size_t index = 0U;
+         index < value.receiver_count && index < kReceiverCount; ++index) {
         if (!valid_receiver_record(value.receivers[index], value.receiver_count, index)) {
             return invalid();
         }
@@ -588,7 +598,8 @@ Result<std::size_t> encode_payload(const ListResponsePayload& value,
     writer.u8(value.usb_present_mask);
     writer.u8(value.receiver_count);
     writer.u8(kCardReaderCount);
-    for (std::size_t index = 0U; index < value.receiver_count; ++index) {
+    for (std::size_t index = 0U;
+         index < value.receiver_count && index < kReceiverCount; ++index) {
         const ReceiverRecord& receiver = value.receivers[index];
         writer.u8(receiver.global_id);
         writer.u8(receiver.dev_id);
@@ -616,7 +627,8 @@ Result<ListResponsePayload> decode_list_response_payload(ByteView input) noexcep
         return malformed<ListResponsePayload>();
     }
     value.receiver_count = receiver_count;
-    for (std::size_t index = 0U; index < receiver_count; ++index) {
+    for (std::size_t index = 0U;
+         index < receiver_count && index < kReceiverCount; ++index) {
         std::uint8_t system = 0U;
         ReceiverRecord& receiver = value.receivers[index];
         if (!reader.u8(receiver.global_id) || !reader.u8(receiver.dev_id) ||

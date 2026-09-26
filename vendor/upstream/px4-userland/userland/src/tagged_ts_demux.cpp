@@ -15,15 +15,16 @@
 
 namespace px4::userland {
 
-TaggedTsDemux::TaggedTsDemux(std::uint8_t max_tag) noexcept
+TaggedTsDemux::TaggedTsDemux(std::uint8_t max_tag, bool plain_ts) noexcept
     : max_tag_(max_tag > 7U ? std::uint8_t{7U} : max_tag),
+      plain_ts_(plain_ts),
       pending_(new (std::nothrow) std::uint8_t[kPendingCapacity])
 {
 }
 
-bool TaggedTsDemux::is_packet_boundary(std::uint8_t value) noexcept
+bool TaggedTsDemux::is_packet_boundary(std::uint8_t value) const noexcept
 {
-    return (value & 0x0fU) == 0x07U;
+    return plain_ts_ ? value == 0x47U : (value & 0x0fU) == 0x07U;
 }
 
 void TaggedTsDemux::compact_pending() noexcept
@@ -131,6 +132,14 @@ Result<void> TaggedTsDemux::push(ByteView input, PacketSink sink, void* context,
         }
 
         const std::uint8_t wire_sync = pending_[pending_offset_];
+        if (plain_ts_) {
+            const Result<void> result = sink(context, 0U,
+                ByteView{pending_.get() + pending_offset_, kPacketSize});
+            if (!result) return result;
+            ++emitted_packets_;
+            consume_packet();
+            continue;
+        }
         const std::uint8_t tag =
             static_cast<std::uint8_t>((wire_sync >> 4U) & 0x07U);
         if (tag == 0U || tag > max_tag_ || (wire_sync & 0x80U) != 0U) {

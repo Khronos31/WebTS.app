@@ -10,10 +10,15 @@
 //          除いたもの。地上波と衛星の両方を受けられる受信機は、若い順に
 //          地上波・衛星・地上波…と交互に分ける。両方の走査を同時に回しても
 //          取り合わないためである。
+//          **その波を受けられる受信機が1本しか無ければ、その1本を使う。**
+//          視聴と走査が同時に使うことはできないが、そこは取り合い（claimed）が
+//          防ぐ。PX-M1UR や PX-S1UR のような1受信機の機種で、走査が一度も
+//          できなくなるのを避ける（視聴していないときだけ走査できる）。
 //
 // PX-Q3U4（0/1/4/5 が衛星、2/3/6/7 が地上波）では、視聴が地上波 2・衛星 0、
 // 走査が地上波 3/6/7・衛星 1/4/5。PX-MLT5PE（0..4 のどれでも両方）では、
-// 視聴が 0、地上波の走査が 1/3、衛星の走査が 2/4。
+// 視聴が 0、地上波の走査が 1/3、衛星の走査が 2/4。PX-M1UR（0 だけ、両方）
+// では、視聴も走査も 0。
 
 #ifndef WEBTS_PX4_RECEIVER_POLICY_H
 #define WEBTS_PX4_RECEIVER_POLICY_H
@@ -39,6 +44,11 @@ template <typename Supports>
 bool scan_may_use(std::uint8_t count, std::uint8_t receiver, Wave wave,
                   const Supports& supports) noexcept {
     if (receiver >= count || !supports(receiver, wave)) return false;
+    int capable = 0;
+    for (std::uint8_t r = 0U; r < count; ++r) {
+        if (supports(r, wave)) ++capable;
+    }
+    if (capable == 1) return true;
     if (reserved_for_viewing(count, wave, supports) == receiver) return false;
     const Wave other = wave == Wave::terrestrial ? Wave::satellite : Wave::terrestrial;
     if (!supports(receiver, other)) return true;

@@ -12,6 +12,7 @@
 
 #include "px4/error.h"
 #include "px4/firmware.h"
+#include "px4/identity.h"
 #include "px4/transport.h"
 
 #include <cstddef>
@@ -121,11 +122,19 @@ public:
     Result<FirmwareLoadResult> initialize_mlt5pe(
         const FirmwareImage& image,
         InitializationPolicy policy = InitializationPolicy::accept_cold_or_warm) noexcept;
+    Result<FirmwareLoadResult> initialize_mlt_family(
+        const FirmwareImage& image, DeviceModel model,
+        InitializationPolicy policy = InitializationPolicy::accept_cold_or_warm) noexcept;
+    Result<FirmwareLoadResult> initialize_single_receiver(
+        const FirmwareImage& image, DeviceModel model,
+        InitializationPolicy policy = InitializationPolicy::accept_cold_or_warm) noexcept;
+    Result<void> set_single_receiver_backend_power(bool on, Q3U4Delay& delay) noexcept;
 
 private:
     enum class BoardLayout : std::uint8_t {
         q3u4,
         mlt5pe,
+        single_receiver,
     };
 
     enum class Q3U4BackendPowerState : std::uint8_t {
@@ -148,15 +157,16 @@ private:
     Result<void> modify_q3u4_register_locked(std::uint32_t reg, std::uint8_t value,
                                              std::uint8_t mask) noexcept;
     Result<void> set_card_baud_rate_locked(It930xCardBaudRate baud_rate) noexcept;
-    Result<void> warm_initialize_locked(BoardLayout layout) noexcept;
-    Result<void> configure_stream_inputs_locked(BoardLayout layout) noexcept;
+    Result<void> warm_initialize_locked(BoardLayout layout, DeviceModel model) noexcept;
+    Result<void> configure_stream_inputs_locked(BoardLayout layout, DeviceModel model) noexcept;
     Result<void> configure_idle_gpio_locked(BoardLayout layout) noexcept;
     Result<FirmwareLoadResult> initialize_locked(const FirmwareImage& image,
                                                  InitializationPolicy policy,
-                                                 BoardLayout layout) noexcept;
+                                                 BoardLayout layout,
+                                                 DeviceModel model = DeviceModel::px_mlt5pe) noexcept;
     Result<void> configure_q3u4_stream_output_locked() noexcept;
     Result<FirmwareLoadResult> load_firmware_image_locked(const FirmwareImage& image) noexcept;
-    Result<void> verify_q3u4_state_locked() noexcept;
+    Result<void> verify_q3u4_state_locked(BoardLayout layout) noexcept;
     void pace_after_control_transfer() const noexcept;
     bool valid_pacing_mode() const noexcept;
 

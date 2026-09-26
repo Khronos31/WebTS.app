@@ -2190,9 +2190,9 @@ Result<std::unique_ptr<PosixControlServer>> PosixControlServer::create(
     const EndpointConfig& endpoint, CardService& card_service,
     TunerService& tuner_service, std::string_view base_serial, bool ready,
     std::uint8_t usb_present_mask, TunerStreamControl* stream_control,
-    std::uint8_t receiver_count) noexcept
+    std::uint8_t receiver_count, bool dual_system) noexcept
 {
-    const auto records = receiver_records(receiver_count);
+    const auto records = receiver_records(receiver_count, dual_system);
     if (base_serial.empty() || base_serial.size() > 0xffffU ||
         (usb_present_mask & 0xfcU) != 0U || !records) {
         return Result<std::unique_ptr<PosixControlServer>>::failure(

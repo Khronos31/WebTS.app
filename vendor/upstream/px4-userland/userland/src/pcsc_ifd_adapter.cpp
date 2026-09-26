@@ -356,7 +356,7 @@ void IfdAdapter::clear_card_state() noexcept
     powered_ = false;
 }
 
-void IfdAdapter::invalidate_channel() noexcept
+void IfdAdapter::invalidate_client() noexcept
 {
     if (client_) client_->close();
     client_.reset();
@@ -365,12 +365,34 @@ void IfdAdapter::invalidate_channel() noexcept
     clear_card_state();
 }
 
+void IfdAdapter::invalidate_channel() noexcept
+{
+    invalidate_client();
+    endpoint_ = IfdEndpoint{};
+    channel_configured_ = false;
+}
+
+Result<void> IfdAdapter::ensure_client() noexcept
+{
+    if (!channel_configured_) return Result<void>::failure(Error::NOT_READY);
+    if (client_) return Result<void>::success();
+    auto client = factory_.connect(endpoint_);
+    if (!client) {
+        clear_card_state();
+        card_handle_ = 0U;
+        reader_generation_ = 0U;
+        return Result<void>::failure(client.error());
+    }
+    client_ = std::move(client.value());
+    return Result<void>::success();
+}
+
 IfdResult IfdAdapter::fail(Error error, IfdOperation operation) noexcept
 {
     if (error == Error::NO_CARD || error == Error::CARD_REMOVED) {
         clear_card_state();
     } else if (channel_failure(error)) {
-        invalidate_channel();
+        invalidate_client();
     }
     return map_ifd_error(error, operation);
 }
@@ -432,13 +454,12 @@ IfdResult IfdAdapter::create_channel_by_name(std::uint64_t lun,
     if (!parsed) return IfdResult::communication_error;
     std::lock_guard<std::mutex> lock(mutex_);
     if (!valid_lun(lun)) return IfdResult::no_such_device;
-    if (channel_open()) return IfdResult::communication_error;
-    auto client = factory_.connect(parsed.value());
-    if (!client) return map_ifd_error(client.error(), IfdOperation::channel);
+    if (channel_configured()) return IfdResult::communication_error;
     endpoint_ = parsed.value();
-    client_ = std::move(client.value());
+    channel_configured_ = true;
+    if (!ensure_client()) return IfdResult::success;
     const auto status = refresh_status();
-    if (!status) return fail(status.error(), IfdOperation::channel);
+    if (!status) invalidate_client();
     return IfdResult::success;
 }
 
@@ -454,9 +475,10 @@ IfdResult IfdAdapter::create_channel(std::uint64_t lun,
 IfdResult IfdAdapter::close_channel(std::uint64_t lun) noexcept
 {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (!valid_lun(lun) || !channel_open()) return IfdResult::no_such_device;
+    if (!valid_lun(lun)) return IfdResult::no_such_device;
+    if (!channel_configured()) return IfdResult::no_such_device;
     Error error = Error::OK;
-    if (card_handle_ != 0U) {
+    if (client_ && card_handle_ != 0U) {
         const auto disconnected = client_->disconnect(card_handle_);
         if (!disconnected) error = disconnected.error();
     }
@@ -476,7 +498,7 @@ IfdResult IfdAdapter::get_capability(std::uint64_t lun, std::uint32_t tag,
                                      std::size_t& length) noexcept
 {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (!valid_lun(lun) || !channel_open()) return IfdResult::no_such_device;
+    if (!valid_lun(lun) || !channel_configured()) return IfdResult::no_such_device;
     static constexpr char vendor[] = "Khronos31";
     static constexpr char type[] = "PX-Q3U4/PX-MLT5PE via px4d";
     switch (tag) {
@@ -510,13 +532,23 @@ IfdResult IfdAdapter::get_capability(std::uint64_t lun, std::uint32_t tag,
     case kAttrMaxIfsd: return copy_u32(251U, output, length);
     case kAttrMaxInput: return copy_u32(kIfdApduMaxLength, output, length);
     case kAttrIccPresence: {
+        const auto connected = ensure_client();
+        if (!connected) return copy_u8(0U, output, length);
         const auto status = refresh_status();
-        if (!status) return fail(status.error(), IfdOperation::status);
+        if (!status) {
+            (void)fail(status.error(), IfdOperation::status);
+            return copy_u8(0U, output, length);
+        }
         return copy_u8(status.value().present ? 1U : 0U, output, length);
     }
     case kAttrIccInterfaceStatus: {
+        const auto connected = ensure_client();
+        if (!connected) return copy_u8(0U, output, length);
         const auto status = refresh_status();
-        if (!status) return fail(status.error(), IfdOperation::status);
+        if (!status) {
+            (void)fail(status.error(), IfdOperation::status);
+            return copy_u8(0U, output, length);
+        }
         return copy_u8(powered_ ? 1U : 0U, output, length);
     }
     default: return IfdResult::error_tag;
@@ -527,7 +559,7 @@ IfdResult IfdAdapter::set_capability(std::uint64_t lun, std::uint32_t tag,
                                      ByteView value) noexcept
 {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (!valid_lun(lun) || !channel_open()) return IfdResult::no_such_device;
+    if (!valid_lun(lun) || !channel_configured()) return IfdResult::no_such_device;
     if (tag == kTagIfdSlotNumber) {
         return value.data != nullptr && value.size == 1U && value.data[0] == 0U ?
                    IfdResult::success : IfdResult::error_set_failure;
@@ -563,7 +595,7 @@ IfdResult IfdAdapter::set_protocol(std::uint64_t lun, std::uint32_t protocol,
     (void)pts2;
     (void)pts3;
     std::lock_guard<std::mutex> lock(mutex_);
-    if (!valid_lun(lun) || !channel_open()) return IfdResult::no_such_device;
+    if (!valid_lun(lun) || !channel_configured()) return IfdResult::no_such_device;
     if (protocol != kIfdSetProtocolT1) return IfdResult::protocol_not_supported;
     if (!present_ || !powered_ || atr_length_ < 2U) {
         return IfdResult::error_power_action;
@@ -586,7 +618,7 @@ IfdResult IfdAdapter::power(std::uint64_t lun, IfdPowerAction action,
                             MutableByteView atr, std::size_t& atr_length) noexcept
 {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (!valid_lun(lun) || !channel_open()) {
+    if (!valid_lun(lun) || !channel_configured()) {
         atr_length = 0U;
         return IfdResult::no_such_device;
     }
@@ -595,15 +627,24 @@ IfdResult IfdAdapter::power(std::uint64_t lun, IfdPowerAction action,
             std::memset(atr.data, 0, atr.size);
         }
         atr_length = 0U;
-        if (card_handle_ == 0U) {
+        if (!client_ || card_handle_ == 0U) {
             clear_card_state();
             return IfdResult::success;
         }
         const auto disconnected = client_->disconnect(card_handle_);
-        if (!disconnected) return fail(disconnected.error(), IfdOperation::power);
+        if (!disconnected) {
+            const IfdResult result = fail(disconnected.error(), IfdOperation::power);
+            if (client_ == nullptr) return IfdResult::success;
+            return result;
+        }
         card_handle_ = 0U;
         clear_card_state();
         return IfdResult::success;
+    }
+    const auto connected = ensure_client();
+    if (!connected) {
+        atr_length = 0U;
+        return IfdResult::icc_not_present;
     }
     const bool force_reset = action == IfdPowerAction::reset;
     const auto result = power_or_reset(force_reset);
@@ -620,7 +661,9 @@ IfdResult IfdAdapter::transmit(std::uint64_t lun, std::uint32_t protocol,
 {
     std::lock_guard<std::mutex> lock(mutex_);
     response_length = 0U;
-    if (!valid_lun(lun) || !channel_open()) return IfdResult::no_such_device;
+    if (!valid_lun(lun) || !channel_configured()) return IfdResult::no_such_device;
+    const auto connected = ensure_client();
+    if (!connected) return IfdResult::icc_not_present;
     if (protocol != kIfdTransmitProtocolT1) {
         return IfdResult::protocol_not_supported;
     }
@@ -647,16 +690,21 @@ IfdResult IfdAdapter::control(std::uint64_t lun, std::uint32_t control_code,
     (void)output;
     std::lock_guard<std::mutex> lock(mutex_);
     returned = 0U;
-    return valid_lun(lun) && channel_open() ? IfdResult::not_supported :
+    return valid_lun(lun) && channel_configured() ? IfdResult::not_supported :
                                              IfdResult::no_such_device;
 }
 
 IfdResult IfdAdapter::presence(std::uint64_t lun) noexcept
 {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (!valid_lun(lun) || !channel_open()) return IfdResult::no_such_device;
+    if (!valid_lun(lun) || !channel_configured()) return IfdResult::no_such_device;
+    const auto connected = ensure_client();
+    if (!connected) return IfdResult::icc_not_present;
     const auto status = refresh_status();
-    if (!status) return fail(status.error(), IfdOperation::status);
+    if (!status) {
+        (void)fail(status.error(), IfdOperation::status);
+        return IfdResult::icc_not_present;
+    }
     return status.value().present ? IfdResult::icc_present :
                                     IfdResult::icc_not_present;
 }

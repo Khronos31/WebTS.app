@@ -11,6 +11,7 @@
 
 #include "cxd2856er.h"
 #include "cxd2858er.h"
+#include "px4/identity.h"
 #include "mlt5pe_power.h"
 #include "q3u4_frontend.h"
 
@@ -33,15 +34,46 @@ enum class Mlt5PeReceiverState : std::uint8_t {
     capturing = 3,
 };
 
-// The five CXD2856ER/CXD2858ER receivers of one PX-MLT5PE/DTV02A-5TS-P.
-// Every receiver can tune ISDB-T or ISDB-S.  I2C sequences of receivers on
+struct MltReceiverInput final {
+    std::uint8_t i2c_address;
+    std::uint8_t i2c_bus;
+    std::uint8_t port_number;
+};
+
+struct MltModelLayout final {
+    std::uint8_t receiver_count;
+    std::array<MltReceiverInput, kMlt5PeReceiverCount> receivers;
+};
+
+constexpr MltModelLayout mlt_model_layout(DeviceModel model) noexcept
+{
+    constexpr MltReceiverInput unused{0U, 1U, 0U};
+    switch (model) {
+    case DeviceModel::px_mlt8pe3:
+        return {3U, {{{0x65U, 3U, 0U}, {0x6cU, 3U, 3U}, {0x64U, 3U, 4U}, unused, unused}}};
+    case DeviceModel::px_mlt8pe5:
+        return {5U, {{{0x65U, 1U, 0U}, {0x64U, 1U, 1U}, {0x6cU, 1U, 2U},
+                      {0x6cU, 3U, 3U}, {0x64U, 3U, 4U}}}};
+    case DeviceModel::dtv02a_4ts_p:
+        return {4U, {{{0x65U, 3U, 0U}, {0x6cU, 1U, 1U}, {0x64U, 1U, 2U},
+                      {0x64U, 3U, 4U}, unused}}};
+    default:
+        return {5U, {{{0x65U, 3U, 0U}, {0x6cU, 1U, 1U}, {0x64U, 1U, 2U},
+                      {0x6cU, 3U, 3U}, {0x64U, 3U, 4U}}}};
+    }
+}
+
+// Up to five CXD2856ER/CXD2858ER receivers of one MLT-family enclosure.
+// Every configured receiver can tune ISDB-T or ISDB-S. I2C sequences on
 // the same bridge bus are serialized, which also serializes each tuner gate
 // open/access/close because all tuners on a bus share address 0x60.
 class Mlt5PeFrontend final {
 public:
     Mlt5PeFrontend(BridgeI2cMaster& bus1, BridgeI2cMaster& bus3,
                   Q3U4BackendPower& power, Mlt5PeDelay& delay,
-                  Q3U4PsbPurger* purger = nullptr) noexcept;
+                  Q3U4PsbPurger* purger = nullptr,
+                  std::uint8_t receiver_count = kMlt5PeReceiverCount,
+                  DeviceModel model = DeviceModel::px_mlt5pe) noexcept;
     ~Mlt5PeFrontend() noexcept;
 
     Mlt5PeFrontend(const Mlt5PeFrontend&) = delete;
@@ -83,9 +115,9 @@ private:
         Cxd2856erSystem system = Cxd2856erSystem::unspecified;
     };
 
-    static bool valid_receiver(std::uint8_t receiver) noexcept
+    bool valid_receiver(std::uint8_t receiver) const noexcept
     {
-        return receiver < kMlt5PeReceiverCount;
+        return receiver < receiver_count_;
     }
     std::mutex& bus_mutex(std::uint8_t receiver) noexcept;
     void terminate_receiver(Receiver& receiver) noexcept;
@@ -93,6 +125,7 @@ private:
     Mlt5PePowerCoordinator power_;
     Q3U4PsbPurger* purger_;
     std::array<Receiver, kMlt5PeReceiverCount> receivers_;
+    std::uint8_t receiver_count_;
     std::array<std::mutex, 2U> bus_mutexes_{};
     // Guards receiver state and serializes the first-capture PSB purge.
     mutable std::mutex state_mutex_;

@@ -2,6 +2,7 @@
 #include "px4/q3u4_stream.h"
 
 #include "tagged_ts_demux.h"
+#include "mlt5pe_frontend.h"
 
 #include <array>
 #include <atomic>
@@ -27,11 +28,34 @@ struct StreamLayout final {
     std::size_t bridge_count;
     std::size_t receivers_per_bridge;
     bool dual_system;
+    std::uint8_t tag_count;
+    std::array<std::int8_t, 5U> tag_to_receiver;
+    bool plain_ts = false;
 };
 
-constexpr StreamLayout kQ3U4Layout{2U, 4U, false};
-constexpr StreamLayout kW3U4Layout{1U, 4U, false};
-constexpr StreamLayout kMlt5PeLayout{1U, 5U, true};
+constexpr StreamLayout kQ3U4Layout{2U, 4U, false, 4U, {{0, 1, 2, 3, -1}}};
+constexpr StreamLayout kW3U4Layout{1U, 4U, false, 4U, {{0, 1, 2, 3, -1}}};
+constexpr StreamLayout kMlt5PeLayout{1U, 5U, true, 5U, {{0, 1, 2, 3, 4}}};
+
+StreamLayout mlt_stream_layout(DeviceModel model) noexcept
+{
+    if (model == DeviceModel::px_mlt5pe || model == DeviceModel::dtv02a_5ts_p)
+        return kMlt5PeLayout;
+    if (model == DeviceModel::px_m1ur || model == DeviceModel::px_s1ur ||
+        model == DeviceModel::dtv03a_1tu || model == DeviceModel::dtv02_1t1s_u ||
+        model == DeviceModel::dtv02a_1t1s_u)
+        return StreamLayout{1U, 1U, device_profile(model).dual_system, 1U,
+                            {{0, -1, -1, -1, -1}}, true};
+    const MltModelLayout profile = mlt_model_layout(model);
+    StreamLayout layout{1U, profile.receiver_count, true, 0U, {{-1, -1, -1, -1, -1}}};
+    for (std::size_t receiver = 0U; receiver < profile.receiver_count; ++receiver) {
+        const std::uint8_t tag = static_cast<std::uint8_t>(profile.receivers[receiver].port_number + 1U);
+        if (tag > 5U) continue;
+        layout.tag_to_receiver[tag - 1U] = static_cast<std::int8_t>(receiver);
+        if (layout.tag_count < tag) layout.tag_count = tag;
+    }
+    return layout;
+}
 
 // The demodulator can assert lock before its TS output and the IT930x packet
 // sync buffer have reached a clean epoch.  Hardware A/B testing with the
@@ -132,10 +156,10 @@ public:
         std::condition_variable state_changed;
 
         Bridge(Impl& owner_value, Transport& transport_value,
-               std::size_t receiver_base_value, std::size_t receiver_count) noexcept
+               std::size_t receiver_base_value) noexcept
             : owner(owner_value), transport(transport_value),
               receiver_base(receiver_base_value),
-              demux(static_cast<std::uint8_t>(receiver_count))
+          demux(static_cast<std::uint8_t>(owner.layout_.tag_count), owner.layout_.plain_ts)
         {
         }
 
@@ -191,9 +215,8 @@ public:
     Impl(Transport& dev1, Transport& dev2, std::size_t queue_packets,
          StartupStabilizationPolicy stabilization, StreamLayout layout) noexcept
         : queue_packets_(queue_packets), stabilization_(stabilization), layout_(layout),
-          bridges_{Bridge(*this, dev1, 0U, layout.receivers_per_bridge),
-                   Bridge(*this, dev2, layout.receivers_per_bridge,
-                          layout.receivers_per_bridge)}
+          bridges_{Bridge(*this, dev1, 0U),
+                   Bridge(*this, dev2, layout.receivers_per_bridge)}
     {
     }
 
@@ -227,10 +250,12 @@ public:
                                     ByteView packet) noexcept
     {
         auto* bridge = static_cast<Bridge*>(context);
-        if (local_receiver >= bridge->owner.layout_.receivers_per_bridge ||
-            packet.size != kPacketSize)
+        if (local_receiver >= bridge->owner.layout_.tag_count || packet.size != kPacketSize)
             return Result<void>::failure(Error::INVALID_ARGUMENT);
-        return bridge->owner.enqueue(bridge->receiver_base + local_receiver, packet);
+        const std::int8_t mapped = bridge->owner.layout_.tag_to_receiver[local_receiver];
+        if (mapped < 0) return Result<void>::success();
+        return bridge->owner.enqueue(
+            bridge->receiver_base + static_cast<std::size_t>(mapped), packet);
     }
 
     static void wire_tag_observer(void* context, std::uint8_t wire_sync) noexcept
@@ -238,8 +263,10 @@ public:
         auto* bridge = static_cast<Bridge*>(context);
         if ((wire_sync & 0x80U) == 0U) return;
         const std::size_t wire_tag = (wire_sync >> 4U) & 0x07U;
-        if (wire_tag == 0U || wire_tag > bridge->owner.layout_.receivers_per_bridge) return;
-        bridge->owner.count_wire_tei(bridge->receiver_base + wire_tag - 1U);
+        if (wire_tag == 0U || wire_tag > bridge->owner.layout_.tag_count) return;
+        const std::int8_t mapped = bridge->owner.layout_.tag_to_receiver[wire_tag - 1U];
+        if (mapped >= 0)
+            bridge->owner.count_wire_tei(bridge->receiver_base + static_cast<std::size_t>(mapped));
     }
 
     bool valid_receiver(std::size_t receiver) const noexcept
@@ -1026,8 +1053,36 @@ Result<std::unique_ptr<Q3U4StreamDataPlane>> Q3U4StreamDataPlane::create_w3u4(
 Result<std::unique_ptr<Q3U4StreamDataPlane>> Q3U4StreamDataPlane::create_mlt5pe(
     Transport& device, std::size_t queue_packets) noexcept
 {
+    return create_mlt_family(device, DeviceModel::px_mlt5pe, queue_packets);
+}
+
+Result<std::unique_ptr<Q3U4StreamDataPlane>> Q3U4StreamDataPlane::create_mlt_family(
+    Transport& device, DeviceModel model,
+    std::size_t queue_packets) noexcept
+{
+    const MltModelLayout profile = mlt_model_layout(model);
+    const std::uint8_t receiver_count = profile.receiver_count;
+    if (receiver_count == 0U || receiver_count > 5U)
+        return Result<std::unique_ptr<Q3U4StreamDataPlane>>::failure(Error::INVALID_ARGUMENT);
+    const StreamLayout layout = mlt_stream_layout(model);
     auto impl = Impl::create(device, device, queue_packets,
-                             StartupStabilizationPolicy{}, kMlt5PeLayout);
+                             StartupStabilizationPolicy{}, layout);
+    if (!impl) return Result<std::unique_ptr<Q3U4StreamDataPlane>>::failure(impl.error());
+    std::unique_ptr<Q3U4StreamDataPlane> value(
+        new (std::nothrow) Q3U4StreamDataPlane(std::move(impl.value())));
+    if (!value) return Result<std::unique_ptr<Q3U4StreamDataPlane>>::failure(Error::INTERNAL);
+    return Result<std::unique_ptr<Q3U4StreamDataPlane>>::success(std::move(value));
+}
+
+Result<std::unique_ptr<Q3U4StreamDataPlane>> Q3U4StreamDataPlane::create_single_receiver(
+    Transport& device, DeviceModel model, std::size_t queue_packets) noexcept
+{
+    if (model != DeviceModel::px_m1ur && model != DeviceModel::px_s1ur &&
+        model != DeviceModel::dtv03a_1tu && model != DeviceModel::dtv02_1t1s_u &&
+        model != DeviceModel::dtv02a_1t1s_u)
+        return Result<std::unique_ptr<Q3U4StreamDataPlane>>::failure(Error::INVALID_ARGUMENT);
+    auto impl = Impl::create(device, device, queue_packets,
+                             StartupStabilizationPolicy{}, mlt_stream_layout(model));
     if (!impl) return Result<std::unique_ptr<Q3U4StreamDataPlane>>::failure(impl.error());
     std::unique_ptr<Q3U4StreamDataPlane> value(
         new (std::nothrow) Q3U4StreamDataPlane(std::move(impl.value())));
@@ -1067,6 +1122,31 @@ Q3U4StreamDataPlane::create_mlt5pe_for_test(
         stabilization.maximum_packets,
     };
     auto impl = Impl::create(device, device, queue_packets, policy, kMlt5PeLayout);
+    if (!impl)
+        return Result<std::unique_ptr<Q3U4StreamDataPlane>>::failure(impl.error());
+    std::unique_ptr<Q3U4StreamDataPlane> value(
+        new (std::nothrow) Q3U4StreamDataPlane(std::move(impl.value())));
+    if (!value)
+        return Result<std::unique_ptr<Q3U4StreamDataPlane>>::failure(Error::INTERNAL);
+    return Result<std::unique_ptr<Q3U4StreamDataPlane>>::success(std::move(value));
+}
+
+Result<std::unique_ptr<Q3U4StreamDataPlane>>
+Q3U4StreamDataPlane::create_mlt_family_for_test(
+    Transport& device, DeviceModel model, std::size_t queue_packets,
+    StartupStabilizationTestConfig stabilization) noexcept
+{
+    const MltModelLayout profile = mlt_model_layout(model);
+    const std::uint8_t receiver_count = profile.receiver_count;
+    if (receiver_count == 0U || receiver_count > 5U)
+        return Result<std::unique_ptr<Q3U4StreamDataPlane>>::failure(Error::INVALID_ARGUMENT);
+    const StartupStabilizationPolicy policy{
+        stabilization.minimum_packets,
+        stabilization.clean_packets,
+        stabilization.maximum_packets,
+    };
+    const StreamLayout layout = mlt_stream_layout(model);
+    auto impl = Impl::create(device, device, queue_packets, policy, layout);
     if (!impl)
         return Result<std::unique_ptr<Q3U4StreamDataPlane>>::failure(impl.error());
     std::unique_ptr<Q3U4StreamDataPlane> value(

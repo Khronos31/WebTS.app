@@ -16,7 +16,17 @@ import {
 import { bsTunings, csTunings, grTunings, satelliteScanTunings } from '../tuning';
 import type { ChannelItem } from '../types';
 import { channelsSync } from '../channel-source';
-import { loadPx4Models, usbFilters } from '../../usb/px4-identity';
+import {
+  forgetTuner,
+  listConnectedTuners,
+  loadPx4Models,
+  readTunerPermission,
+  selectTuner,
+  subscribeTuners,
+  tunersChanged,
+  usbFilters,
+  type ConnectedTuner,
+} from '../../usb/px4-identity';
 import { getTheme, setTheme, type ThemeMode } from '../theme-manager';
 import { allowLnb15v, setAllowLnb15v } from '../lnb-setting';
 import { getZipcode, normalizeZipcode, setZipcode } from '../bml-receiver-info';
@@ -35,6 +45,7 @@ export class SettingsView {
   public readonly element: HTMLElement;
   private onStateChanged: () => void;
   private unsubscribeScan: (() => void) | null = null;
+  private unsubscribeTuners: (() => void) | null = null;
   private scanTimer: number | null = null;
 
   constructor(options: SettingsViewOptions) {
@@ -46,6 +57,10 @@ export class SettingsView {
   }
 
   private async render(): Promise<void> {
+    if (this.unsubscribeTuners) {
+      this.unsubscribeTuners();
+      this.unsubscribeTuners = null;
+    }
     this.element.replaceChildren();
 
     const state = await readSetupState();
@@ -575,14 +590,14 @@ export class SettingsView {
           </svg>
           <span>チューナーハードウェア (WebUSB)</span>
         </div>
-        <span class="status-badge ${tunerState.needed ? 'warning' : 'ok'}">
+        <span class="status-badge ${tunerState.needed ? 'warning' : 'ok'}" id="tuner-header-badge">
           ${tunerState.needed ? '未接続' : '認識済'}
         </span>
       </div>
 
       <p class="settings-card-desc">
-        PLEX PX-Q3U4 / PX-W3U4 などの USB 接続デジタルTVチューナーをブラウザの WebUSB API 経由で直接制御します。
-        PX-Q3U4 は 1 台で USB 上に 2 つのデバイスとして列挙されます。
+        対応する USB 接続デジタルTVチューナー（PX-Q3U4 / PX-W3U4 / PX-MLT5PE / DTV02A-5TS-P など）をブラウザの WebUSB API 経由で直接制御します。
+        複数のチューナーが接続・許可されている場合は使用する1台を選択できます（選択は次回受信開始時から反映されます。PX-Q3U4 など一部機種は1台につき複数の USB 機器の許可が必要です）。
       </p>
 
       <div style="display: flex; gap: 12px; align-items: center;">
@@ -596,10 +611,171 @@ export class SettingsView {
           ${tunerState.detail}
         </span>
       </div>
+
+      <div style="border-top: 1px solid var(--divider); padding-top: 16px; margin-top: 16px;">
+        <div style="font-weight: 600; font-size: 0.875rem; margin-bottom: 8px;">
+          接続済みのチューナー
+        </div>
+        <div id="connected-tuners-container"></div>
+        <div style="font-size: 0.75rem; color: var(--text-secondary); margin-top: 8px;">
+          ※ 視聴や走査で使用するチューナーは1台のみです。選択内容は端末内に保存されます。
+        </div>
+      </div>
     `;
 
     const connectBtn = card.querySelector<HTMLButtonElement>('#usb-connect-btn')!;
     const statusText = card.querySelector<HTMLElement>('#usb-status-text')!;
+    const headerBadge = card.querySelector<HTMLElement>('#tuner-header-badge')!;
+    const tunersContainer = card.querySelector<HTMLElement>('#connected-tuners-container')!;
+
+    let renderSeq = 0;
+    const renderTunerList = async () => {
+      const currentSeq = ++renderSeq;
+      let tuners: ConnectedTuner[];
+      try {
+        tuners = await listConnectedTuners();
+      } catch {
+        tuners = [];
+      }
+      if (currentSeq !== renderSeq) return;
+
+      try {
+        const permission = await readTunerPermission();
+        headerBadge.className = `status-badge ${permission.ready ? 'ok' : 'warning'}`;
+        headerBadge.textContent = permission.ready ? '認識済' : '未接続';
+      } catch {
+        // ignore
+      }
+
+      if (tuners.length === 0) {
+        tunersContainer.innerHTML = `
+          <div class="tuner-empty-notice">
+            接続されているチューナーはありません。「チューナーを接続・選択」から機器を許可してください。
+          </div>
+        `;
+        return;
+      }
+
+      const tableContainer = document.createElement('div');
+      tableContainer.className = 'tuner-table-container';
+
+      const table = document.createElement('table');
+      table.className = 'tuner-table';
+      table.innerHTML = `
+        <thead>
+          <tr>
+            <th style="width: 44px; text-align: center;">選択</th>
+            <th>チューナー名</th>
+            <th>状態</th>
+            <th style="width: 120px; text-align: right;">操作</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      `;
+
+      const tbody = table.querySelector('tbody')!;
+
+      for (const tuner of tuners) {
+        const tr = document.createElement('tr');
+
+        // 1. 選択（ラジオボタン）
+        const tdRadio = document.createElement('td');
+        tdRadio.style.textAlign = 'center';
+
+        const radio = document.createElement('input');
+        radio.type = 'radio';
+        radio.name = 'selected-tuner';
+        radio.checked = tuner.selected;
+        radio.disabled = !tuner.ready;
+        radio.style.cursor = tuner.ready ? 'pointer' : 'not-allowed';
+        radio.setAttribute('aria-label', `${tuner.label} を選択`);
+        radio.addEventListener('change', () => {
+          if (radio.checked) {
+            selectTuner(tuner);
+          }
+        });
+        tdRadio.append(radio);
+
+        // 2. チューナー名（ラベル + 未確認バッジ）
+        const tdName = document.createElement('td');
+        const nameSpan = document.createElement('span');
+        nameSpan.textContent = tuner.label;
+        nameSpan.style.fontWeight = tuner.selected ? '600' : '400';
+        if (tuner.ready) {
+          nameSpan.style.cursor = 'pointer';
+          nameSpan.addEventListener('click', () => {
+            if (!radio.checked) {
+              radio.checked = true;
+              selectTuner(tuner);
+            }
+          });
+        }
+        tdName.append(nameSpan);
+
+        if (!tuner.model.verified) {
+          const unverifiedBadge = document.createElement('span');
+          unverifiedBadge.className = 'status-badge warning';
+          unverifiedBadge.style.fontSize = '0.6875rem';
+          unverifiedBadge.style.marginLeft = '8px';
+          unverifiedBadge.textContent = '未確認（報告募集）';
+          tdName.append(unverifiedBadge);
+        }
+
+        // 3. 状態
+        const tdStatus = document.createElement('td');
+        const statusBadge = document.createElement('span');
+        if (tuner.ready) {
+          statusBadge.className = 'status-badge ok';
+          statusBadge.textContent = '使える';
+        } else if (tuner.granted < tuner.required) {
+          statusBadge.className = 'status-badge warning';
+          statusBadge.textContent = `あと ${tuner.required - tuner.granted} つ許可が要る`;
+        } else {
+          statusBadge.className = 'status-badge error';
+          statusBadge.textContent = 'この機器を読めません';
+        }
+        tdStatus.append(statusBadge);
+
+        // 4. 操作（許可を取り消すボタン）
+        const tdAction = document.createElement('td');
+        tdAction.style.textAlign = 'right';
+
+        const forgetBtn = document.createElement('button');
+        forgetBtn.type = 'button';
+        forgetBtn.className = 'btn-small';
+        forgetBtn.style.color = 'var(--error, #c62828)';
+        forgetBtn.textContent = '許可を取り消す';
+        forgetBtn.addEventListener('click', async () => {
+          const confirmed = window.confirm(
+            `${tuner.label} の許可を取り消しますか？\n他の録画ソフトやブラウザ外で利用できるようになります。`
+          );
+          if (!confirmed) return;
+          try {
+            forgetBtn.disabled = true;
+            await forgetTuner(tuner);
+            statusText.textContent = `${tuner.label} の許可を取り消しました`;
+            this.onStateChanged();
+          } catch (err) {
+            alert(`許可の取り消しに失敗しました: ${err instanceof Error ? err.message : String(err)}`);
+            forgetBtn.disabled = false;
+          }
+        });
+        tdAction.append(forgetBtn);
+
+        tr.append(tdRadio, tdName, tdStatus, tdAction);
+        tbody.append(tr);
+      }
+
+      tableContainer.append(table);
+      tunersContainer.replaceChildren(tableContainer);
+    };
+
+    void renderTunerList();
+
+    this.unsubscribeTuners = subscribeTuners(() => {
+      void renderTunerList();
+      this.onStateChanged();
+    });
 
     connectBtn.addEventListener('click', async () => {
       if (!('usb' in navigator)) {
@@ -615,6 +791,8 @@ export class SettingsView {
         });
         statusText.textContent = `接続完了: ${device.productName ?? 'PX-Series'}`;
         this.onStateChanged();
+        // 接続済みのチューナーの一覧へ知らせる（許可は connect イベントを出さない）。
+        tunersChanged();
       } catch (err) {
         statusText.textContent = `キャンセルまたはエラー: ${err instanceof Error ? err.message : String(err)}`;
       }
@@ -815,6 +993,10 @@ export class SettingsView {
     if (this.unsubscribeScan) {
       this.unsubscribeScan();
       this.unsubscribeScan = null;
+    }
+    if (this.unsubscribeTuners) {
+      this.unsubscribeTuners();
+      this.unsubscribeTuners = null;
     }
   }
 }

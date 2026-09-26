@@ -1,6 +1,5 @@
-// 番組詳細ダイアログ (EPGStation ProgramDialog Style)
-
 import type { ChannelItem, ProgramItem } from '../types';
+import { confirmLiveBlocksGuideIfNeeded } from './live-guide-notice-dialog';
 
 export interface ProgramDialogOptions {
   onWatch?: (channel: ChannelItem, program: ProgramItem) => void;
@@ -104,7 +103,10 @@ export class ProgramDialog {
 
     if (onAir) {
       const watchBtn = this.boxElement.querySelector<HTMLButtonElement>('#dialog-watch-btn');
-      watchBtn?.addEventListener('click', () => {
+      watchBtn?.addEventListener('click', async () => {
+        if (!(await confirmLiveBlocksGuideIfNeeded())) {
+          return;
+        }
         this.close();
         if (this.#options?.onWatch) {
           this.#options.onWatch(channel, program);

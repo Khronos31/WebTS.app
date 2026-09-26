@@ -10,7 +10,7 @@
 | 対象 | 固定 | ライセンス | 用途 | 改変 |
 |---|---|---|---|---|
 | [libusb](https://github.com/libusb/libusb) | v1.0.30 / `87a55632db62c9bdc58cd31d3ccfa673f1bb017f` | LGPL-2.1-or-later | 公式 Emscripten/WebUSB backend と、それが必要とする core | **あり（2ファイル）** |
-| [Khronos31/px4-userland](https://github.com/Khronos31/px4-userland) | v0.1.5-beta / `16b2bdbbcf5e3d992a24f284422628def1390aa9` | GPL-2.0-only | PX4 系（PX-Q3U4、PX-W3U4、PX-MLT5PE、DTV02A-5TS-P）のコア。IT930x ブリッジ、identity grouping、tagged TS demux、stream data plane、内蔵カード | なし |
+| [Khronos31/px4-userland](https://github.com/Khronos31/px4-userland) | v0.1.6 / `3477301c09578d6c0d85f381c1448a5c53157a68` | GPL-2.0-only | PX4 系（上流の機種の表にある16機種）のコア。IT930x ブリッジ、identity grouping、tagged TS demux、stream data plane、内蔵カード | なし |
 | [shirow-github/libaribb25](https://github.com/shirow-github/libaribb25) | v0.2.10 / `b978fe5caf6bfe162e944ad4d323b7c0205276e3` | ISC | TS section parser、MULTI2、`arib_std_b25` facade、`b_cas_card` | なし |
 | [libmpeg2 (mpeg2dec)](https://code.videolan.org/videolan/libmpeg2) | 0.5.1+ / `946bf4b518aacc224f845e73708f99e394744499` | GPL-2.0-or-later | MPEG-2 映像の復号。ブラウザ内蔵デコーダが対応しないため必須 | なし |
 
@@ -21,9 +21,13 @@ PX-S1UD 向けの [Khronos31/siano-userland](https://github.com/Khronos31/siano-
 ### px4-userland の px4d から写したもの
 
 同梱しているのは px4-userland の `userland/src` と `userland/include` だけで、改変はしていない。
-ただし **PX-W3U4 の組み立て**（`AbsentBridgePower`、`W3U4TunerBackend`、`run_w3u4` の手順）は
-上流では `userland/tools/px4d.cpp` の中にしか無いので、同じ内容を `native/px4-enclosure.cpp` に
-写している（v0.1.5-beta、commit `e71d22a`）。ライセンスは同じ GPL-2.0-only である。
+ただし次のものは上流では `userland/tools/px4d.cpp` の中にしか無いので、同じ内容を
+`native/px4-enclosure.cpp` に写している。ライセンスは同じ GPL-2.0-only である。
+
+- **W3 系の組み立て**（`AbsentBridgePower`、`W3U4TunerBackend`、`run_w3u4` の手順。v0.1.5-beta、
+  commit `e71d22a`。v0.1.6 でも書式のほかは同じ）
+- **1受信機の機種の電源**（`It930xSingleReceiverPower`、`run_single_receiver` の手順。v0.1.6、
+  commit `3477301`）
 
 ### libusb の改変
 

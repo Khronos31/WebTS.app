@@ -18,11 +18,14 @@
 import { AudioPlayer } from '../video/audio';
 import type { PlayerMessage, PlayerRequest } from '../video/player-worker';
 import { loadFirmware } from '../usb/firmware';
-import { ensureTunerAvailable, loadQ3U4Module, type Q3U4Module } from './q3u4-module';
-import { CaptionText } from './caption-text';
+import {
+  applyTunerSelection, ensureTunerAvailable, loadQ3U4Module, type Q3U4Module,
+} from './q3u4-module';
+import { CaptionCanvas } from './caption-canvas';
 import type { Tuning } from './tuning';
 import { STAGE_LABEL } from './stage-label';
 import { reportOutcome } from '../reports/beta-reports';
+import { setLiveHoldsReceiver, tunerHasOneReceiver } from './receiver-gate';
 import { allowLnb15v } from './lnb-setting';
 import { ChannelScan } from './channel-scan';
 import {
@@ -98,7 +101,12 @@ export interface LiveSessionOptions {
   /** 見たいサービス。多重化されたチャンネルから1つ選ぶ。 */
   readonly serviceId?: number | undefined;
   readonly onStatus?: ((text: string) => void) | undefined;
-  readonly onCaption?: ((text: string) => void) | undefined;
+  /**
+   * 字幕を重ねる要素。**映像と同じ位置・大きさ**にしておくこと。字幕は放送の
+   * 指定どおりの位置・大きさ・色・表示時間でここへ描く（caption-canvas.ts）。
+   * 無ければ字幕は出さない。
+   */
+  readonly captionHost?: HTMLElement | undefined;
   readonly onStats?: ((stats: LiveStats) => void) | undefined;
   readonly onEnded?: ((reason: string) => void) | undefined;
   /** データ放送を重ねる先。無ければデータ放送は出さない。 */
@@ -171,7 +179,9 @@ export class LiveSession {
   readonly #module: Q3U4Module;
   readonly #worker: Worker;
   readonly #audio: AudioPlayer;
-  readonly #captions: CaptionText;
+  readonly #captions: CaptionCanvas | null;
+  /** 利用者が字幕を出したいか（字幕 ON/OFF）。 */
+  #captionsWanted = true;
   readonly #options: LiveSessionOptions;
   readonly #drainPointer: number;
   readonly #pollPointer: number;
@@ -190,6 +200,8 @@ export class LiveSession {
   #silentWarned = false;
   /** beta の動作報告を済ませたか。1回の視聴で1回だけ送る。 */
   #reported = false;
+  /** 1本しかない受信機を押さえているか（receiver-gate.ts）。 */
+  #holdsOnlyReceiver = false;
   #stats: LiveStats | null = null;
   #dataBroadcast: DataBroadcast | null = null;
   #dataBroadcastStarting: Promise<void> | null = null;
@@ -215,11 +227,8 @@ export class LiveSession {
     this.#drainPointer = module._malloc(DRAIN_BYTES);
     this.#pollPointer = module._malloc(POLL_WORDS * 4);
     this.#audio = new AudioPlayer();
-    // 一時停止中は字幕も更新しない。絵が止まっているのに字幕だけ進むと、
-    // 画面の中で言っていることと出ている字が合わなくなる。
-    this.#captions = new CaptionText((text) => {
-      if (!this.#paused) options.onCaption?.(text);
-    });
+    this.#captions = options.captionHost === undefined ? null
+      : new CaptionCanvas(options.captionHost);
   }
 
   static isActive(): boolean {
@@ -234,25 +243,47 @@ export class LiveSession {
     active?.stop();
 
     await ensureTunerAvailable();
-    const firmware = await loadFirmware();
-    options.onStatus?.('モジュールを読み込んでいます…');
-    const module = await loadQ3U4Module();
 
-    // **前の視聴が受信機を手放すまで待つ。**`stop()` は停止を頼むだけで、
-    // 手放すのは driver スレッドが後始末を終えてからである。
-    await settlePrevious(module, () => {
-      options.onStatus?.('前のチャンネルを片付けています…');
-    });
+    // **受信機が1本なら、視聴が優先。**動いている走査を止め、視聴が終わる
+    // まで新しい走査を始めさせない（receiver-gate.ts）。
+    const holdsOnlyReceiver = await tunerHasOneReceiver();
+    if (holdsOnlyReceiver) {
+      setLiveHoldsReceiver(true);
+      options.onStatus?.('番組表の取得を止めています…');
+      await ChannelScan.stopAll();
+    }
+    try {
+      const firmware = await loadFirmware();
+      options.onStatus?.('モジュールを読み込んでいます…');
+      const module = await loadQ3U4Module();
+      await applyTunerSelection(module);
 
-    const firmwarePointer = module._malloc(firmware.length);
-    module.HEAPU8.set(firmware, firmwarePointer);
+      // **前の視聴が受信機を手放すまで待つ。**`stop()` は停止を頼むだけで、
+      // 手放すのは driver スレッドが後始末を終えてからである。
+      await settlePrevious(module, () => {
+        options.onStatus?.('前のチャンネルを片付けています…');
+      });
 
-    const worker = new Worker(new URL('../video/player-worker.ts', import.meta.url),
-      { type: 'module' });
-    const session = new LiveSession(module, worker, options, firmwarePointer, firmware.length);
-    active = session;
-    session.#begin(firmware.length);
-    return session;
+      const firmwarePointer = module._malloc(firmware.length);
+      module.HEAPU8.set(firmware, firmwarePointer);
+
+      const worker = new Worker(new URL('../video/player-worker.ts', import.meta.url),
+        { type: 'module' });
+      const session = new LiveSession(module, worker, options, firmwarePointer, firmware.length);
+      session.#holdsOnlyReceiver = holdsOnlyReceiver;
+      active = session;
+      session.#begin(firmware.length);
+      return session;
+    } catch (error) {
+      if (holdsOnlyReceiver) setLiveHoldsReceiver(false);
+      throw error;
+    }
+  }
+
+  /** 字幕 ON/OFF。受け取りと時刻の追従は続けるので、ON に戻せばすぐ出る。 */
+  setCaptionsVisible(visible: boolean): void {
+    this.#captionsWanted = visible;
+    this.#captions?.setVisible(visible && !this.#paused);
   }
 
   /** 音量。0 で無音。Web Audio 側に効かせる。 */
@@ -281,6 +312,9 @@ export class LiveSession {
     if (this.#stopped || this.#paused === paused) return;
     this.#paused = paused;
     this.#audio.setPaused(paused);
+    // 一時停止中は字幕を隠す。絵が止まっているのに字幕だけ進むと、画面の中で
+    // 言っていることと出ている字が合わなくなる。
+    this.#captions?.setVisible(this.#captionsWanted && !paused);
     const request: PlayerRequest = { kind: 'paused', value: paused };
     this.#worker.postMessage(request);
   }
@@ -322,6 +356,9 @@ export class LiveSession {
     if (this.#stopped) return;
     this.#stopped = true;
     if (active === this) active = null;
+    // 受信機を手放すのは driver スレッドの後始末の後だが、走査は同じ
+    // セッションの上で取り合いを C 側が防ぐので、ここで譲ってよい。
+    if (this.#holdsOnlyReceiver) setLiveHoldsReceiver(false);
     this.disableDataBroadcast();
     releaseCurrentDataBroadcast(this.#dataBroadcastControl);
     clearInterval(this.#retry);
@@ -331,7 +368,7 @@ export class LiveSession {
     this.#module.ccall('webts_q3u4_descramble_stop', null, [], []);
     this.#worker.terminate();
     void this.#audio.close();
-    this.#captions.destroy();
+    this.#captions?.destroy();
     this.#module.HEAPU8.fill(0, this.#firmwarePointer,
       this.#firmwarePointer + this.#firmwareLength);
     this.#module._free(this.#firmwarePointer);
@@ -398,7 +435,7 @@ export class LiveSession {
       if (pts === null) return;
       const clock: PlayerRequest = { kind: 'clock', pts };
       this.#worker.postMessage(clock);
-      this.#captions.tick(pts);
+      this.#captions?.tick(pts);
     }, 100);
 
     this.#poll = self.setInterval(() => { this.#pollDriver(); }, 250);
@@ -414,7 +451,7 @@ export class LiveSession {
         this.#audio.push({ pts: message.pts, bytes: new Uint8Array(message.bytes) });
         return;
       case 'caption':
-        this.#captions.push(message.pts, new Uint8Array(message.bytes));
+        this.#captions?.push(message.pts, new Uint8Array(message.bytes));
         return;
       case 'bml':
         this.#dataBroadcast?.emit(message.messages);
@@ -470,7 +507,7 @@ export class LiveSession {
         this.#module.ccall('webts_q3u4_descramble_dropped', 'number', [], [])),
       audioFrames: audio.decoded,
       audioDropped: audio.dropped,
-      captions: this.#captions.stats().rendered,
+      captions: this.#captions?.stats().rendered ?? 0,
       demux: message.counters,
       maxFrameGapMs: message.maxFrameGapMs,
       bmlMaxMs: message.bmlMaxMs,

@@ -18,11 +18,14 @@ import { decodeAribText } from '../ts/arib-text';
 import { loadFirmware } from '../usb/firmware';
 import { toProgramItem } from './program-item';
 import { grTunings, tuningKey, type Tuning } from './tuning';
-import { ensureTunerAvailable, loadQ3U4Module } from './q3u4-module';
+import { applyTunerSelection, ensureTunerAvailable, loadQ3U4Module } from './q3u4-module';
 import { stageLabel } from './stage-label';
 import { sleepUnthrottled } from './tick';
 import type { ChannelItem, ProgramItem } from './types';
 import { reportOutcome } from '../reports/beta-reports';
+import {
+  LiveBlocksScanError, liveHoldsReceiver, takeScanTurn, tunerHasOneReceiver,
+} from './receiver-gate';
 
 const DRAIN_BYTES = 512 * 1024;
 /** state, stage, error, cursor, workers, entries。 */
@@ -241,6 +244,21 @@ function toChannelItem(
  * 上流が BUSY を返す（FINDINGS 12章）。地上波と衛星は受信機が別なので、
  * 同時に回してよい（C 側も系統ごとにジョブを持つ）。
  */
+/** 上流の Error の番号（px4/error.h）。 */
+const ERROR_BUSY = 4;
+const ERROR_UNSUPPORTED = 11;
+
+/**
+ * この機種ではその波を受けられない（PX-S1UR・DTV03A-1TU の衛星）。
+ * **失敗ではない。**フルスキャンはこの波を飛ばして続ける。
+ */
+export class WaveUnsupportedError extends Error {
+  constructor(readonly wave: Tuning['wave']) {
+    super('このチューナーはこの放送を受信できません。');
+    this.name = 'WaveUnsupportedError';
+  }
+}
+
 const active: { terrestrial: ChannelScan | null; satellite: ChannelScan | null } = {
   terrestrial: null, satellite: null,
 };
@@ -251,10 +269,24 @@ function isSatellite(options: ScanOptions): boolean {
 
 export class ChannelScan {
   #stopped = false;
+  /** 受信機が1本のチューナーで回しているか。BUSY の意味が変わる。 */
+  #singleReceiver = false;
 
   /** どちらかの系統で走査が動いているか。 */
   static isActive(): boolean {
     return active.terrestrial !== null || active.satellite !== null;
+  }
+
+  /**
+   * 動いている走査を全部止め、止まるまで待つ。受信機が1本のチューナーで
+   * 視聴を始めるときに使う（receiver-gate.ts）。
+   */
+  static async stopAll(): Promise<void> {
+    active.terrestrial?.stop();
+    active.satellite?.stop();
+    while (active.terrestrial !== null || active.satellite !== null) {
+      await sleepUnthrottled(100);
+    }
   }
 
   stop(): void {
@@ -271,7 +303,18 @@ export class ChannelScan {
     if (active[receiverClass] !== null) throw new Error('ほかの走査が動いています。');
     active[receiverClass] = this;
     try {
-      return await this.#run(options);
+      // **受信機が1本のチューナーでは、視聴中は回さず、走査どうしは順番に
+      // 回す**（receiver-gate.ts）。
+      this.#singleReceiver = await tunerHasOneReceiver();
+      if (!this.#singleReceiver) return await this.#run(options);
+      if (liveHoldsReceiver()) throw new LiveBlocksScanError();
+      const release = await takeScanTurn();
+      try {
+        if (liveHoldsReceiver()) throw new LiveBlocksScanError();
+        return await this.#run(options);
+      } finally {
+        release();
+      }
     } finally {
       if (active[receiverClass] === this) active[receiverClass] = null;
     }
@@ -291,6 +334,7 @@ export class ChannelScan {
     await ensureTunerAvailable();
     const firmware = await loadFirmware();
     const module = await loadQ3U4Module();
+    await applyTunerSelection(module);
 
     // **視聴用の1本は C 側が空けておく。**以前は視聴中のときだけ避けていた
     // ので、先に走査が全部掴むと視聴が始められず、選局のたびに走査を止めて
@@ -333,6 +377,9 @@ export class ChannelScan {
     /** beta の動作報告のため。波ごとに、1つでもロックしたか。 */
     const lockedWaves = new Set<Tuning['wave']>();
     const report = (result: 'ok' | 'no-signal' | 'failed', stage = -1, code = 0): void => {
+      // その波を受けられない機種（UNSUPPORTED）と、視聴に受信機を取られていた
+      // とき（BUSY）は、動いたかどうかの判断に使えないので送らない。
+      if (result === 'failed' && (code === ERROR_UNSUPPORTED || code === ERROR_BUSY)) return;
       for (const scanned of new Set(tunings.map((tuning) => tuning.wave))) {
         reportOutcome({
           kind: 'scan', wave: scanned,
@@ -484,6 +531,8 @@ export class ChannelScan {
             const name = String(module.ccall(
               'webts_q3u4_scan_error_name', 'string', ['number'], [code]));
             report('failed', stage, code);
+            if (code === ERROR_UNSUPPORTED) throw new WaveUnsupportedError(tunings[0]?.wave ?? 'GR');
+            if (code === ERROR_BUSY && this.#singleReceiver) throw new LiveBlocksScanError();
             throw new Error(`スキャンが止まりました: ${name} (${code})`);
           }
           break;

@@ -5,6 +5,9 @@
 //   PX-Q3U4 … TunerServiceBackend の既定（0/1/4/5 が衛星、2/3/6/7 が地上波）
 //   PX-MLT5PE / DTV02A-5TS-P … Mlt5PeTunerBackend（0..4 のどれでも両方）
 //   PX-W3U4 … 上流 px4d の W3U4TunerBackend（0/1 が衛星、2/3 が地上波）
+//   PX-MLT8PE3 / DTV02A-4TS-P … Mlt5PeTunerBackend（3本・4本、どれでも両方）
+//   PX-M1UR … SingleReceiverFrontend（0 だけ、両方）
+//   PX-S1UR / DTV03A-1TU … SingleReceiverFrontend（0 だけ、地上波のみ）
 // **実機では確かめられない組み合わせ**（新機種で地上波と衛星の走査を
 // 同時に回す、全部埋まっている、など）をここで確かめる。
 
@@ -48,6 +51,11 @@ bool mlt5pe(std::uint8_t r, Wave) {
 bool w3u4(std::uint8_t r, Wave w) {
     return r < 4U && (w == Wave::satellite) == (r < 2U);
 }
+
+bool mlt8pe3(std::uint8_t r, Wave) { return r < 3U; }
+bool dtv02a_4ts_p(std::uint8_t r, Wave) { return r < 4U; }
+bool m1ur(std::uint8_t r, Wave) { return r == 0U; }
+bool s1ur(std::uint8_t r, Wave w) { return r == 0U && w == Wave::terrestrial; }
 
 /** 視聴を1本取ったあと、走査の作業者が4人ずつ取っていったときの割り当て。 */
 struct Plan final {
@@ -137,6 +145,58 @@ void test_viewing_takes_reserved_first() {
            "MLT5PE: 走査は 0 を使わない");
 }
 
+void test_mlt_family_sizes() {
+    {
+        const Model model{"PX-MLT8PE3", 3U, &mlt8pe3};
+        std::array<bool, 8> claimed{};
+        const Plan terrestrial = plan(model, Wave::terrestrial, claimed);
+        const Plan satellite = plan(model, Wave::satellite, claimed);
+        expect(same(terrestrial.scan, {1}), "MLT8PE3: 地上波の走査は 1");
+        expect(same(satellite.scan, {2}), "MLT8PE3: 衛星の走査は 2");
+        expect(satellite.viewing == 0, "MLT8PE3: 視聴は 0");
+    }
+    {
+        const Model model{"DTV02A-4TS-P", 4U, &dtv02a_4ts_p};
+        std::array<bool, 8> claimed{};
+        const Plan terrestrial = plan(model, Wave::terrestrial, claimed);
+        const Plan satellite = plan(model, Wave::satellite, claimed);
+        expect(same(terrestrial.scan, {1, 3}), "DTV02A-4TS-P: 地上波の走査は 1/3");
+        expect(same(satellite.scan, {2}), "DTV02A-4TS-P: 衛星の走査は 2");
+        expect(satellite.viewing == 0, "DTV02A-4TS-P: 視聴は 0");
+    }
+}
+
+// 1受信機の機種。**走査も視聴もその1本を使う。**同時には使えない。
+void test_single_receiver() {
+    {
+        const Model model{"PX-M1UR", 1U, &m1ur};
+        const auto supports = [&model](std::uint8_t r, Wave w) { return model.supports(r, w); };
+        std::array<bool, 8> claimed{};
+        const auto taken = [&claimed](std::uint8_t r) { return claimed[r]; };
+        expect(webts::scan_may_use(1U, 0U, Wave::terrestrial, supports),
+               "M1UR: 地上波の走査は 0 を使える");
+        expect(webts::scan_may_use(1U, 0U, Wave::satellite, supports),
+               "M1UR: 衛星の走査も 0 を使える");
+        const Plan terrestrial = plan(model, Wave::terrestrial, claimed);
+        expect(same(terrestrial.scan, {0}), "M1UR: 走査が 0 を取る");
+        expect(terrestrial.viewing < 0, "M1UR: 走査中は視聴できない");
+        claimed = {};
+        claimed[0] = webts::choose_receiver(
+            1U, Wave::satellite, ReceiverUse::viewing, supports, taken) == 0;
+        expect(claimed[0], "M1UR: 視聴は 0");
+        expect(webts::choose_receiver(1U, Wave::terrestrial, ReceiverUse::scan, supports, taken) < 0,
+               "M1UR: 視聴中は走査できない");
+    }
+    {
+        const Model model{"PX-S1UR", 1U, &s1ur};
+        std::array<bool, 8> claimed{};
+        const Plan satellite = plan(model, Wave::satellite, claimed);
+        expect(satellite.scan.empty() && satellite.viewing < 0, "S1UR: 衛星は受けられない");
+        const Plan terrestrial = plan(model, Wave::terrestrial, claimed);
+        expect(same(terrestrial.scan, {0}), "S1UR: 地上波の走査は 0");
+    }
+}
+
 void test_full() {
     const Model model{"PX-Q3U4", 8U, &q3u4};
     const auto supports = [&model](std::uint8_t r, Wave w) { return model.supports(r, w); };
@@ -158,6 +218,8 @@ int main() {
     test_mlt5pe_both_scans();
     test_mlt5pe_satellite_first();
     test_viewing_takes_reserved_first();
+    test_mlt_family_sizes();
+    test_single_receiver();
     test_full();
     if (failures == 0) std::printf("receiver policy: all passed\n");
     return failures == 0 ? 0 : 1;

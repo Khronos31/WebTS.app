@@ -1,6 +1,5 @@
-// ライブ視聴・ストリーム選択ダイアログ (EPGStation OnAirSelectStream Style)
-
 import type { ChannelItem, ProgramItem } from '../types';
+import { confirmLiveBlocksGuideIfNeeded } from './live-guide-notice-dialog';
 
 export class StreamDialog {
   public readonly overlayElement: HTMLElement;
@@ -92,7 +91,10 @@ export class StreamDialog {
     closeButtons.forEach((btn) => btn.addEventListener('click', () => this.close()));
 
     const startBtn = this.boxElement.querySelector<HTMLButtonElement>('#start-watch-btn');
-    startBtn?.addEventListener('click', () => {
+    startBtn?.addEventListener('click', async () => {
+      if (!(await confirmLiveBlocksGuideIfNeeded())) {
+        return;
+      }
       this.close();
       window.location.hash = `#/watch?channel=${channel.id}`;
     });

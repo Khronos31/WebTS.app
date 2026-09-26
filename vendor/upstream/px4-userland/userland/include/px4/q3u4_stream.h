@@ -4,6 +4,7 @@
 
 #include "px4/transport.h"
 #include "px4/tuner_service.h"
+#include "px4/identity.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -34,6 +35,12 @@ public:
     // 0..4, each attachable as ISDB-T or ISDB-S.
     static Result<std::unique_ptr<Q3U4StreamDataPlane>> create_mlt5pe(
         Transport& device, std::size_t queue_packets = kDefaultQueuePackets) noexcept;
+    static Result<std::unique_ptr<Q3U4StreamDataPlane>> create_mlt_family(
+        Transport& device, DeviceModel model,
+        std::size_t queue_packets = kDefaultQueuePackets) noexcept;
+    static Result<std::unique_ptr<Q3U4StreamDataPlane>> create_single_receiver(
+        Transport& device, DeviceModel model,
+        std::size_t queue_packets = kDefaultQueuePackets) noexcept;
     // PX-W3U4: one Q3U4 bridge.  Tags 1..4 map to receivers 0..3, with the
     // same fixed systems (0/1 ISDB-S, 2/3 ISDB-T).
     static Result<std::unique_ptr<Q3U4StreamDataPlane>> create_w3u4(
@@ -66,6 +73,9 @@ public:
         StartupStabilizationTestConfig stabilization) noexcept;
     static Result<std::unique_ptr<Q3U4StreamDataPlane>> create_mlt5pe_for_test(
         Transport& device, std::size_t queue_packets,
+        StartupStabilizationTestConfig stabilization) noexcept;
+    static Result<std::unique_ptr<Q3U4StreamDataPlane>> create_mlt_family_for_test(
+        Transport& device, DeviceModel model, std::size_t queue_packets,
         StartupStabilizationTestConfig stabilization) noexcept;
     using ReadWaitObserver = void (*)(void*, std::uint8_t) noexcept;
     // Test-only barrier at the condition-variable wait call.  It is absent

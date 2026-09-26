@@ -44,8 +44,9 @@ const upstreamSources = [
   'q3u4_frontend.cpp', 'q3u4_power.cpp', 'q3u4_lnb_power.cpp',
   'tc90522.cpp', 'r850.cpp', 'rt710.cpp',
   'q3u4_card_backend.cpp', 'q3u4_tuner_backend.cpp',
-  // PX-MLT5PE / DTV02A-5TS-P.
+  // MLT 系（PX-MLT5PE・PX-MLT8PE・DTV02A）と、1受信機の機種。
   'mlt5pe_frontend.cpp', 'mlt5pe_power.cpp', 'mlt5pe_backend.cpp',
+  'single_receiver_frontend.cpp',
   'cxd2856er.cpp', 'cxd2858er.cpp',
 ].map((name) => join(upstream, 'src', name));
 
@@ -100,7 +101,7 @@ run(emxx, [
     '"_webts_q3u4_scan_advance","_webts_q3u4_scan_acknowledge",' +
     '"_webts_q3u4_scan_stop","_webts_q3u4_scan_join",' +
     '"_webts_q3u4_scan_error_name",' +
-    '"_webts_q3u4_session_keep_open",' +
+    '"_webts_q3u4_session_keep_open","_webts_q3u4_select_tuner",' +
     '"_webts_q3u4_descramble_join","_webts_q3u4_descramble_error_name",'+
     '"_webts_q3u4_descramble_output","_webts_q3u4_descramble_output_size",'+
     '"_webts_q3u4_descramble_discard","_webts_q3u4_descramble_stop",'+

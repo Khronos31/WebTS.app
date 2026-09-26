@@ -7,7 +7,7 @@
 //
 // そのため、実体の生成はここ1か所に集める。
 
-import { readTunerPermission } from '../usb/px4-identity';
+import { readTunerPermission, selectedTuner } from '../usb/px4-identity';
 
 const MODULE_URL = '/build/q3u4-descramble/q3u4-descramble.mjs';
 
@@ -44,6 +44,20 @@ export async function loadQ3U4Module(): Promise<Q3U4Module> {
  */
 export function keepSessionOpen(module: Q3U4Module, keep: boolean): void {
   module.ccall('webts_q3u4_session_keep_open', null, ['number'], [keep ? 1 : 0]);
+}
+
+/**
+ * 使うチューナーを C 側へ伝える。**受信機を開く直前に毎回呼ぶ。**
+ *
+ * 許可されたチューナーが複数あると、上流はどれを開くか決められず
+ * INVALID_ARGUMENT を返す。利用者が選んだ1台（無ければ一覧の先頭）の
+ * 識別子を渡す。識別子は C 側のメモリに置くだけで、外へは出ない。
+ */
+export async function applyTunerSelection(module: Q3U4Module): Promise<void> {
+  const tuner = await selectedTuner();
+  const error = module.ccall('webts_q3u4_select_tuner', 'number', ['string'],
+    [tuner?.key ?? '']) as number;
+  if (error !== 0) throw new Error(`チューナーを選べません (${error})`);
 }
 
 /**

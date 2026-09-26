@@ -628,6 +628,28 @@ DeviceDiscovery::~DeviceDiscovery() noexcept
     clear();
 }
 
+Result<GroupingResult> group_discovery(const DeviceDiscovery& discovery) noexcept
+{
+    std::vector<DeviceObservation> observations;
+    std::vector<RejectedObservation> unopened;
+    observations.reserve(discovery.candidates().size());
+    for (const DeviceCandidate& candidate : discovery.candidates()) {
+        if (candidate.status == ObservationStatus::open_failed) {
+            unopened.push_back(RejectedObservation{candidate.status, candidate.observation});
+            continue;
+        }
+        observations.push_back(candidate.observation);
+    }
+    auto grouping = group_q3u4_devices(observations);
+    if (!grouping) {
+        return grouping;
+    }
+    for (RejectedObservation& rejected : unopened) {
+        grouping.value().rejected.push_back(std::move(rejected));
+    }
+    return grouping;
+}
+
 Result<void> NativeEnumerator::discover(DeviceDiscovery& discovery) noexcept
 {
     discovery.clear();
@@ -1572,12 +1594,7 @@ Result<GroupingResult> Q3U4Runtime::enumerate_native() noexcept
     if (!discovered) {
         return Result<GroupingResult>::failure(discovered.error());
     }
-    std::vector<DeviceObservation> observations;
-    observations.reserve(discovery.candidates().size());
-    for (const DeviceCandidate& candidate : discovery.candidates()) {
-        observations.push_back(candidate.observation);
-    }
-    return group_q3u4_devices(observations);
+    return group_discovery(discovery);
 }
 
 Q3U4Runtime::Q3U4Runtime(std::unique_ptr<Impl> impl) noexcept : impl_(std::move(impl))

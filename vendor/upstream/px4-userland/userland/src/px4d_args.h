@@ -20,6 +20,8 @@ enum class Px4dOpenMode : std::uint8_t {
 struct Px4dArguments final {
     bool valid = false;
     bool help = false;
+    // `px4d --list`: enumerate supported enclosures and exit (SPEC 4.6).
+    bool list = false;
     bool group = false;
     bool allow_lnb_power = false;
     std::string device;

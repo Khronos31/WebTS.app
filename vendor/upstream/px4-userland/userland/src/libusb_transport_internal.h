@@ -331,6 +331,11 @@ private:
     LibusbApi::Context context_;
 };
 
+// Groups a native discovery for enumeration.  A candidate whose descriptor or
+// open failed is reported as rejected with open_failed; grouping it would
+// re-derive invalid_serial from the serial string that was never read.
+Result<GroupingResult> group_discovery(const DeviceDiscovery& discovery) noexcept;
+
 class FdSyscalls {
 public:
     virtual ~FdSyscalls() noexcept = default;

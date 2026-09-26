@@ -6,8 +6,9 @@ namespace px4::userland {
 bool Mlt5PeTunerBackend::receiver_supports(std::uint8_t receiver,
                                            ipc::System system) const noexcept
 {
-    return receiver < kMlt5PeReceiverCount &&
-           (system == ipc::System::ISDB_T || system == ipc::System::ISDB_S);
+    return receiver < receiver_count_ && receiver < mlt_model_layout(model_).receiver_count &&
+           (system == ipc::System::ISDB_T ||
+            (satellite_supported_ && system == ipc::System::ISDB_S));
 }
 
 Result<void> Mlt5PeTunerBackend::open_receiver(std::uint8_t receiver) noexcept

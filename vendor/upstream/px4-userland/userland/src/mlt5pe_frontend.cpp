@@ -10,24 +10,48 @@
 
 namespace px4::userland {
 
+namespace {
+
+BridgeI2cMaster& mlt_bus(BridgeI2cMaster& bus1, BridgeI2cMaster& bus3,
+                         std::uint8_t bus_number) noexcept
+{
+    return bus_number == 3U ? bus3 : bus1;
+}
+
+}  // namespace
+
 // Lock order: bus mutex -> state mutex.  The state mutex is never held while
 // taking a bus mutex.
 
 Mlt5PeFrontend::Mlt5PeFrontend(BridgeI2cMaster& bus1, BridgeI2cMaster& bus3,
                              Q3U4BackendPower& power, Mlt5PeDelay& delay,
-                             Q3U4PsbPurger* purger) noexcept
+                             Q3U4PsbPurger* purger,
+                             std::uint8_t receiver_count,
+                             DeviceModel model) noexcept
     : power_(power, delay), purger_(purger),
-      // pxmlt_device_params[PXMLT5PE_MODEL]; bus index 0 is I2C bus 1 and
-      // index 1 is I2C bus 3.
-      receivers_{{Receiver(bus3, 0x65U, delay, 1U), Receiver(bus1, 0x6cU, delay, 0U),
-                  Receiver(bus1, 0x64U, delay, 0U), Receiver(bus3, 0x6cU, delay, 1U),
-                  Receiver(bus3, 0x64U, delay, 1U)}}
+      receivers_{{
+          Receiver(mlt_bus(bus1, bus3, mlt_model_layout(model).receivers[0].i2c_bus),
+                   mlt_model_layout(model).receivers[0].i2c_address, delay,
+                   static_cast<std::uint8_t>(mlt_model_layout(model).receivers[0].i2c_bus == 3U)),
+          Receiver(mlt_bus(bus1, bus3, mlt_model_layout(model).receivers[1].i2c_bus),
+                   mlt_model_layout(model).receivers[1].i2c_address, delay,
+                   static_cast<std::uint8_t>(mlt_model_layout(model).receivers[1].i2c_bus == 3U)),
+          Receiver(mlt_bus(bus1, bus3, mlt_model_layout(model).receivers[2].i2c_bus),
+                   mlt_model_layout(model).receivers[2].i2c_address, delay,
+                   static_cast<std::uint8_t>(mlt_model_layout(model).receivers[2].i2c_bus == 3U)),
+          Receiver(mlt_bus(bus1, bus3, mlt_model_layout(model).receivers[3].i2c_bus),
+                   mlt_model_layout(model).receivers[3].i2c_address, delay,
+                   static_cast<std::uint8_t>(mlt_model_layout(model).receivers[3].i2c_bus == 3U)),
+          Receiver(mlt_bus(bus1, bus3, mlt_model_layout(model).receivers[4].i2c_bus),
+                   mlt_model_layout(model).receivers[4].i2c_address, delay,
+                   static_cast<std::uint8_t>(mlt_model_layout(model).receivers[4].i2c_bus == 3U))}},
+      receiver_count_(receiver_count)
 {
 }
 
 Mlt5PeFrontend::~Mlt5PeFrontend() noexcept
 {
-    for (std::uint8_t receiver = 0U; receiver < kMlt5PeReceiverCount; ++receiver) {
+    for (std::uint8_t receiver = 0U; receiver < receiver_count_; ++receiver) {
         (void)close_receiver(receiver);
     }
 }

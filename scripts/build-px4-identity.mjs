@@ -33,7 +33,7 @@ run(emxx, [
   '-s', 'MODULARIZE=1', '-s', 'EXPORT_ES6=1', '-s', 'ENVIRONMENT=web,worker,node',
   '-s', 'EXPORTED_RUNTIME_METHODS=["ccall","HEAPU8","HEAP32"]',
   '-s', 'EXPORTED_FUNCTIONS=["_webts_px4_model_count","_webts_px4_model",' +
-    '"_webts_px4_model_name",' +
+    '"_webts_px4_model_name","_webts_px4_tuner_key",' +
     '"_webts_px4_identity_output_words","_webts_px4_group_q3u4",' +
     '"_webts_px4_firmware_expected_size","_webts_px4_firmware_expected_sha256",' +
     '"_webts_px4_firmware_find","_webts_px4_firmware_validate","_malloc","_free"]',

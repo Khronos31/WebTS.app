@@ -96,6 +96,8 @@ enum class ReceiverState : std::uint8_t {
 inline constexpr std::uint8_t kQ3U4ReceiverCount = 8U;
 inline constexpr std::uint8_t kW3U4ReceiverCount = 4U;
 inline constexpr std::uint8_t kMlt5PeReceiverCount = 5U;
+inline constexpr std::uint8_t kMlt3PeReceiverCount = 3U;
+inline constexpr std::uint8_t kSingleReceiverCount = 1U;
 
 enum class ShareMode : std::uint8_t {
     shared = 1U,
@@ -172,7 +174,7 @@ struct ListResponsePayload final {
 
 // The fixed LIST record table for a receiver count accepted by LIST.
 Result<std::array<ReceiverRecord, kReceiverCount>> receiver_records(
-    std::uint8_t receiver_count) noexcept;
+    std::uint8_t receiver_count, bool dual_system = false) noexcept;
 
 struct StatusResponsePayload final {
     std::uint64_t generation;

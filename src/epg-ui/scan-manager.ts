@@ -9,6 +9,7 @@ import { saveChannels } from './channel-store';
 import { notifyChannelsChanged } from './channel-source';
 import { defaultEnabledChannelIds, saveEnabledChannelIds } from './enabled-channels';
 import type { ScanProgress } from './channel-scan';
+import { LiveBlocksScanError } from './receiver-gate';
 
 export interface ScanLaneState {
   barWidth: string;
@@ -221,6 +222,15 @@ export async function startFullScan(): Promise<void> {
       },
     );
 
+    if (result.unsupported.length > 0) {
+      const unsupportedText = result.unsupported.join('・');
+      appendLog(`[FULL-SCAN] このチューナーは ${unsupportedText} を受信できないため飛ばしました`);
+      if (result.unsupported.includes('BS') || result.unsupported.includes('CS')) {
+        state.sat.foundText = '受信非対応';
+        state.sat.countText = '対象外';
+      }
+    }
+
     for (const failure of result.failures) {
       appendLog(`[FULL-SCAN] ${failure.wave} は失敗しました: ${failure.error}`);
     }
@@ -235,7 +245,9 @@ export async function startFullScan(): Promise<void> {
     state.result = result;
     state.percent = 100;
     state.overallCountText = `${totalTunings} / ${totalTunings}`;
-    state.status = 'フルスキャン完了！';
+    state.status = result.unsupported.length > 0
+      ? `フルスキャン完了（${result.unsupported.join('・')} は非対応のためスキップ）`
+      : 'フルスキャン完了！';
 
     state.gr.barWidth = '100%';
     state.gr.countText = `${totalGR} / ${totalGR}`;
@@ -250,10 +262,16 @@ export async function startFullScan(): Promise<void> {
     notify();
   } catch (error: unknown) {
     state.isScanning = false;
-    state.error = error instanceof Error ? error.message : String(error);
     state.sat.wavePill = 'none';
-    state.status = 'エラーが発生しました';
-    appendLog(`[FULL-SCAN] 失敗: ${state.error}`);
+    if (error instanceof LiveBlocksScanError) {
+      state.error = error.message;
+      state.status = 'ライブ視聴中は更新できません';
+      appendLog('[FULL-SCAN] ライブ視聴中は更新できません。');
+    } else {
+      state.error = error instanceof Error ? error.message : String(error);
+      state.status = 'エラーが発生しました';
+      appendLog(`[FULL-SCAN] 失敗: ${state.error}`);
+    }
     notify();
   } finally {
     state.isScanning = false;

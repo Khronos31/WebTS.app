@@ -30,6 +30,7 @@
 #include "px4/card.h"
 #include "px4/card_service.h"
 #include "px4/firmware.h"
+#include "px4/identity.h"
 #include "px4/ipc.h"
 #include "px4/libusb_transport.h"
 #include "px4/q3u4_stream.h"
@@ -54,6 +55,8 @@ extern "C" void webts_winscard_unbind(void);
 #include <mutex>
 #include <optional>
 #include <pthread.h>
+#include <string>
+#include <string_view>
 #include <thread>
 #include <vector>
 
@@ -365,6 +368,8 @@ void publish_program_info(Job& job, ARIB_STD_B25* b25) noexcept {
 
 struct Session final {
     bool allow_15v = false;
+    /** 開いた筐体の識別子（上流の base serial）。空なら上流に選ばせた。 */
+    std::string tuner_key;
 
     std::unique_ptr<Q3U4Runtime> runtime;
     /** 機種ごとに組み立てた筐体。ここから先は機種を問わない。 */
@@ -390,6 +395,35 @@ struct Session final {
 std::mutex g_session_mutex;
 Session* g_session = nullptr;
 std::atomic<bool> g_session_close_requested{true};
+/**
+ * 利用者が選んだ筐体（上流の base serial）。空なら上流に選ばせる。
+ * **端末の外へは出さない。**
+ *
+ * **g_session_mutex ではなく、専用の鍵で守る。**選ぶのは JS のメイン
+ * スレッド（webts_q3u4_select_tuner）だが、g_session_mutex は pthread が
+ * USB を開いているあいだ持ち続ける。USB（WebUSB）の呼び出しはメイン
+ * スレッドへ回されるので、メインスレッドが g_session_mutex を待つと、
+ * 互いに相手を待って止まる。地上波と衛星の走査を同時に始めると、2つ目の
+ * 選択が1つ目の開く処理と重なり、ページが応答しなくなった（2026-09-26）。
+ * この鍵は文字列を写す間しか持たない。
+ */
+std::mutex g_tuner_key_mutex;
+std::string g_tuner_key;
+
+std::string selected_tuner_key() {
+    std::lock_guard<std::mutex> guard(g_tuner_key_mutex);
+    return g_tuner_key;
+}
+
+/** セッションを畳む。g_session_mutex を持ったまま、pthread の上で呼ぶ。 */
+void destroy_session_locked() noexcept {
+    if (g_session == nullptr) return;
+    if (g_session->service.has_value()) g_session->service->shutdown();
+    // データプレーン（保留中の bulk 転送のキャンセルを伴う）と LNB を止める。
+    if (g_session->enclosure) g_session->enclosure->shutdown();
+    delete g_session;
+    g_session = nullptr;
+}
 
 /**
  * セッションを用意し、仕事を1つ数える。既にあれば数えるだけ。
@@ -398,6 +432,13 @@ std::atomic<bool> g_session_close_requested{true};
 Error acquire_session(const std::vector<std::uint8_t>& firmware, bool allow_15v,
                       std::atomic<int>& stage, Session** out) noexcept {
     std::lock_guard<std::mutex> guard(g_session_mutex);
+    const std::string tuner_key = selected_tuner_key();
+    // **選ばれた筐体と違うものを開いていたら、空いていれば開き直す。**
+    // 使っている仕事があるなら替えられない（視聴か走査を止めてから）。
+    if (g_session != nullptr && g_session->tuner_key != tuner_key) {
+        if (g_session->tasks.load() > 0) return Error::BUSY;
+        destroy_session_locked();
+    }
     if (g_session != nullptr) {
         g_session->tasks.fetch_add(1);
         *out = g_session;
@@ -413,11 +454,14 @@ Error acquire_session(const std::vector<std::uint8_t>& firmware, bool allow_15v,
     session->allow_15v = allow_15v;
 
     // **上流が知っている機種ならどれでも開く。**許可された USB 機器の中から、
-    // 上流の機種の表（identity.cpp）に載っている筐体を1つ選ぶ。
+    // 上流の機種の表（identity.cpp）に載っている筐体を開く。筐体が複数
+    // あるときは、利用者が選んだもの（webts_q3u4_select_tuner）を開く。
+    // 選ばずに複数あれば、上流は INVALID_ARGUMENT を返す。
     stage.store(kStageOpen);
-    Result<std::unique_ptr<Q3U4Runtime>> runtime = Q3U4Runtime::open_native();
+    Result<std::unique_ptr<Q3U4Runtime>> runtime = Q3U4Runtime::open_native(tuner_key);
     if (!runtime) return runtime.error();
     session->runtime = std::move(runtime.value());
+    session->tuner_key = tuner_key;
 
     // 組み立てと初期化は機種ごと（px4-enclosure.cpp）。**データプレーンも
     // 筐体が持つ。**受信機ごとの attachment を束ねる側なので、仕事ごとに
@@ -446,12 +490,7 @@ void release_session(Session* session) noexcept {
     if (g_session == nullptr) return;
     if (g_session->tasks.load() > 0) return;
     if (!g_session_close_requested.load()) return;
-
-    if (g_session->service.has_value()) g_session->service->shutdown();
-    // データプレーン（保留中の bulk 転送のキャンセルを伴う）と LNB を止める。
-    if (g_session->enclosure) g_session->enclosure->shutdown();
-    delete g_session;
-    g_session = nullptr;
+    destroy_session_locked();
 }
 
 // ---- 受信機の割り当て ----
@@ -782,6 +821,10 @@ struct ScanJob final {
     std::atomic<int> cursor{0};
     std::atomic<int> running{0};
     std::atomic<bool> stop_requested{false};
+    /** どれかの作業者が受信機を取れたか。 */
+    std::atomic<bool> claimed_any{false};
+    /** この筐体にその波を受けられる受信機があるか。 */
+    std::atomic<bool> wave_supported{false};
 
     std::atomic<int> locked[kMaxScanEntries];
     ScanWorker workers[kMaxScanWorkers];
@@ -897,7 +940,11 @@ void* scan_worker_main(void* argument) noexcept {
     const int claimed =
         claim_receiver(session, system, ReceiverUse::scan, worker.receiver.load());
     const auto receiver = static_cast<std::uint8_t>(claimed < 0 ? 0 : claimed);
+    for (std::uint8_t r = 0U; r < tuner.receiver_count(); ++r) {
+        if (tuner.receiver_supports(r, system)) job.wave_supported.store(true);
+    }
     if (claimed >= 0) {
+        job.claimed_any.store(true);
         worker.receiver.store(claimed);
         const auto opened = tuner.open_receiver(receiver);
         if (!opened) {
@@ -1018,6 +1065,14 @@ void* scan_worker_main(void* argument) noexcept {
     release_session(&session);
 
     if (job.running.fetch_sub(1) == 1) {
+        // **誰も受信機を取れなかったなら、何も回していない。**黙って終えると
+        // 「全部信号なし」に見える。その波を受けられない機種（PX-S1UR の衛星）
+        // なら UNSUPPORTED、受けられるが空いていない（1受信機の機種で視聴中）
+        // なら BUSY にする。
+        if (job.error.load() == 0 && !job.claimed_any.load() && !job.stop_requested.load()) {
+            job.error.store(static_cast<int>(
+                job.wave_supported.load() ? Error::BUSY : Error::UNSUPPORTED));
+        }
         job.stage.store(kStageDone);
         job.state.store(job.error.load() == 0 ? kFinished : kFailed);
     }
@@ -1108,6 +1163,24 @@ int webts_q3u4_descramble_poll(std::int32_t* output, int output_words) {
  */
 void webts_q3u4_session_keep_open(int keep) {
     g_session_close_requested.store(keep == 0);
+}
+
+/**
+ * 使う筐体を選ぶ。key は上流の base serial（px4-identity の
+ * webts_px4_tuner_key が返すもの）。空文字なら上流に選ばせる。
+ *
+ * **ここでは開かないし畳まない。**どちらも USB に触れるので pthread の上で
+ * 行う。次にセッションを用意するとき（acquire_session）に効く。
+ */
+int webts_q3u4_select_tuner(const char* key) {
+    const std::string_view value = key == nullptr ? std::string_view{} : std::string_view{key};
+    if (!value.empty() && !valid_device_instance(value)) {
+        return static_cast<int>(Error::INVALID_ARGUMENT);
+    }
+    // g_session_mutex は取らない（g_tuner_key の説明）。
+    std::lock_guard<std::mutex> guard(g_tuner_key_mutex);
+    g_tuner_key.assign(value.data(), value.size());
+    return 0;
 }
 
 void webts_q3u4_descramble_stop(void) {
