@@ -6,7 +6,7 @@ import { parseReport } from '../src/reports/report-schema';
 
 const ok = {
   v: '0.2.1-beta', model: 'PX-W3U4', os: 'Windows', browser: 'Chrome', browserMajor: 140,
-  kind: 'view', wave: 'GR', result: 'ok', stage: -1, code: 0,
+  kind: 'view', wave: 'GR', result: 'ok', stage: -1, code: 0, detail: 'none',
 };
 
 describe('report schema', () => {
@@ -14,6 +14,20 @@ describe('report schema', () => {
     expect(parseReport(ok)).toEqual(ok);
     expect(parseReport({ ...ok, result: 'failed', stage: 7, code: 6 })).not.toBeNull();
     expect(parseReport({ ...ok, kind: 'scan', wave: 'CS', result: 'no-signal' })).not.toBeNull();
+  });
+
+  it('carries why opening failed, as a fixed word only', () => {
+    const failed = { ...ok, kind: 'scan', result: 'failed', stage: 2, code: 3 };
+    expect(parseReport({ ...failed, detail: 'descriptor-unreadable' })?.detail)
+      .toBe('descriptor-unreadable');
+    expect(parseReport({ ...failed, detail: 'COM3 busy' })).toBeNull();
+    // 止まっていないのに理由があるのはおかしい。
+    expect(parseReport({ ...ok, detail: 'busy' })).toBeNull();
+  });
+
+  it('accepts reports from pages older than detail as none', () => {
+    const { detail: _detail, ...older } = ok;
+    expect(parseReport(older)?.detail).toBe('none');
   });
 
   it('rejects anything extra or missing', () => {
@@ -71,7 +85,7 @@ describe('report endpoint', () => {
     const [day, ...rest] = rows[0]!;
     expect(day).toMatch(/^\d{4}-\d{2}-\d{2}$/);
     expect(rest).toEqual(['0.2.1-beta', 'PX-W3U4', 'Windows', 'Chrome', 140,
-      'view', 'GR', 'ok', -1, 0]);
+      'view', 'GR', 'ok', -1, 0, 'none']);
   });
 
   it('accepts reports from production too (opt-in there)', async () => {

@@ -32,7 +32,7 @@ export function showReportsInviteDialog(model: { name: string; productId: number
         <div style="font-size: 0.8125rem; line-height: 1.5; margin-bottom: 12px; background: var(--surface-color-variant); padding: 10px 12px; border-radius: 6px;">
           <div style="font-weight: 600; margin-bottom: 4px; color: var(--text-primary);">送る中身:</div>
           <div style="color: var(--text-secondary); margin-bottom: 8px;">
-            アプリのバージョン、チューナー機種名、OS/ブラウザの種類とメジャー版、視聴か走査か、受信波（地上波・BS・CS）、動作結果（映った・ロックした／信号なし／エラー番号）。※同じ内容は1回しか送りません。
+            アプリのバージョン、チューナー機種名、OS/ブラウザの種類とメジャー版、視聴か走査か、受信波（地上波・BS・CS）、動作結果（映った・ロックした／信号なし／エラー番号）、デバイスを開けなかったときの理由（決まった語のみ）。※同じ内容は1回しか送りません。
           </div>
           <div style="font-weight: 600; margin-bottom: 4px; color: var(--text-primary);">送らない中身:</div>
           <div style="color: var(--text-secondary);">

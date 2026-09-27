@@ -27,6 +27,8 @@
 
 #include "px4-enclosure.h"
 #include "px4-receiver-policy.h"
+// 開けなかった理由を調べるため（open_detail_now）。上流の src にある内部の列挙。
+#include "libusb_transport_internal.h"
 #include "px4/card.h"
 #include "px4/card_service.h"
 #include "px4/firmware.h"
@@ -415,6 +417,85 @@ std::string selected_tuner_key() {
     return g_tuner_key;
 }
 
+// ---- 開けなかった理由 ----
+//
+// 上流の open_native() は、開ける筐体が無いと NOT_FOUND だけを返す。どの USB
+// 機器がなぜ使えなかったかは内部の列挙が持っているが、外には出てこない。
+// Windows で MLT 系が3機種とも「デバイスを開く」で NOT_FOUND になっていて
+// （動作報告、2026-09-26）、理由が分からないと直せない。開けなかったときだけ
+// 列挙をもう一度行い、理由を**決まった番号1つ**にまとめて JS へ渡す。
+// 識別子（シリアル番号など）は出さない。番号は reports の detail の語と対応する。
+
+enum OpenDetail : int {
+    kOpenDetailNone = 0,
+    kOpenDetailNoDevice = 1,            // 対応機種の USB 機器が1つも見えない
+    kOpenDetailDescriptorUnreadable = 2,  // 構成記述子が読めない（NOT_FOUND）
+    kOpenDetailBusy = 3,                // ほかが使っている
+    kOpenDetailOpenFailed = 4,          // 開けない（そのほか）
+    kOpenDetailInvalidSerial = 5,       // シリアル番号の形が上流の決まりと違う
+    kOpenDetailSlowUsb = 6,             // USB の速度が足りない
+    kOpenDetailInvalidTopology = 7,     // エンドポイントの形が違う
+    kOpenDetailIncomplete = 8,          // 筐体の USB 機器がそろっていない
+    kOpenDetailNotSelected = 9,         // 開ける筐体はあるが、選んだものと違う・複数
+    kOpenDetailEnumerationFailed = 10,  // 列挙そのものが失敗した
+    kOpenDetailClaimFailed = 11,        // 選んだ筐体はそろって見えるが、取れなかった（別のタブ・ソフトが使用中など）
+};
+
+std::atomic<int> g_open_detail{kOpenDetailNone};
+
+/**
+ * いまの USB 機器を列挙し、開けない理由を1つ選ぶ。**pthread の上で呼ぶ**
+ * （USB に触れる）。見つかった理由のうち、直すのに役立つ順に選ぶ。
+ */
+int open_detail_now(const std::string& tuner_key) noexcept {
+    NativeLibusbApi api;
+    auto session = LibusbSession::create(api, false);
+    if (!session) return kOpenDetailEnumerationFailed;
+    DeviceDiscovery discovery;
+    NativeEnumerator enumerator(api, session.value()->context());
+    if (!enumerator.discover(discovery)) return kOpenDetailEnumerationFailed;
+    const auto& candidates = discovery.candidates();
+    if (candidates.empty()) return kOpenDetailNoDevice;
+
+    int detail = kOpenDetailNone;
+    const auto consider = [&detail](int found) {
+        // 番号の小さいほう（上の並び）を優先する。None は最後。
+        if (found != kOpenDetailNone && (detail == kOpenDetailNone || found < detail)) {
+            detail = found;
+        }
+    };
+    for (const DeviceCandidate& candidate : candidates) {
+        switch (candidate.status) {
+        case ObservationStatus::open_failed:
+            consider(candidate.discovery_error == Error::NOT_FOUND ? kOpenDetailDescriptorUnreadable
+                     : candidate.discovery_error == Error::BUSY     ? kOpenDetailBusy
+                                                                    : kOpenDetailOpenFailed);
+            break;
+        case ObservationStatus::invalid_serial: consider(kOpenDetailInvalidSerial); break;
+        case ObservationStatus::insufficient_speed: consider(kOpenDetailSlowUsb); break;
+        case ObservationStatus::invalid_topology: consider(kOpenDetailInvalidTopology); break;
+        case ObservationStatus::usable:
+        case ObservationStatus::unsupported: break;
+        }
+    }
+    if (detail != kOpenDetailNone) return detail;
+    // 1台ずつは使える。筐体としてそろっているかを見る。
+    const auto grouping = group_discovery(discovery);
+    if (!grouping) return kOpenDetailEnumerationFailed;
+    const auto& groups = grouping.value().groups;
+    for (const Q3U4Group& group : groups) {
+        if (group.status != GroupStatus::ready) return kOpenDetailIncomplete;
+    }
+    if (groups.empty()) return kOpenDetailNoDevice;
+    // どれも開ける形で見えている。選んだものが見えているなら、見つけたあとの
+    // 取得（claim）で失敗している。
+    const bool chosen_visible = tuner_key.empty()
+        ? groups.size() == 1U
+        : std::any_of(groups.begin(), groups.end(),
+                      [&tuner_key](const Q3U4Group& group) { return group.base_serial == tuner_key; });
+    return chosen_visible ? kOpenDetailClaimFailed : kOpenDetailNotSelected;
+}
+
 /** セッションを畳む。g_session_mutex を持ったまま、pthread の上で呼ぶ。 */
 void destroy_session_locked() noexcept {
     if (g_session == nullptr) return;
@@ -458,8 +539,12 @@ Error acquire_session(const std::vector<std::uint8_t>& firmware, bool allow_15v,
     // あるときは、利用者が選んだもの（webts_q3u4_select_tuner）を開く。
     // 選ばずに複数あれば、上流は INVALID_ARGUMENT を返す。
     stage.store(kStageOpen);
+    g_open_detail.store(kOpenDetailNone);
     Result<std::unique_ptr<Q3U4Runtime>> runtime = Q3U4Runtime::open_native(tuner_key);
-    if (!runtime) return runtime.error();
+    if (!runtime) {
+        g_open_detail.store(open_detail_now(tuner_key));
+        return runtime.error();
+    }
     session->runtime = std::move(runtime.value());
     session->tuner_key = tuner_key;
 
@@ -1172,6 +1257,11 @@ void webts_q3u4_session_keep_open(int keep) {
  * **ここでは開かないし畳まない。**どちらも USB に触れるので pthread の上で
  * 行う。次にセッションを用意するとき（acquire_session）に効く。
  */
+/** 直前に開けなかった理由（OpenDetail の番号）。開けたなら 0。 */
+int webts_q3u4_open_detail(void) {
+    return g_open_detail.load();
+}
+
 int webts_q3u4_select_tuner(const char* key) {
     const std::string_view value = key == nullptr ? std::string_view{} : std::string_view{key};
     if (!value.empty() && !valid_device_instance(value)) {

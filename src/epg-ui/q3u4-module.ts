@@ -7,7 +7,10 @@
 //
 // そのため、実体の生成はここ1か所に集める。
 
-import { readTunerPermission, selectedTuner } from '../usb/px4-identity';
+import { diagnoseTunerOpen, readTunerPermission, selectedTuner } from '../usb/px4-identity';
+import { REPORT_DETAILS, type Report } from '../reports/report-schema';
+
+type ReportDetail = Report['detail'];
 
 const MODULE_URL = '/build/q3u4-descramble/q3u4-descramble.mjs';
 
@@ -44,6 +47,50 @@ export async function loadQ3U4Module(): Promise<Q3U4Module> {
  */
 export function keepSessionOpen(module: Q3U4Module, keep: boolean): void {
   module.ccall('webts_q3u4_session_keep_open', null, ['number'], [keep ? 1 : 0]);
+}
+
+/** 「デバイスを開く」の段の番号（stage-label.ts）。 */
+export const STAGE_OPEN = 2;
+
+/**
+ * 直前に「デバイスを開く」で止まった理由を、動作報告の語にする
+ * （report-schema.ts の REPORT_DETAILS。C 側の OpenDetail と同じ並び）。
+ */
+export function openDetail(module: Q3U4Module): ReportDetail {
+  const index = Number(module.ccall('webts_q3u4_open_detail', 'number', [], []));
+  return REPORT_DETAILS[index] ?? 'none';
+}
+
+/**
+ * 「デバイスを開く」で止まった理由を確かめる。それ以外の段なら none。
+ *
+ * C 側が no-device（対応機種の機器が1つも見えない）と言っても、WebUSB には
+ * 見えていることがある。libusb の WebUSB 実装は一覧を作るときに各機器を
+ * open() して記述子を読み、**失敗した機器を黙って外す**からである（別の
+ * タブが視聴中のとき、実機でこうなった。2026-09-27）。そのときは JS から
+ * 開いてみて、どこで失敗したかを語にする。
+ */
+export async function resolveOpenDetail(module: Q3U4Module, stage: number): Promise<ReportDetail> {
+  if (stage !== STAGE_OPEN) return 'none';
+  const detail = openDetail(module);
+  if (detail !== 'no-device') return detail;
+  try {
+    const found = await diagnoseTunerOpen();
+    const words = {
+      unseen: 'webusb-unseen', unconfigured: 'webusb-unconfigured',
+      network: 'webusb-open-network', security: 'webusb-open-security',
+      state: 'webusb-open-state', other: 'webusb-open-other',
+      descriptor: 'webusb-descriptor', readable: 'webusb-readable',
+    } as const satisfies Record<typeof found, ReportDetail>;
+    return words[found];
+  } catch {
+    return detail;
+  }
+}
+
+/** エラーの文言へ添える理由。語は動作報告と同じ（問い合わせのときに突き合わせられるように）。 */
+export function describeOpenDetail(detail: ReportDetail): string {
+  return detail === 'none' ? '' : `（開けなかった理由: ${detail}）`;
 }
 
 /**

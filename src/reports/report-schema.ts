@@ -14,6 +14,21 @@ export const REPORT_WAVES = ['GR', 'BS', 'CS'] as const;
 export const REPORT_RESULTS = ['ok', 'no-signal', 'failed'] as const;
 export const REPORT_OSES = ['Windows', 'macOS', 'Linux', 'Android', 'ChromeOS', 'other'] as const;
 export const REPORT_BROWSERS = ['Chrome', 'Edge', 'Opera', 'Brave', 'Chromium', 'other'] as const;
+/**
+ * 「デバイスを開く」で止まったときの理由。C 側の OpenDetail の番号と同じ並び
+ * （native/q3u4-descramble-probe.cpp）。**決まった語だけ**で、識別子は入らない。
+ * それ以外の段で止まったとき、止まらなかったときは none。
+ */
+export const REPORT_DETAILS = [
+  'none', 'no-device', 'descriptor-unreadable', 'busy', 'open-failed', 'invalid-serial',
+  'slow-usb', 'invalid-topology', 'incomplete', 'not-selected', 'enumeration-failed',
+  'claim-failed',
+  // ここから下は JS 側で確かめた、no-device の中身（q3u4-module.ts の
+  // resolveOpenDetail）。libusb の WebUSB 実装は、一覧を作るときに各機器を
+  // open() して記述子を読み、失敗した機器を黙って外す。
+  'webusb-unseen', 'webusb-unconfigured', 'webusb-open-network', 'webusb-open-security',
+  'webusb-open-state', 'webusb-open-other', 'webusb-descriptor', 'webusb-readable',
+] as const;
 
 export interface Report {
   /** アプリの版。 */
@@ -31,10 +46,12 @@ export interface Report {
   readonly stage: number;
   /** 上流のエラー番号。ok と no-signal では 0。 */
   readonly code: number;
+  /** 「デバイスを開く」で止まった理由（REPORT_DETAILS）。 */
+  readonly detail: (typeof REPORT_DETAILS)[number];
 }
 
 const KEYS = ['v', 'model', 'os', 'browser', 'browserMajor', 'kind', 'wave', 'result',
-  'stage', 'code'] as const;
+  'stage', 'code', 'detail'] as const;
 
 function oneOf<T extends string>(values: readonly T[], value: unknown): value is T {
   return typeof value === 'string' && (values as readonly string[]).includes(value);
@@ -50,11 +67,13 @@ function integerIn(value: unknown, min: number, max: number): value is number {
  */
 export function parseReport(input: unknown): Report | null {
   if (typeof input !== 'object' || input === null || Array.isArray(input)) return null;
-  const record = input as Record<string, unknown>;
+  // detail が無いのは 0.3.0 までの送り手。none として受け取る（読み込み直す
+  // までのあいだ、古いページからの報告を捨てないため）。
+  const record: Record<string, unknown> = { detail: 'none', ...(input as Record<string, unknown>) };
   const keys = Object.keys(record);
   if (keys.length !== KEYS.length || !KEYS.every((key) => keys.includes(key))) return null;
 
-  const { v, model, os, browser, browserMajor, kind, wave, result, stage, code } = record;
+  const { v, model, os, browser, browserMajor, kind, wave, result, stage, code, detail } = record;
   if (typeof v !== 'string' || !/^\d{1,3}\.\d{1,3}\.\d{1,3}(-[a-z0-9.]{1,16})?$/.test(v)) return null;
   // 上流の機種名は英数字とハイフン程度。人の名前や自由な文字列を通さない。
   if (typeof model !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,31}$/.test(model)) return null;
@@ -64,6 +83,8 @@ export function parseReport(input: unknown): Report | null {
   if (!oneOf(REPORT_RESULTS, result)) return null;
   if (!integerIn(stage, -1, 63) || !integerIn(code, -1, 65535)) return null;
   if (result === 'failed' ? stage < 0 : stage !== -1 || code !== 0) return null;
+  if (!oneOf(REPORT_DETAILS, detail)) return null;
+  if (result !== 'failed' && detail !== 'none') return null;
 
-  return { v, model, os, browser, browserMajor, kind, wave, result, stage, code };
+  return { v, model, os, browser, browserMajor, kind, wave, result, stage, code, detail };
 }

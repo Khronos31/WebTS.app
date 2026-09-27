@@ -12,8 +12,12 @@ CREATE TABLE IF NOT EXISTS reports (
   wave TEXT NOT NULL,           -- GR | BS | CS
   result TEXT NOT NULL,         -- ok | no-signal | failed
   stage INTEGER NOT NULL,
-  code INTEGER NOT NULL
+  code INTEGER NOT NULL,
+  detail TEXT NOT NULL DEFAULT 'none'  -- 「デバイスを開く」で止まった理由（report-schema.ts の REPORT_DETAILS）
 );
+
+-- 0.3.0 までのテーブルに detail を足す（2026-09-27 に実施）
+-- ALTER TABLE reports ADD COLUMN detail TEXT NOT NULL DEFAULT 'none';
 
 -- 集計の例：機種・波・結果ごとの件数
 -- SELECT model, kind, wave, result, stage, code, COUNT(*) AS n

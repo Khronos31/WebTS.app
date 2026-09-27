@@ -250,6 +250,72 @@ async function keyedDevices(): Promise<{ device: USBDevice; key: string | null }
   return Promise.all(devices.map(async (device) => ({ device, key: await tunerKeyOf(device) })));
 }
 
+/** diagnoseTunerOpen の結果。 */
+export type TunerOpenDiagnosis =
+  'unseen' | 'unconfigured' | 'network' | 'security' | 'state' | 'other'
+  | 'descriptor' | 'readable';
+
+let diagnosing: Promise<TunerOpenDiagnosis> | null = null;
+
+/**
+ * 選んだチューナーを WebUSB が開けるかを確かめる。上流が「開ける機器が無い」
+ * と言ったときの理由を知るためだけに使う（q3u4-module.ts の resolveOpenDetail）。
+ *
+ * - `unseen`：選んだチューナーが WebUSB の一覧に無い（抜けた、許可が無い）
+ * - `unconfigured`：構成が読めていない（configuration が null）
+ * - `network` / `security` / `state` / `other`：open() が失敗した（例外の種類）
+ * - `descriptor`：開けるが、デバイス記述子が読めない
+ * - `readable`：開けて記述子も読める（外された理由はほかにある）
+ *
+ * **同時には1つしか走らせない。**地上波と衛星の走査が同時に失敗すると、
+ * 同じ機器を同時に開け閉めして互いに InvalidStateError になった（実機、
+ * 2026-09-27）。走っている間に頼まれたら、同じ結果を返す。
+ *
+ * 識別子は返さない。
+ */
+export function diagnoseTunerOpen(): Promise<TunerOpenDiagnosis> {
+  diagnosing ??= runTunerOpenDiagnosis().finally(() => { diagnosing = null; });
+  return diagnosing;
+}
+
+async function runTunerOpenDiagnosis(): Promise<TunerOpenDiagnosis> {
+  const [tuner, devices] = await Promise.all([selectedTunerOrFirst(), keyedDevices()]);
+  if (tuner === null) return 'unseen';
+  const mine = devices.filter(({ device, key }) => key === tuner.key
+    && device.vendorId === tuner.model.vendorId && device.productId === tuner.model.productId);
+  if (mine.length === 0) return 'unseen';
+  for (const { device } of mine) {
+    if (device.configuration === null) return 'unconfigured';
+    if (device.opened) continue;
+    try {
+      await device.open();
+    } catch (error) {
+      const name = error instanceof DOMException ? error.name : '';
+      return name === 'NetworkError' ? 'network'
+        : name === 'SecurityError' ? 'security'
+          : name === 'InvalidStateError' ? 'state' : 'other';
+    }
+    try {
+      // libusb の WebUSB 実装が一覧を作るときに読むのと同じ、デバイス記述子。
+      const result = await device.controlTransferIn({
+        requestType: 'standard', recipient: 'device', request: 0x06, value: 0x0100, index: 0,
+      }, 18);
+      if (result.status !== 'ok') return 'descriptor';
+    } catch {
+      return 'descriptor';
+    } finally {
+      await device.close().catch(() => undefined);
+    }
+  }
+  return 'readable';
+}
+
+/** 選んだチューナー。開けるものが無ければ、一覧の先頭（そろっていなくても）。 */
+async function selectedTunerOrFirst(): Promise<ConnectedTuner | null> {
+  const tuners = await listConnectedTuners();
+  return tuners.find((tuner) => tuner.selected) ?? tuners[0] ?? null;
+}
+
 /**
  * 接続済みのチューナーの一覧。**プロンプトは出ない。**許可されていて、
  * いまつながっている機器だけが対象（`navigator.usb.getDevices()`）。
