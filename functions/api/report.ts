@@ -47,12 +47,13 @@ export async function handleReport(request: Request, env: ReportEnv): Promise<Re
   if (report === null) return new Response(null, { status: 400 });
 
   await env.REPORTS_DB.prepare(
-    'INSERT INTO reports (day, v, model, os, browser, browser_major, kind, wave, result, stage, code)'
-    + ' VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+    'INSERT INTO reports'
+    + ' (day, v, model, os, browser, browser_major, kind, wave, result, stage, code, detail)'
+    + ' VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
   ).bind(
     new Date().toISOString().slice(0, 10),
     report.v, report.model, report.os, report.browser, report.browserMajor,
-    report.kind, report.wave, report.result, report.stage, report.code,
+    report.kind, report.wave, report.result, report.stage, report.code, report.detail,
   ).run();
   return new Response(null, { status: 204 });
 }

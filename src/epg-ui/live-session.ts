@@ -19,12 +19,14 @@ import { AudioPlayer } from '../video/audio';
 import type { PlayerMessage, PlayerRequest } from '../video/player-worker';
 import { loadFirmware } from '../usb/firmware';
 import {
-  applyTunerSelection, ensureTunerAvailable, loadQ3U4Module, type Q3U4Module,
+  applyTunerSelection, describeOpenDetail, ensureTunerAvailable, loadQ3U4Module,
+  resolveOpenDetail, type Q3U4Module,
 } from './q3u4-module';
 import { CaptionCanvas } from './caption-canvas';
 import type { Tuning } from './tuning';
 import { STAGE_LABEL } from './stage-label';
 import { reportOutcome } from '../reports/reports';
+import type { Report } from '../reports/report-schema';
 import { setLiveHoldsReceiver, tunerHasOneReceiver } from './receiver-gate';
 import { allowLnb15v } from './lnb-setting';
 import { ChannelScan } from './channel-scan';
@@ -485,13 +487,15 @@ export class LiveSession {
   }
 
   /**
-   * 映ったか、どこで止まったかを beta の動作報告に出す。映らないまま利用者が
+   * 映ったか、どこで止まったかを動作報告に出す。映らないまま利用者が
    * 止めた場合や、放送側の事情（未契約など）で映らない場合は送らない。
+   * 「デバイスを開く」で止まったときは、その理由も添える。
    */
-  #report(result: 'ok' | 'failed', stage = -1, code = 0): void {
+  #report(result: 'ok' | 'failed', stage = -1, code = 0,
+    detail: Report['detail'] = 'none'): void {
     if (this.#reported) return;
     this.#reported = true;
-    reportOutcome({ kind: 'view', wave: this.#options.tuning.wave, result, stage, code });
+    reportOutcome({ kind: 'view', wave: this.#options.tuning.wave, result, stage, code, detail });
   }
 
   #publishStats(message: Extract<PlayerMessage, { kind: 'progress' }>): void {
@@ -574,11 +578,15 @@ export class LiveSession {
       const end: PlayerRequest = { kind: 'end' };
       this.#worker.postMessage(end);
       if (state === 3) {
-        this.#report('failed', stage, error);
         // **復号の失敗は番号だけでは何も分からない。**C 側は B25 の戻り値と
         // ECM の状況を持っているのに、ここで読まずに捨てていた。
-        this.#options.onEnded?.(`受信が止まりました: ${name} (${error})`
-          + describeB25(words[3] ?? 0, words[14] ?? -1, words[15] ?? -1));
+        const b25 = describeB25(words[3] ?? 0, words[14] ?? -1, words[15] ?? -1);
+        // 開けなかった理由を確かめてから出す（WebUSB を開いてみることがある）。
+        void resolveOpenDetail(this.#module, stage).then((detail) => {
+          this.#report('failed', stage, error, detail);
+          this.#options.onEnded?.(`受信が止まりました: ${name} (${error})`
+            + describeOpenDetail(detail) + b25);
+        });
       }
     }
   }
