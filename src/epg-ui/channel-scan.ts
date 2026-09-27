@@ -18,11 +18,15 @@ import { decodeAribText } from '../ts/arib-text';
 import { loadFirmware } from '../usb/firmware';
 import { toProgramItem } from './program-item';
 import { grTunings, tuningKey, type Tuning } from './tuning';
-import { applyTunerSelection, ensureTunerAvailable, loadQ3U4Module } from './q3u4-module';
+import {
+  applyTunerSelection, describeOpenDetail, ensureTunerAvailable, loadQ3U4Module,
+  resolveOpenDetail,
+} from './q3u4-module';
 import { stageLabel } from './stage-label';
 import { sleepUnthrottled } from './tick';
 import type { ChannelItem, ProgramItem } from './types';
 import { reportOutcome } from '../reports/reports';
+import type { Report } from '../reports/report-schema';
 import {
   LiveBlocksScanError, liveHoldsReceiver, takeScanTurn, tunerHasOneReceiver,
 } from './receiver-gate';
@@ -376,7 +380,8 @@ export class ChannelScan {
     let completed = 0;
     /** beta の動作報告のため。波ごとに、1つでもロックしたか。 */
     const lockedWaves = new Set<Tuning['wave']>();
-    const report = (result: 'ok' | 'no-signal' | 'failed', stage = -1, code = 0): void => {
+    const report = (result: 'ok' | 'no-signal' | 'failed', stage = -1, code = 0,
+      detail: Report['detail'] = 'none'): void => {
       // その波を受けられない機種（UNSUPPORTED）と、視聴に受信機を取られていた
       // とき（BUSY）は、動いたかどうかの判断に使えないので送らない。
       if (result === 'failed' && (code === ERROR_UNSUPPORTED || code === ERROR_BUSY)) return;
@@ -385,6 +390,8 @@ export class ChannelScan {
           kind: 'scan', wave: scanned,
           result: result === 'failed' ? result : lockedWaves.has(scanned) ? 'ok' : 'no-signal',
           stage, code,
+          // 「デバイスを開く」で止まったときは、その理由も添える。
+          detail: result === 'failed' ? detail : 'none',
         });
       }
     };
@@ -530,10 +537,11 @@ export class ChannelScan {
             const code = words[2] ?? 0;
             const name = String(module.ccall(
               'webts_q3u4_scan_error_name', 'string', ['number'], [code]));
-            report('failed', stage, code);
+            const detail = await resolveOpenDetail(module, stage);
+            report('failed', stage, code, detail);
             if (code === ERROR_UNSUPPORTED) throw new WaveUnsupportedError(tunings[0]?.wave ?? 'GR');
             if (code === ERROR_BUSY && this.#singleReceiver) throw new LiveBlocksScanError();
-            throw new Error(`スキャンが止まりました: ${name} (${code})`);
+            throw new Error(`スキャンが止まりました: ${name} (${code})` + describeOpenDetail(detail));
           }
           break;
         }

@@ -157,6 +157,8 @@ export interface Outcome {
   /** failed のときだけ。 */
   readonly stage?: number;
   readonly code?: number;
+  /** failed で「デバイスを開く」で止まったときの理由。 */
+  readonly detail?: Report['detail'];
 }
 
 /**
@@ -182,6 +184,7 @@ async function send(outcome: Outcome): Promise<void> {
     result: outcome.result,
     stage: failed ? (outcome.stage ?? 0) : -1,
     code: failed ? (outcome.code ?? 0) : 0,
+    detail: failed ? (outcome.detail ?? 'none') : 'none',
   });
   // 形が崩れたものは送らない。受け側も捨てるが、そもそも出さない。
   if (report === null || !reportsEnabled()) return;

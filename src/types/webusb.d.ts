@@ -67,6 +67,17 @@ interface USBDevice {
   readonly configurations: readonly USBConfiguration[];
   /** この機器の許可を取り消す。一覧の「許可を取り消す」に使う。 */
   forget(): Promise<void>;
+  /** 開けなかった理由を確かめるときだけ使う（px4-identity.ts の diagnoseTunerOpen）。 */
+  open(): Promise<void>;
+  close(): Promise<void>;
+  /** 同上。デバイス記述子を読めるかを確かめる。 */
+  controlTransferIn(setup: {
+    requestType: 'standard' | 'class' | 'vendor';
+    recipient: 'device' | 'interface' | 'endpoint' | 'other';
+    request: number;
+    value: number;
+    index: number;
+  }, length: number): Promise<{ status: 'ok' | 'stall' | 'babble'; data?: DataView }>;
 }
 
 interface USBConnectionEvent extends Event {
