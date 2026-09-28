@@ -157,8 +157,13 @@ export interface Outcome {
   /** failed のときだけ。 */
   readonly stage?: number;
   readonly code?: number;
-  /** failed で「デバイスを開く」で止まったときの理由。 */
+  /** failed で「デバイスを開く」か「カード」で止まったときの理由。 */
   readonly detail?: Report['detail'];
+  /**
+   * 始めた時点の機種名（reportModelName）。**送る時点で読むと、抜かれた
+   * あとは unknown になる**（USB_IO で止まった報告が unknown で届いていた）。
+   */
+  readonly model?: string;
 }
 
 /**
@@ -175,7 +180,7 @@ async function send(outcome: Outcome): Promise<void> {
   const browser = browserOf();
   const report = parseReport({
     v: APP_VERSION,
-    model: await modelName(),
+    model: outcome.model ?? await reportModelName(),
     os: osOf(),
     browser: browser.name,
     browserMajor: browser.major,
@@ -214,7 +219,8 @@ function sentKeys(): string[] {
   }
 }
 
-async function modelName(): Promise<string> {
+/** いま使うチューナーの機種名。視聴や走査を始めるときに控えておく。 */
+export async function reportModelName(): Promise<string> {
   try {
     return (await readTunerPermission()).model?.name ?? 'unknown';
   } catch {

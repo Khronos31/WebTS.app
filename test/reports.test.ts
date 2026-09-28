@@ -25,6 +25,14 @@ describe('report schema', () => {
     expect(parseReport({ ...ok, detail: 'busy' })).toBeNull();
   });
 
+  it('carries why the card did not start, as a fixed word only', () => {
+    const failed = { ...ok, result: 'failed', stage: 4, code: 9 };
+    expect(parseReport({ ...failed, detail: 'card-connect-timeout' })?.detail)
+      .toBe('card-connect-timeout');
+    expect(parseReport({ ...failed, detail: 'card-init' })?.detail).toBe('card-init');
+    expect(parseReport({ ...failed, detail: 'card-connect-3B0212' })).toBeNull();
+  });
+
   it('accepts reports from pages older than detail as none', () => {
     const { detail: _detail, ...older } = ok;
     expect(parseReport(older)?.detail).toBe('none');
