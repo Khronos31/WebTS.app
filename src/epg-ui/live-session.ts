@@ -25,7 +25,7 @@ import {
 import { CaptionCanvas } from './caption-canvas';
 import type { Tuning } from './tuning';
 import { STAGE_LABEL } from './stage-label';
-import { reportOutcome } from '../reports/reports';
+import { reportModelName, reportOutcome } from '../reports/reports';
 import type { Report } from '../reports/report-schema';
 import { setLiveHoldsReceiver, tunerHasOneReceiver } from './receiver-gate';
 import { allowLnb15v } from './lnb-setting';
@@ -202,6 +202,8 @@ export class LiveSession {
   #silentWarned = false;
   /** beta の動作報告を済ませたか。1回の視聴で1回だけ送る。 */
   #reported = false;
+  /** 始めた時点の機種名（動作報告に使う）。 */
+  #model: string | undefined = undefined;
   /** 1本しかない受信機を押さえているか（receiver-gate.ts）。 */
   #holdsOnlyReceiver = false;
   #stats: LiveStats | null = null;
@@ -245,6 +247,7 @@ export class LiveSession {
     active?.stop();
 
     await ensureTunerAvailable();
+    const model = await reportModelName();
 
     // **受信機が1本なら、視聴が優先。**動いている走査を止め、視聴が終わる
     // まで新しい走査を始めさせない（receiver-gate.ts）。
@@ -273,6 +276,7 @@ export class LiveSession {
         { type: 'module' });
       const session = new LiveSession(module, worker, options, firmwarePointer, firmware.length);
       session.#holdsOnlyReceiver = holdsOnlyReceiver;
+      session.#model = model;
       active = session;
       session.#begin(firmware.length);
       return session;
@@ -495,7 +499,10 @@ export class LiveSession {
     detail: Report['detail'] = 'none'): void {
     if (this.#reported) return;
     this.#reported = true;
-    reportOutcome({ kind: 'view', wave: this.#options.tuning.wave, result, stage, code, detail });
+    reportOutcome({
+      kind: 'view', wave: this.#options.tuning.wave, result, stage, code, detail,
+      ...(this.#model === undefined ? {} : { model: this.#model }),
+    });
   }
 
   #publishStats(message: Extract<PlayerMessage, { kind: 'progress' }>): void {

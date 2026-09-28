@@ -45,6 +45,7 @@ extern "C" {
 
 extern "C" void webts_winscard_bind(void* service, std::uint64_t client);
 extern "C" void webts_winscard_unbind(void);
+extern "C" int webts_winscard_last_failure(void);
 
 #include <algorithm>
 #include <array>
@@ -444,6 +445,22 @@ enum OpenDetail : int {
 std::atomic<int> g_open_detail{kOpenDetailNone};
 
 /**
+ * カードの初期化が最後まで通らなかったときの理由（webts_winscard_last_failure）。
+ * 通ったなら 0。
+ */
+std::atomic<int> g_card_failure{0};
+
+/**
+ * カードの初期化は、**失敗したら間を置いて試し直す。**PX-Q3U4 以外の機種で、
+ * 最初の視聴がカードの段で失敗し、次の視聴では映る、という報告が続いた
+ * （PX-MLT5PE、PX-MLT8PE3・5、DTV02A-5TS-P、PX-S1UR。2026-09-26〜27）。px4d を
+ * 使う PC/SC のアプリは SCardConnect を自分で試し直すが、WebTS は1回で
+ * 諦めていた。
+ */
+constexpr int kCardAttempts = 3;
+constexpr int kCardRetryDelayMs[kCardAttempts] = {0, 300, 1000};
+
+/**
  * いまの USB 機器を列挙し、開けない理由を1つ選ぶ。**pthread の上で呼ぶ**
  * （USB に触れる）。見つかった理由のうち、直すのに役立つ順に選ぶ。
  */
@@ -658,23 +675,35 @@ void* worker_main(void* argument) noexcept {
     }
 
     job.stage.store(kStageCard);
-    webts_winscard_bind(&*session.service, 1U);
-    B_CAS_CARD* bcas = create_b_cas_card();
-    if (bcas == nullptr) {
+    g_card_failure.store(0);
+    B_CAS_CARD* bcas = nullptr;
+    int card_initialized = -1;
+    for (int attempt = 0; attempt < kCardAttempts && !job.stop_requested.load(); ++attempt) {
+        if (kCardRetryDelayMs[attempt] > 0) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(kCardRetryDelayMs[attempt]));
+        }
+        webts_winscard_bind(&*session.service, 1U);
+        bcas = create_b_cas_card();
+        if (bcas == nullptr) {
+            webts_winscard_unbind();
+            fail(kStageCard, Error::INTERNAL);
+            release_session(&session);
+            return nullptr;
+        }
+        card_initialized = bcas->init(bcas);
+        if (card_initialized == 0) break;
+        g_card_failure.store(webts_winscard_last_failure());
+        bcas->release(bcas);
+        bcas = nullptr;
         webts_winscard_unbind();
-        fail(kStageCard, Error::INTERNAL);
-        release_session(&session);
-        return nullptr;
     }
-    const int card_initialized = bcas->init(bcas);
     if (card_initialized != 0) {
         job.b25_error.store(card_initialized);
-        bcas->release(bcas);
-        webts_winscard_unbind();
         fail(kStageCard, Error::PROTOCOL_ERROR);
         release_session(&session);
         return nullptr;
     }
+    g_card_failure.store(0);
 
     job.stage.store(kStageB25);
     ARIB_STD_B25* b25 = create_arib_std_b25();
@@ -910,6 +939,12 @@ struct ScanJob final {
     std::atomic<bool> claimed_any{false};
     /** この筐体にその波を受けられる受信機があるか。 */
     std::atomic<bool> wave_supported{false};
+    /**
+     * 最初に失敗した手順（ScanStep）。**動作報告で、どの呼び出しが上流に
+     * 断られたかを知るため**（PX-S1UR の走査が INVALID_ARGUMENT で止まった、
+     * 2026-09-27。番号だけではどこか分からない）。
+     */
+    std::atomic<int> failed_step{0};
 
     std::atomic<int> locked[kMaxScanEntries];
     ScanWorker workers[kMaxScanWorkers];
@@ -927,6 +962,22 @@ struct ScanSlot final {
 };
 
 ScanSlot g_scans[2];
+
+/** 走査の作業者が上流に断られた手順。reports の detail の scan-* と同じ並び。 */
+enum ScanStep : int {
+    kScanStepNone = 0,
+    kScanStepOpenReceiver = 1,
+    kScanStepStartCapture = 2,
+    kScanStepAttach = 3,
+    kScanStepStopCapture = 4,
+    kScanStepCloseReceiver = 5,
+};
+
+/** 最初の失敗だけを残す。 */
+void note_step(ScanJob& job, ScanStep step) noexcept {
+    int expected = kScanStepNone;
+    job.failed_step.compare_exchange_strong(expected, step);
+}
 
 ScanSlot* scan_slot(int wave) noexcept {
     if (wave != kWaveTerrestrial && wave != kWaveSatellite) return nullptr;
@@ -1034,6 +1085,7 @@ void* scan_worker_main(void* argument) noexcept {
         const auto opened = tuner.open_receiver(receiver);
         if (!opened) {
             result = opened.error();
+            note_step(job, kScanStepOpenReceiver);
         } else {
             frontend_open = true;
         }
@@ -1097,12 +1149,13 @@ void* scan_worker_main(void* argument) noexcept {
         job.locked[i].store(1);
 
         const auto capture = tuner.start_capture(receiver, system);
-        if (!capture) { result = capture.error(); break; }
+        if (!capture) { result = capture.error(); note_step(job, kScanStepStartCapture); break; }
         attachment.attachment_id = session.next_attachment.fetch_add(1U);
         const auto attach = plane.attach(attachment);
         if (!attach) {
             (void)tuner.stop_capture(receiver, system);
             result = attach.error();
+            note_step(job, kScanStepAttach);
             break;
         }
 
@@ -1134,14 +1187,20 @@ void* scan_worker_main(void* argument) noexcept {
         // 保持されている最終値を返しておく。溜め続けない。
         plane.release_final(attachment);
         const auto stopped = tuner.stop_capture(receiver, system);
-        if (!stopped && result == Error::OK) result = stopped.error();
+        if (!stopped && result == Error::OK) {
+            result = stopped.error();
+            note_step(job, kScanStepStopCapture);
+        }
         scan_await_acknowledge(job, worker, i);
     }
 
     // 閉じれば LNB の要求も backend が落とす。
     if (frontend_open) {
         const auto closed = tuner.close_receiver(receiver);
-        if (!closed && result == Error::OK) result = closed.error();
+        if (!closed && result == Error::OK) {
+            result = closed.error();
+            note_step(job, kScanStepCloseReceiver);
+        }
     }
     release_receiver(session, claimed);
     if (result != Error::OK && job.error.load() == 0) {
@@ -1257,9 +1316,24 @@ void webts_q3u4_session_keep_open(int keep) {
  * **ここでは開かないし畳まない。**どちらも USB に触れるので pthread の上で
  * 行う。次にセッションを用意するとき（acquire_session）に効く。
  */
+/** その波の走査で最初に上流に断られた手順（ScanStep）。無ければ 0。 */
+int webts_q3u4_scan_failed_step(int wave) {
+    ScanJob* job = scan_job(wave);
+    return job == nullptr ? 0 : job->failed_step.load();
+}
+
 /** 直前に開けなかった理由（OpenDetail の番号）。開けたなら 0。 */
 int webts_q3u4_open_detail(void) {
     return g_open_detail.load();
+}
+
+/**
+ * 直前にカードの初期化が通らなかった理由。phase << 8 | error（phase は
+ * 1 = connect、2 = transmit、error は上流の Error）。呼び出しの失敗が
+ * 無いまま通らなかった（応答の解釈で失敗した）なら 0。
+ */
+int webts_q3u4_card_failure(void) {
+    return g_card_failure.load();
 }
 
 int webts_q3u4_select_tuner(const char* key) {

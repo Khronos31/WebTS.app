@@ -33,6 +33,17 @@ struct Binding final {
 
 Binding g_binding;
 
+// 最後に失敗した呼び出し（1 = connect、2 = transmit）と、そのときの上流の
+// Error の番号。カードの初期化が失敗した理由を動作報告に出すためだけに持つ。
+// **カードの応答そのものは持たない。**
+int g_last_phase = 0;
+int g_last_error = 0;
+
+void record_failure(int phase, Error error) {
+    g_last_phase = phase;
+    g_last_error = static_cast<int>(error);
+}
+
 // b_cas_card.c walks a multi-string of reader names, so the terminator must be
 // a second NUL. The name is cosmetic: nothing dispatches on it.
 constexpr char kReaderList[] = "PX-Q3U4\0";
@@ -56,6 +67,16 @@ void webts_winscard_bind(void* service, std::uint64_t client) {
     g_binding.client = client;
     g_binding.handle = 0U;
     g_binding.connected = false;
+    g_last_phase = 0;
+    g_last_error = 0;
+}
+
+/**
+ * 最後に失敗した呼び出しと上流の Error を1つの数にしたもの（phase << 8 | error）。
+ * 失敗が無ければ 0。
+ */
+int webts_winscard_last_failure(void) {
+    return g_last_phase == 0 ? 0 : (g_last_phase << 8) | (g_last_error & 0xff);
 }
 
 /** Remove the binding. The service is not touched; the caller owns it. */
@@ -103,7 +124,10 @@ LONG SCardConnect(SCARDCONTEXT context, const char*, DWORD,
 
     const auto connected =
         g_binding.service->connect(g_binding.client, ipc::ShareMode::exclusive);
-    if (!connected) return SCARD_F_INTERNAL_ERROR;
+    if (!connected) {
+        record_failure(1, connected.error());
+        return SCARD_F_INTERNAL_ERROR;
+    }
     g_binding.handle = connected.value().handle;
     g_binding.connected = true;
     *card = kCard;
@@ -137,7 +161,10 @@ LONG SCardTransmit(SCARDHANDLE card, const SCARD_IO_REQUEST*,
         g_binding.client, g_binding.handle,
         ByteView{send_buffer, static_cast<std::size_t>(send_length)},
         MutableByteView{receive_buffer, static_cast<std::size_t>(*receive_length)});
-    if (!transmitted) return SCARD_F_INTERNAL_ERROR;
+    if (!transmitted) {
+        record_failure(2, transmitted.error());
+        return SCARD_F_INTERNAL_ERROR;
+    }
     *receive_length = static_cast<DWORD>(transmitted.value());
     return SCARD_S_SUCCESS;
 }

@@ -51,6 +51,26 @@ export function keepSessionOpen(module: Q3U4Module, keep: boolean): void {
 
 /** 「デバイスを開く」の段の番号（stage-label.ts）。 */
 export const STAGE_OPEN = 2;
+/** 「カード」の段の番号（stage-label.ts）。 */
+export const STAGE_CARD = 4;
+
+/** 上流の Error の番号を、カードの理由の語にする（px4/error.h）。 */
+const CARD_ERRORS: Readonly<Record<number, string>> = {
+  4: 'busy', 5: 'not-ready', 6: 'timeout', 7: 'usb', 8: 'usb', 9: 'protocol',
+  12: 'no-card', 13: 'removed',
+};
+
+/**
+ * 直前にカードの初期化が通らなかった理由を、動作報告の語にする。C 側は
+ * 3回まで試し直し、最後の失敗を残す（webts_q3u4_card_failure）。
+ */
+export function cardDetail(module: Q3U4Module): ReportDetail {
+  const packed = Number(module.ccall('webts_q3u4_card_failure', 'number', [], []));
+  if (packed === 0) return 'card-init';
+  const phase = (packed >> 8) === 2 ? 'transmit' : 'connect';
+  const word = `card-${phase}-${CARD_ERRORS[packed & 0xff] ?? 'other'}`;
+  return (REPORT_DETAILS as readonly string[]).includes(word) ? word as ReportDetail : 'card-init';
+}
 
 /**
  * 直前に「デバイスを開く」で止まった理由を、動作報告の語にする
@@ -71,6 +91,7 @@ export function openDetail(module: Q3U4Module): ReportDetail {
  * 開いてみて、どこで失敗したかを語にする。
  */
 export async function resolveOpenDetail(module: Q3U4Module, stage: number): Promise<ReportDetail> {
+  if (stage === STAGE_CARD) return cardDetail(module);
   if (stage !== STAGE_OPEN) return 'none';
   const detail = openDetail(module);
   if (detail !== 'no-device') return detail;
@@ -88,9 +109,26 @@ export async function resolveOpenDetail(module: Q3U4Module, stage: number): Prom
   }
 }
 
+const SCAN_STEPS = [
+  'scan-open-receiver', 'scan-start-capture', 'scan-attach', 'scan-stop-capture',
+  'scan-close-receiver',
+] as const satisfies readonly ReportDetail[];
+
+/**
+ * 走査で最初に上流に断られた手順を、動作報告の語にする。wave は C 側の系統
+ * （地上波 0、衛星 1）。無ければ none。
+ */
+export function scanStepDetail(module: Q3U4Module, wave: number): ReportDetail {
+  const step = Number(module.ccall('webts_q3u4_scan_failed_step', 'number', ['number'], [wave]));
+  return SCAN_STEPS[step - 1] ?? 'none';
+}
+
 /** エラーの文言へ添える理由。語は動作報告と同じ（問い合わせのときに突き合わせられるように）。 */
 export function describeOpenDetail(detail: ReportDetail): string {
-  return detail === 'none' ? '' : `（開けなかった理由: ${detail}）`;
+  if (detail === 'none') return '';
+  if (detail.startsWith('card-')) return `（カードの理由: ${detail}）`;
+  if (detail.startsWith('scan-')) return `（断られた手順: ${detail}）`;
+  return `（開けなかった理由: ${detail}）`;
 }
 
 /**
