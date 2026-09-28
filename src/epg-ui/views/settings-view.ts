@@ -949,7 +949,7 @@ export class SettingsView {
           <li>OSの種類（Windows / macOS / Linux / Android / ChromeOS）、ブラウザの種類とメジャーバージョン（例: Chrome 140）</li>
           <li>視聴か走査か、受信波（地上波・BS・CS）</li>
           <li>動作結果（映った・ロックした／信号なし／停止した段階とエラー番号）</li>
-          <li>デバイスを開けなかったときの理由（決まった語のみ。識別子は含みません）</li>
+          <li>止まったときの理由（デバイスを開く・カード・走査のどこで何に失敗したか。決まった語のみ。識別子は含みません）</li>
         </ul>
         <div style="font-weight: 600; margin-bottom: 4px;">送信されない情報:</div>
         <ul style="margin: 0 0 12px 20px; padding: 0; color: var(--text-secondary); font-size: 0.8125rem;">

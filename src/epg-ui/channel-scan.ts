@@ -20,12 +20,12 @@ import { toProgramItem } from './program-item';
 import { grTunings, tuningKey, type Tuning } from './tuning';
 import {
   applyTunerSelection, describeOpenDetail, ensureTunerAvailable, loadQ3U4Module,
-  resolveOpenDetail,
+  resolveOpenDetail, scanStepDetail,
 } from './q3u4-module';
 import { stageLabel } from './stage-label';
 import { sleepUnthrottled } from './tick';
 import type { ChannelItem, ProgramItem } from './types';
-import { reportOutcome } from '../reports/reports';
+import { reportModelName, reportOutcome } from '../reports/reports';
 import type { Report } from '../reports/report-schema';
 import {
   LiveBlocksScanError, liveHoldsReceiver, takeScanTurn, tunerHasOneReceiver,
@@ -336,6 +336,8 @@ export class ChannelScan {
       throw new Error('衛星の走査には相対 TS 番号が要ります。');
     }
     await ensureTunerAvailable();
+    // 動作報告の機種名は始めた時点のもの（抜かれたあとに送ると unknown になる）。
+    const model = await reportModelName();
     const firmware = await loadFirmware();
     const module = await loadQ3U4Module();
     await applyTunerSelection(module);
@@ -392,6 +394,7 @@ export class ChannelScan {
           stage, code,
           // 「デバイスを開く」で止まったときは、その理由も添える。
           detail: result === 'failed' ? detail : 'none',
+          model,
         });
       }
     };
@@ -537,7 +540,8 @@ export class ChannelScan {
             const code = words[2] ?? 0;
             const name = String(module.ccall(
               'webts_q3u4_scan_error_name', 'string', ['number'], [code]));
-            const detail = await resolveOpenDetail(module, stage);
+            const opened = await resolveOpenDetail(module, stage);
+            const detail = opened === 'none' ? scanStepDetail(module, wave) : opened;
             report('failed', stage, code, detail);
             if (code === ERROR_UNSUPPORTED) throw new WaveUnsupportedError(tunings[0]?.wave ?? 'GR');
             if (code === ERROR_BUSY && this.#singleReceiver) throw new LiveBlocksScanError();

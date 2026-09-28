@@ -15,9 +15,13 @@ export const REPORT_RESULTS = ['ok', 'no-signal', 'failed'] as const;
 export const REPORT_OSES = ['Windows', 'macOS', 'Linux', 'Android', 'ChromeOS', 'other'] as const;
 export const REPORT_BROWSERS = ['Chrome', 'Edge', 'Opera', 'Brave', 'Chromium', 'other'] as const;
 /**
- * 「デバイスを開く」で止まったときの理由。C 側の OpenDetail の番号と同じ並び
- * （native/q3u4-descramble-probe.cpp）。**決まった語だけ**で、識別子は入らない。
- * それ以外の段で止まったとき、止まらなかったときは none。
+ * 止まった理由。「デバイスを開く」と「カード」の段で止まったとき、走査が上流に
+ * 断られたときに入る。
+ * それ以外の段で止まったとき、止まらなかったときは none。**決まった語だけ**で、
+ * 識別子もカードの応答も入らない。
+ *
+ * 先頭から claim-failed までは C 側の OpenDetail の番号と同じ並び
+ * （native/q3u4-descramble-probe.cpp）。並びを変えないこと。
  */
 export const REPORT_DETAILS = [
   'none', 'no-device', 'descriptor-unreadable', 'busy', 'open-failed', 'invalid-serial',
@@ -28,6 +32,17 @@ export const REPORT_DETAILS = [
   // open() して記述子を読み、失敗した機器を黙って外す。
   'webusb-unseen', 'webusb-unconfigured', 'webusb-open-network', 'webusb-open-security',
   'webusb-open-state', 'webusb-open-other', 'webusb-descriptor', 'webusb-readable',
+  // カードの段（q3u4-module.ts の cardDetail）。どの呼び出し（connect / transmit）が
+  // 上流のどの Error で失敗したか。card-init は呼び出しは通ったが、応答の解釈で
+  // 失敗したもの。
+  'card-init', 'card-connect-timeout', 'card-connect-no-card', 'card-connect-removed',
+  'card-connect-protocol', 'card-connect-usb', 'card-connect-not-ready', 'card-connect-busy',
+  'card-connect-other', 'card-transmit-timeout', 'card-transmit-no-card', 'card-transmit-removed',
+  'card-transmit-protocol', 'card-transmit-usb', 'card-transmit-not-ready', 'card-transmit-busy',
+  'card-transmit-other',
+  // 走査の作業者が上流に断られた手順（C 側の ScanStep と同じ並び）。
+  'scan-open-receiver', 'scan-start-capture', 'scan-attach', 'scan-stop-capture',
+  'scan-close-receiver',
 ] as const;
 
 export interface Report {
@@ -46,7 +61,7 @@ export interface Report {
   readonly stage: number;
   /** 上流のエラー番号。ok と no-signal では 0。 */
   readonly code: number;
-  /** 「デバイスを開く」で止まった理由（REPORT_DETAILS）。 */
+  /** 「デバイスを開く」か「カード」の段で止まった理由（REPORT_DETAILS）。 */
   readonly detail: (typeof REPORT_DETAILS)[number];
 }
 
