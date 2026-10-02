@@ -370,10 +370,12 @@ struct Q3U4Runtime::Impl final {
     static Result<std::unique_ptr<Impl>> create(
         std::unique_ptr<LibusbApi> api, std::unique_ptr<FdSyscalls> syscalls,
         bool no_device_discovery, std::string_view base_serial,
-        const std::vector<int>* fds) noexcept;
+        const std::vector<int>* fds,
+        const std::vector<std::string>* usb_paths = nullptr) noexcept;
     ~Impl() noexcept;
 
-    Result<void> acquire_native(std::string_view base_serial) noexcept;
+    Result<void> acquire_native(std::string_view base_serial,
+                                const std::vector<std::string>* usb_paths) noexcept;
     Result<void> acquire_fds(const std::vector<int>& fds,
                              std::string_view base_serial) noexcept;
 
@@ -392,6 +394,9 @@ public:
     static Result<GroupingResult> enumerate_native(std::unique_ptr<LibusbApi> api) noexcept;
     static Result<std::unique_ptr<Q3U4Runtime>> open_native(
         std::unique_ptr<LibusbApi> api, std::string_view base_serial = {}) noexcept;
+    static Result<std::unique_ptr<Q3U4Runtime>> open_native(
+        std::unique_ptr<LibusbApi> api, std::string_view base_serial,
+        const std::vector<std::string>& usb_paths) noexcept;
     static Result<std::unique_ptr<Q3U4Runtime>> open_fds(
         std::unique_ptr<LibusbApi> api, std::unique_ptr<FdSyscalls> syscalls,
         const std::vector<int>& fds, std::string_view base_serial = {}) noexcept;

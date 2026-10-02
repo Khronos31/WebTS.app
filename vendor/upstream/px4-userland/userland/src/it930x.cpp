@@ -531,7 +531,7 @@ Result<void> It930xController::warm_initialize_locked(BoardLayout layout,
         return inputs;
     }
     // warm初期化直後は電源参照を扱わず、次の利用者へ安全なアイドル状態だけを渡す。
-    return configure_idle_gpio_locked(layout);
+    return configure_idle_gpio_locked(layout, model);
 }
 
 Result<void> It930xController::configure_stream_inputs_locked(BoardLayout layout,
@@ -606,7 +606,8 @@ Result<void> It930xController::configure_stream_inputs_locked(BoardLayout layout
     return Result<void>::success();
 }
 
-Result<void> It930xController::configure_idle_gpio_locked(BoardLayout layout) noexcept
+Result<void> It930xController::configure_idle_gpio_locked(BoardLayout layout,
+                                                          DeviceModel model) noexcept
 {
     const auto write = [this](std::uint32_t reg, std::uint8_t value) noexcept {
         return write_q3u4_register_locked(reg, value);
@@ -637,6 +638,11 @@ Result<void> It930xController::configure_idle_gpio_locked(BoardLayout layout) no
             const auto written = write(step.first, step.second);
             if (!written) return written;
         }
+    }
+    // GPIO 11 belongs only to profiles with LNB 15 V support. The unrelated
+    // GPIO 2/3/7 setup above remains specific to each board layout.
+    if (!device_profile(model).supports_lnb_15v) {
+        return Result<void>::success();
     }
     const auto gpio11_mode = write(Q3U4Register::gpio11_mode, 1U);
     if (!gpio11_mode) {
@@ -1123,7 +1129,8 @@ Result<FirmwareLoadResult> It930xController::load_firmware_image_locked(
     return Result<FirmwareLoadResult>::success(FirmwareLoadResult{false, version.value(), false});
 }
 
-Result<void> It930xController::verify_q3u4_state_locked(BoardLayout layout) noexcept
+Result<void> It930xController::verify_q3u4_state_locked(BoardLayout layout,
+                                                        DeviceModel model) noexcept
 {
     const auto verify_mask = [this](std::uint32_t reg, std::uint8_t mask,
                                     std::uint8_t expected) noexcept {
@@ -1212,15 +1219,23 @@ Result<void> It930xController::verify_q3u4_state_locked(BoardLayout layout) noex
         !result) {
         return result;
     }
+    // Read GPIO 11 only for profiles that configured it above.
+    if (!device_profile(model).supports_lnb_15v) {
+        return Result<void>::success();
+    }
     return verify_exact(static_cast<std::uint32_t>(Q3U4Register::gpio11_output),
                         ByteView{zero.data(), zero.size()});
 }
 
 Result<FirmwareLoadResult> It930xController::initialize_q3u4(
-    const FirmwareImage& image, InitializationPolicy policy) noexcept
+    const FirmwareImage& image, InitializationPolicy policy, DeviceModel model) noexcept
 {
     std::lock_guard<std::mutex> lock(transaction_mutex_);
-    return initialize_locked(image, policy, BoardLayout::q3u4);
+    if (model != DeviceModel::px_q3u4 && model != DeviceModel::px_q3pe4 &&
+        model != DeviceModel::px_q3pe5 && model != DeviceModel::px_w3u4 &&
+        model != DeviceModel::px_w3pe4 && model != DeviceModel::px_w3pe5)
+        return Result<FirmwareLoadResult>::failure(Error::UNSUPPORTED);
+    return initialize_locked(image, policy, BoardLayout::q3u4, model);
 }
 
 Result<FirmwareLoadResult> It930xController::initialize_mlt5pe(
@@ -1248,6 +1263,10 @@ Result<FirmwareLoadResult> It930xController::initialize_single_receiver(
     if (model != DeviceModel::px_m1ur && model != DeviceModel::px_s1ur &&
         model != DeviceModel::dtv03a_1tu && model != DeviceModel::dtv02_1t1s_u &&
         model != DeviceModel::dtv02a_1t1s_u)
+        return Result<FirmwareLoadResult>::failure(Error::UNSUPPORTED);
+    // This frontend has no LNB power coordinator. A future one-receiver
+    // profile must implement that path before advertising 15 V capability.
+    if (device_profile(model).supports_lnb_15v)
         return Result<FirmwareLoadResult>::failure(Error::UNSUPPORTED);
     return initialize_locked(image, policy, BoardLayout::single_receiver, model);
 }
@@ -1283,7 +1302,7 @@ Result<FirmwareLoadResult> It930xController::initialize_locked(
         if (!warm) {
             return Result<FirmwareLoadResult>::failure(warm.error());
         }
-        const auto verified = verify_q3u4_state_locked(layout);
+        const auto verified = verify_q3u4_state_locked(layout, model);
         if (!verified) {
             return Result<FirmwareLoadResult>::failure(verified.error());
         }
@@ -1299,7 +1318,7 @@ Result<FirmwareLoadResult> It930xController::initialize_locked(
     if (!warm) {
         return Result<FirmwareLoadResult>::failure(warm.error());
     }
-    const auto verified = verify_q3u4_state_locked(layout);
+    const auto verified = verify_q3u4_state_locked(layout, model);
     if (!verified) {
         return Result<FirmwareLoadResult>::failure(verified.error());
     }

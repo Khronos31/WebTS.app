@@ -369,10 +369,29 @@ void publish_program_info(Job& job, ARIB_STD_B25* b25) noexcept {
 //
 // **作るのも畳むのも pthread の上で行う。**どちらも USB に触れる。
 
+/**
+ * 開く筐体の指定。key は上流の base serial（空なら上流に選ばせる）。
+ *
+ * **serial が同じ筐体があるときだけ、paths で USB 機器を名指す。**PX-M1UR と
+ * PX-S1UR などは serial が重なることがあり、上流は serial だけでは開かない
+ * （v0.1.9）。paths は上流の USB 位置の書式（"1:<アドレス>"）で、アドレスは
+ * 同梱 libusb の WebUSB 実装が USBDevice ごとに振る番号（JS 側の
+ * px4-identity.ts、usbAddressOf）。つながっているあいだだけ有効。
+ */
+struct TunerChoice final {
+    std::string key;
+    std::vector<std::string> paths;
+
+    bool operator==(const TunerChoice& other) const noexcept {
+        return key == other.key && paths == other.paths;
+    }
+    bool operator!=(const TunerChoice& other) const noexcept { return !(*this == other); }
+};
+
 struct Session final {
     bool allow_15v = false;
-    /** 開いた筐体の識別子（上流の base serial）。空なら上流に選ばせた。 */
-    std::string tuner_key;
+    /** 開いた筐体の指定。 */
+    TunerChoice tuner;
 
     std::unique_ptr<Q3U4Runtime> runtime;
     /** 機種ごとに組み立てた筐体。ここから先は機種を問わない。 */
@@ -399,7 +418,7 @@ std::mutex g_session_mutex;
 Session* g_session = nullptr;
 std::atomic<bool> g_session_close_requested{true};
 /**
- * 利用者が選んだ筐体（上流の base serial）。空なら上流に選ばせる。
+ * 利用者が選んだ筐体（TunerChoice）。key が空なら上流に選ばせる。
  * **端末の外へは出さない。**
  *
  * **g_session_mutex ではなく、専用の鍵で守る。**選ぶのは JS のメイン
@@ -411,11 +430,11 @@ std::atomic<bool> g_session_close_requested{true};
  * この鍵は文字列を写す間しか持たない。
  */
 std::mutex g_tuner_key_mutex;
-std::string g_tuner_key;
+TunerChoice g_tuner;
 
-std::string selected_tuner_key() {
+TunerChoice selected_tuner() {
     std::lock_guard<std::mutex> guard(g_tuner_key_mutex);
-    return g_tuner_key;
+    return g_tuner;
 }
 
 // ---- 開けなかった理由 ----
@@ -464,7 +483,7 @@ constexpr int kCardRetryDelayMs[kCardAttempts] = {0, 300, 1000};
  * いまの USB 機器を列挙し、開けない理由を1つ選ぶ。**pthread の上で呼ぶ**
  * （USB に触れる）。見つかった理由のうち、直すのに役立つ順に選ぶ。
  */
-int open_detail_now(const std::string& tuner_key) noexcept {
+int open_detail_now(const TunerChoice& tuner) noexcept {
     NativeLibusbApi api;
     auto session = LibusbSession::create(api, false);
     if (!session) return kOpenDetailEnumerationFailed;
@@ -505,11 +524,20 @@ int open_detail_now(const std::string& tuner_key) noexcept {
     }
     if (groups.empty()) return kOpenDetailNoDevice;
     // どれも開ける形で見えている。選んだものが見えているなら、見つけたあとの
-    // 取得（claim）で失敗している。
-    const bool chosen_visible = tuner_key.empty()
-        ? groups.size() == 1U
-        : std::any_of(groups.begin(), groups.end(),
-                      [&tuner_key](const Q3U4Group& group) { return group.base_serial == tuner_key; });
+    // 取得（claim）で失敗している。**USB の位置で名指したなら、位置で探す。**
+    // serial だけで探すと、serial が同じ別の筐体を「見えている」と取り違える。
+    bool chosen_visible = false;
+    if (!tuner.paths.empty()) {
+        chosen_visible = static_cast<bool>(
+            select_q3u4_group_by_usb_paths(grouping.value(), tuner.key, tuner.paths));
+    } else if (tuner.key.empty()) {
+        chosen_visible = groups.size() == 1U;
+    } else {
+        const auto matching = std::count_if(groups.begin(), groups.end(),
+            [&tuner](const Q3U4Group& group) { return group.base_serial == tuner.key; });
+        // serial が同じ筐体が複数あると、上流は serial だけでは開かない。
+        chosen_visible = matching == 1;
+    }
     return chosen_visible ? kOpenDetailClaimFailed : kOpenDetailNotSelected;
 }
 
@@ -530,10 +558,10 @@ void destroy_session_locked() noexcept {
 Error acquire_session(const std::vector<std::uint8_t>& firmware, bool allow_15v,
                       std::atomic<int>& stage, Session** out) noexcept {
     std::lock_guard<std::mutex> guard(g_session_mutex);
-    const std::string tuner_key = selected_tuner_key();
+    const TunerChoice tuner = selected_tuner();
     // **選ばれた筐体と違うものを開いていたら、空いていれば開き直す。**
     // 使っている仕事があるなら替えられない（視聴か走査を止めてから）。
-    if (g_session != nullptr && g_session->tuner_key != tuner_key) {
+    if (g_session != nullptr && g_session->tuner != tuner) {
         if (g_session->tasks.load() > 0) return Error::BUSY;
         destroy_session_locked();
     }
@@ -554,16 +582,19 @@ Error acquire_session(const std::vector<std::uint8_t>& firmware, bool allow_15v,
     // **上流が知っている機種ならどれでも開く。**許可された USB 機器の中から、
     // 上流の機種の表（identity.cpp）に載っている筐体を開く。筐体が複数
     // あるときは、利用者が選んだもの（webts_q3u4_select_tuner）を開く。
-    // 選ばずに複数あれば、上流は INVALID_ARGUMENT を返す。
+    // 選ばずに複数あれば、上流は INVALID_ARGUMENT を返す。serial が重なる
+    // ときは USB 機器で名指す（TunerChoice）。
     stage.store(kStageOpen);
     g_open_detail.store(kOpenDetailNone);
-    Result<std::unique_ptr<Q3U4Runtime>> runtime = Q3U4Runtime::open_native(tuner_key);
+    Result<std::unique_ptr<Q3U4Runtime>> runtime = tuner.paths.empty()
+        ? Q3U4Runtime::open_native(tuner.key)
+        : Q3U4Runtime::open_native(tuner.key, tuner.paths);
     if (!runtime) {
-        g_open_detail.store(open_detail_now(tuner_key));
+        g_open_detail.store(open_detail_now(tuner));
         return runtime.error();
     }
     session->runtime = std::move(runtime.value());
-    session->tuner_key = tuner_key;
+    session->tuner = tuner;
 
     // 組み立てと初期化は機種ごと（px4-enclosure.cpp）。**データプレーンも
     // 筐体が持つ。**受信機ごとの attachment を束ねる側なので、仕事ごとに
@@ -593,6 +624,16 @@ void release_session(Session* session) noexcept {
     if (g_session->tasks.load() > 0) return;
     if (!g_session_close_requested.load()) return;
     destroy_session_locked();
+}
+
+/**
+ * 選局で頼む LNB の電圧。給電は利用者が許したときだけ、かつ機種が 15V に
+ * 対応するときだけ。**対応は機種の表が答える**（上流 v0.1.9 の
+ * supports_lnb_15v）。非対応の機種へ 15V を頼むと選局ごと断られる。
+ */
+std::uint8_t lnb_voltage_for(Session& session, bool satellite, bool allow_15v) noexcept {
+    const bool supported = device_profile(session.enclosure->model()).supports_lnb_15v;
+    return satellite && allow_15v && supported ? 15U : 0U;
 }
 
 // ---- 受信機の割り当て ----
@@ -787,7 +828,7 @@ void* worker_main(void* argument) noexcept {
     request.receiver = receiver;
     request.system = system;
     request.frequency_khz = static_cast<std::uint32_t>(job.frequency_khz);
-    request.lnb_voltage = static_cast<std::uint8_t>(satellite && job.allow_15v ? 15U : 0U);
+    request.lnb_voltage = lnb_voltage_for(session, satellite, job.allow_15v);
     request.tsid = static_cast<std::uint16_t>(job.tsid);
     result = tune_receiver(tuner, request, TuneProgress{&job.stage, &job.lock_wait_ms});
     if (result != Error::OK) { finish(); return nullptr; }
@@ -1064,8 +1105,7 @@ void* scan_worker_main(void* argument) noexcept {
 
     const bool satellite = job.wave == kWaveSatellite;
     const ipc::System system = satellite ? ipc::System::ISDB_S : ipc::System::ISDB_T;
-    const auto lnb_voltage = static_cast<std::uint8_t>(
-        satellite && job.allow_15v ? 15U : 0U);
+    const auto lnb_voltage = lnb_voltage_for(session, satellite, job.allow_15v);
 
     Error result = Error::OK;
     bool frontend_open = false;
@@ -1309,13 +1349,6 @@ void webts_q3u4_session_keep_open(int keep) {
     g_session_close_requested.store(keep == 0);
 }
 
-/**
- * 使う筐体を選ぶ。key は上流の base serial（px4-identity の
- * webts_px4_tuner_key が返すもの）。空文字なら上流に選ばせる。
- *
- * **ここでは開かないし畳まない。**どちらも USB に触れるので pthread の上で
- * 行う。次にセッションを用意するとき（acquire_session）に効く。
- */
 /** その波の走査で最初に上流に断られた手順（ScanStep）。無ければ 0。 */
 int webts_q3u4_scan_failed_step(int wave) {
     ScanJob* job = scan_job(wave);
@@ -1336,14 +1369,38 @@ int webts_q3u4_card_failure(void) {
     return g_card_failure.load();
 }
 
-int webts_q3u4_select_tuner(const char* key) {
+/**
+ * 使う筐体を選ぶ。key は上流の base serial（px4-identity の
+ * webts_px4_tuner_key が返すもの）。空文字なら上流に選ばせる。
+ * paths は serial が重なるときだけ渡す、USB 機器の位置をカンマで並べたもの
+ * （"1:3" や "1:3,1:4"）。要らなければ空文字。中身は上流が確かめる。
+ *
+ * **ここでは開かないし畳まない。**どちらも USB に触れるので pthread の上で
+ * 行う。次にセッションを用意するとき（acquire_session）に効く。
+ */
+int webts_q3u4_select_tuner(const char* key, const char* paths) {
     const std::string_view value = key == nullptr ? std::string_view{} : std::string_view{key};
     if (!value.empty() && !valid_device_instance(value)) {
         return static_cast<int>(Error::INVALID_ARGUMENT);
     }
-    // g_session_mutex は取らない（g_tuner_key の説明）。
+    TunerChoice choice;
+    choice.key.assign(value.data(), value.size());
+    const std::string_view list = paths == nullptr ? std::string_view{} : std::string_view{paths};
+    for (std::size_t begin = 0U; begin < list.size();) {
+        const std::size_t end = std::min(list.find(',', begin), list.size());
+        const std::string_view path = list.substr(begin, end - begin);
+        if (path.empty() || choice.paths.size() == 2U) {
+            return static_cast<int>(Error::INVALID_ARGUMENT);
+        }
+        choice.paths.emplace_back(path);
+        begin = end + 1U;
+    }
+    if (!choice.paths.empty() && choice.key.empty()) {
+        return static_cast<int>(Error::INVALID_ARGUMENT);
+    }
+    // g_session_mutex は取らない（g_tuner_key_mutex の説明）。
     std::lock_guard<std::mutex> guard(g_tuner_key_mutex);
-    g_tuner_key.assign(value.data(), value.size());
+    g_tuner = std::move(choice);
     return 0;
 }
 

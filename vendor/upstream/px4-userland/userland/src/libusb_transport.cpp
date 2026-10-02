@@ -1647,9 +1647,11 @@ bool Q3U4Runtime::quarantined() const noexcept
 Result<std::unique_ptr<Q3U4Runtime::Impl>> Q3U4Runtime::Impl::create(
     std::unique_ptr<LibusbApi> api, std::unique_ptr<FdSyscalls> syscalls,
     bool no_device_discovery, std::string_view base_serial,
-    const std::vector<int>* fds) noexcept
+    const std::vector<int>* fds,
+    const std::vector<std::string>* usb_paths) noexcept
 {
-    if (!api || (fds != nullptr && !syscalls)) {
+    if (!api || (fds != nullptr && !syscalls) ||
+        (fds != nullptr && usb_paths != nullptr)) {
         return Result<std::unique_ptr<Impl>>::failure(Error::INVALID_ARGUMENT);
     }
     auto session = LibusbSession::create(*api, no_device_discovery);
@@ -1668,7 +1670,7 @@ Result<std::unique_ptr<Q3U4Runtime::Impl>> Q3U4Runtime::Impl::create(
     runtime->session_ = std::move(session.value());
     runtime->state_ = std::move(state);
     runtime->syscalls_ = std::move(syscalls);
-    const Result<void> acquired = fds == nullptr ? runtime->acquire_native(base_serial)
+    const Result<void> acquired = fds == nullptr ? runtime->acquire_native(base_serial, usb_paths)
                                                   : runtime->acquire_fds(*fds, base_serial);
     if (!acquired) {
         return Result<std::unique_ptr<Impl>>::failure(acquired.error());
@@ -1679,11 +1681,18 @@ Result<std::unique_ptr<Q3U4Runtime::Impl>> Q3U4Runtime::Impl::create(
 Result<std::unique_ptr<Q3U4Runtime>> Q3U4Runtime::open_native(
     std::string_view base_serial) noexcept
 {
+    return open_native(base_serial, {});
+}
+
+Result<std::unique_ptr<Q3U4Runtime>> Q3U4Runtime::open_native(
+    std::string_view base_serial, const std::vector<std::string>& usb_paths) noexcept
+{
     std::unique_ptr<LibusbApi> api(new (std::nothrow) NativeLibusbApi);
     if (!api) {
         return Result<std::unique_ptr<Q3U4Runtime>>::failure(Error::INTERNAL);
     }
-    auto impl = Impl::create(std::move(api), nullptr, false, base_serial, nullptr);
+    auto impl = Impl::create(std::move(api), nullptr, false, base_serial, nullptr,
+                             usb_paths.empty() ? nullptr : &usb_paths);
     if (!impl) {
         return Result<std::unique_ptr<Q3U4Runtime>>::failure(impl.error());
     }
@@ -1736,7 +1745,8 @@ Q3U4Runtime::Impl::~Impl() noexcept
 
 Q3U4Runtime::~Q3U4Runtime() noexcept = default;
 
-Result<void> Q3U4Runtime::Impl::acquire_native(std::string_view base_serial) noexcept
+Result<void> Q3U4Runtime::Impl::acquire_native(
+    std::string_view base_serial, const std::vector<std::string>* usb_paths) noexcept
 {
     // Validate caller input before discovery errors are considered.  A malformed
     // requested base serial must remain an argument error even when USB
@@ -1760,8 +1770,28 @@ Result<void> Q3U4Runtime::Impl::acquire_native(std::string_view base_serial) noe
     if (!grouping) {
         return Result<void>::failure(grouping.error());
     }
-    const auto selected = select_ready_q3u4_group(grouping.value(), base_serial);
-    if (!selected) {
+    const auto selected = usb_paths == nullptr ?
+        Result<SelectedQ3U4Group>::failure(Error::INTERNAL) :
+        select_q3u4_group_by_usb_paths(grouping.value(), base_serial, *usb_paths);
+    const auto selected_legacy = usb_paths == nullptr ?
+        select_ready_q3u4_group(grouping.value(), base_serial) :
+        Result<std::size_t>::failure(Error::INTERNAL);
+    if ((usb_paths != nullptr && !selected) ||
+        (usb_paths == nullptr && !selected_legacy)) {
+        // An explicit path or a serial collision is an argument ambiguity,
+        // even if an unrelated USB descriptor also failed during discovery.
+        if (usb_paths != nullptr) return Result<void>::failure(selected.error());
+        if (!base_serial.empty()) {
+            std::size_t matching_groups = 0U;
+            bool duplicate_group = false;
+            for (const Q3U4Group& group : grouping.value().groups) {
+                if (group.base_serial != base_serial) continue;
+                ++matching_groups;
+                duplicate_group = duplicate_group || group.status == GroupStatus::duplicate;
+            }
+            if (matching_groups > 1U || duplicate_group)
+                return Result<void>::failure(Error::INVALID_ARGUMENT);
+        }
         // An operational discovery error is not an incomplete grouping.  In
         // particular, libusb may open the device but fail while reading its
         // serial descriptor; that candidate is marked invalid_serial rather
@@ -1777,23 +1807,21 @@ Result<void> Q3U4Runtime::Impl::acquire_native(std::string_view base_serial) noe
                 return Result<void>::failure(candidate.discovery_error);
             }
         }
-        return Result<void>::failure(selected.error());
+        return Result<void>::failure(usb_paths == nullptr ? selected_legacy.error() :
+                                    selected.error());
     }
-    const Q3U4Group& group = grouping.value().groups[selected.value()];
+    const Q3U4Group& group = grouping.value().groups[
+        usb_paths == nullptr ? selected_legacy.value() : selected.value().group_index];
     const std::size_t bridge_count = device_profile(group.model).bridge_count;
     std::array<const DeviceCandidate*, 2U> candidates{nullptr, nullptr};
-    for (const DeviceCandidate& candidate : discovery.candidates()) {
-        for (std::size_t slot = 0U; slot < bridge_count; ++slot) {
-            if (group.devices[slot].has_value() &&
-                candidate.observation.serial == group.devices[slot]->serial) {
-                candidates[slot] = &candidate;
-            }
-        }
-    }
     for (std::size_t slot = 0U; slot < bridge_count; ++slot) {
-        if (candidates[slot] == nullptr) {
+        const std::size_t index = usb_paths == nullptr ?
+            group.candidate_indices[slot].value_or(discovery.candidates().size()) :
+            selected.value().candidate_indices[slot];
+        if (index >= discovery.candidates().size()) {
             return Result<void>::failure(Error::INTERNAL);
         }
+        candidates[slot] = &discovery.candidates()[index];
     }
     for (std::size_t slot = 0U; slot < bridge_count; ++slot) {
         const DeviceCandidate* candidate = candidates[slot];
@@ -1947,16 +1975,10 @@ Result<void> Q3U4Runtime::Impl::acquire_fds(const std::vector<int>& fds,
     const std::size_t bridge_count = device_profile(group.model).bridge_count;
     std::array<std::size_t, 2U> selected_indices{
         std::numeric_limits<std::size_t>::max(), std::numeric_limits<std::size_t>::max()};
-    for (std::size_t index = 0U; index < pending.size(); ++index) {
-        for (std::size_t slot = 0U; slot < bridge_count; ++slot) {
-            if (group.devices[slot].has_value() &&
-                pending[index].observation.serial == group.devices[slot]->serial) {
-                selected_indices[slot] = index;
-            }
-        }
-    }
+    for (std::size_t slot = 0U; slot < bridge_count; ++slot)
+        selected_indices[slot] = group.candidate_indices[slot].value_or(pending.size());
     for (std::size_t slot = 0U; slot < bridge_count; ++slot) {
-        if (selected_indices[slot] == std::numeric_limits<std::size_t>::max()) {
+        if (selected_indices[slot] >= pending.size()) {
             cleanup();
             return Result<void>::failure(Error::INTERNAL);
         }

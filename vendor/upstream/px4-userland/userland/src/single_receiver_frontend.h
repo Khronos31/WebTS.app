@@ -51,10 +51,6 @@ private:
     Q3U4BackendPower& power_;
     Q3U4FrontendDelay& delay_;
     DeviceModel model_;
-    bool allow_lnb_power_;
-    bool lnb_on_ = false;
-    bool pending_lnb_ = false;
-    bool prior_lnb_on_ = false;
     Tc90522 tc_t_;
     Tc90522 tc_s_;
     Tc90522 tc_s0_;

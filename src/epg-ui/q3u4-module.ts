@@ -136,12 +136,14 @@ export function describeOpenDetail(detail: ReportDetail): string {
  *
  * 許可されたチューナーが複数あると、上流はどれを開くか決められず
  * INVALID_ARGUMENT を返す。利用者が選んだ1台（無ければ一覧の先頭）の
- * 識別子を渡す。識別子は C 側のメモリに置くだけで、外へは出ない。
+ * 識別子を渡す。serial が同じ筐体がほかにつながっていれば、USB 機器の
+ * 位置も渡す（px4-identity.ts の usbAddressOf）。どちらも C 側のメモリに
+ * 置くだけで、外へは出ない。
  */
 export async function applyTunerSelection(module: Q3U4Module): Promise<void> {
   const tuner = await selectedTuner();
-  const error = module.ccall('webts_q3u4_select_tuner', 'number', ['string'],
-    [tuner?.key ?? '']) as number;
+  const error = module.ccall('webts_q3u4_select_tuner', 'number', ['string', 'string'],
+    [tuner?.key ?? '', tuner?.usbPaths.join(',') ?? '']) as number;
   if (error !== 0) throw new Error(`チューナーを選べません (${error})`);
 }
 

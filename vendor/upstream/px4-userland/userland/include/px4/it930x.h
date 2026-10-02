@@ -114,7 +114,8 @@ public:
     // Initialize one IT9305E in the fixed PX-Q3U4 state and leave its GPIOs idle.
     Result<FirmwareLoadResult> initialize_q3u4(
         const FirmwareImage& image,
-        InitializationPolicy policy = InitializationPolicy::accept_cold_or_warm) noexcept;
+        InitializationPolicy policy = InitializationPolicy::accept_cold_or_warm,
+        DeviceModel model = DeviceModel::px_q3u4) noexcept;
     // Initialize the single IT930x of a PX-MLT5PE/DTV02A-5TS-P in the fixed
     // px4_drv state and leave its GPIOs idle.  The backend-power, LNB, card,
     // and PSB operations above use the same GPIO/register assignment on this
@@ -159,14 +160,14 @@ private:
     Result<void> set_card_baud_rate_locked(It930xCardBaudRate baud_rate) noexcept;
     Result<void> warm_initialize_locked(BoardLayout layout, DeviceModel model) noexcept;
     Result<void> configure_stream_inputs_locked(BoardLayout layout, DeviceModel model) noexcept;
-    Result<void> configure_idle_gpio_locked(BoardLayout layout) noexcept;
+    Result<void> configure_idle_gpio_locked(BoardLayout layout, DeviceModel model) noexcept;
     Result<FirmwareLoadResult> initialize_locked(const FirmwareImage& image,
                                                  InitializationPolicy policy,
                                                  BoardLayout layout,
                                                  DeviceModel model = DeviceModel::px_mlt5pe) noexcept;
     Result<void> configure_q3u4_stream_output_locked() noexcept;
     Result<FirmwareLoadResult> load_firmware_image_locked(const FirmwareImage& image) noexcept;
-    Result<void> verify_q3u4_state_locked(BoardLayout layout) noexcept;
+    Result<void> verify_q3u4_state_locked(BoardLayout layout, DeviceModel model) noexcept;
     void pace_after_control_transfer() const noexcept;
     bool valid_pacing_mode() const noexcept;
 
