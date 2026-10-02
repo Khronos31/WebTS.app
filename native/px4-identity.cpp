@@ -150,11 +150,12 @@ int webts_px4_model_count(void) {
 }
 
 /**
- * 機種を1つ読む。output は 4 語：vendor ID、product ID、USB 機器の数
- * （PX-Q3U4 は 2）、受信機の数。範囲外なら INVALID_ARGUMENT。
+ * 機種を1つ読む。output は 5 語：vendor ID、product ID、USB 機器の数
+ * （PX-Q3U4 は 2）、受信機の数、LNB へ 15V を出せるか（1 / 0）。
+ * 範囲外なら INVALID_ARGUMENT。
  */
 int webts_px4_model(int index, std::int32_t* output, int output_words) {
-    if (output == nullptr || output_words < 4 || index < 0 || index >= model_count()) {
+    if (output == nullptr || output_words < 5 || index < 0 || index >= model_count()) {
         return static_cast<int>(Error::INVALID_ARGUMENT);
     }
     const DeviceProfile& profile = device_profile(static_cast<DeviceModel>(index));
@@ -162,6 +163,7 @@ int webts_px4_model(int index, std::int32_t* output, int output_words) {
     output[1] = static_cast<std::int32_t>(profile.product_id);
     output[2] = static_cast<std::int32_t>(profile.bridge_count);
     output[3] = static_cast<std::int32_t>(profile.receiver_count);
+    output[4] = profile.supports_lnb_15v ? 1 : 0;
     return static_cast<int>(Error::OK);
 }
 

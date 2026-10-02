@@ -30,6 +30,12 @@
  * transfer private data is destroyed and the shared state detached before
  * the libusb user callback, which is allowed to free the transfer.
  * Rationale and measurements: docs/FINDINGS.md section 1.
+ *
+ * Modified 2026-10-02 by the WebTS.app project.
+ * Changed: device session IDs start at 1 and are kept, with their counter,
+ * under Symbol.for() keys, so the page can name one connected USBDevice by
+ * the address libusb gives it (bus 1, address = session ID). Two tuners of
+ * the same model can share a serial number; this is what tells them apart.
  */
 #include <emscripten/version.h>
 
@@ -637,7 +643,7 @@ private:
 
 unsigned long getDeviceSessionId(val& web_usb_device) {
 	thread_local const val SessionIdSymbol =
-		val::global("Symbol")(val("libusb.session_id"));
+		val::global("Symbol").call<val>("for", val("libusb.session_id"));
 
 	val session_id_val = web_usb_device[SessionIdSymbol];
 	if (!session_id_val.isUndefined()) {
@@ -651,10 +657,21 @@ unsigned long getDeviceSessionId(val& web_usb_device) {
 	// connected, even between different libusb invocations. See
 	// https://github.com/WICG/webusb/issues/241.
 
-	static unsigned long next_session_id = 0;
+	/* WebTS.app patch (not upstream): the ID doubles as the device address
+	 * and port number below, so start at 1 (USB never uses address 0), and
+	 * keep both the ID and the counter under registered symbols so the page
+	 * can read the ID of a USBDevice and assign one the same way before
+	 * libusb has seen the device. */
+	thread_local const val NextSessionIdSymbol =
+		val::global("Symbol").call<val>("for", val("libusb.next_session_id"));
+	val global = val::global();
+	val next_val = global[NextSessionIdSymbol];
+	unsigned long session_id =
+		next_val.isUndefined() ? 1 : next_val.as<unsigned long>();
+	global.set(NextSessionIdSymbol, session_id + 1);
 
-	web_usb_device.set(SessionIdSymbol, next_session_id);
-	return next_session_id++;
+	web_usb_device.set(SessionIdSymbol, session_id);
+	return session_id;
 }
 
 val getDeviceList(libusb_context* ctx, discovered_devs** devs) {

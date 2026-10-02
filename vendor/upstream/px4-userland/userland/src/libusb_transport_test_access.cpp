@@ -27,7 +27,15 @@ Result<GroupingResult> RuntimeTestAccess::enumerate_native(
 Result<std::unique_ptr<Q3U4Runtime>> RuntimeTestAccess::open_native(
     std::unique_ptr<LibusbApi> api, std::string_view base_serial) noexcept
 {
-    auto impl = Q3U4Runtime::Impl::create(std::move(api), nullptr, false, base_serial, nullptr);
+    return open_native(std::move(api), base_serial, {});
+}
+
+Result<std::unique_ptr<Q3U4Runtime>> RuntimeTestAccess::open_native(
+    std::unique_ptr<LibusbApi> api, std::string_view base_serial,
+    const std::vector<std::string>& usb_paths) noexcept
+{
+    auto impl = Q3U4Runtime::Impl::create(std::move(api), nullptr, false, base_serial,
+                                          nullptr, usb_paths.empty() ? nullptr : &usb_paths);
     if (!impl) {
         return Result<std::unique_ptr<Q3U4Runtime>>::failure(impl.error());
     }

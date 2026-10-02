@@ -283,6 +283,8 @@ public:
     {
         if (layout_.dual_system)
             return system == ipc::System::ISDB_T || system == ipc::System::ISDB_S;
+        if (layout_.plain_ts)
+            return system == ipc::System::ISDB_T;
         const bool satellite = (receiver % layout_.receivers_per_bridge) < 2U;
         return system == (satellite ? ipc::System::ISDB_S : ipc::System::ISDB_T);
     }
