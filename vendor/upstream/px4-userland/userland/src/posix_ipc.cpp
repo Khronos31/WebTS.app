@@ -11,11 +11,13 @@
 #include <climits>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <fcntl.h>
 #include <limits>
 #include <poll.h>
+#include <sys/file.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -156,6 +158,7 @@ Result<Layout> make_layout(const EndpointConfig& config) noexcept
     const std::size_t runtime_length = bounded_length(runtime, kStoredPathCapacity);
     if (runtime_length == 0U || runtime_length == kStoredPathCapacity ||
         runtime[0] != '/' || !valid_component(config.instance) ||
+        bounded_length(config.instance, 81U) > 80U ||
         !valid_component(config.endpoint_name)) {
         return Result<Layout>::failure(Error::INVALID_ARGUMENT);
     }
@@ -500,6 +503,137 @@ bool PosixIpcTestAccess::ownership_allowed(uid_t owner_uid, gid_t owner_gid,
                                      effective_gid, group_access, getgroups);
 }
 #endif
+
+SerialEndpointLease::~SerialEndpointLease() noexcept
+{
+    close();
+}
+
+SerialEndpointLease::SerialEndpointLease(SerialEndpointLease&& other) noexcept
+    : directory_fd_(other.directory_fd_), lock_fd_(other.lock_fd_),
+      filename_(other.filename_)
+{
+    other.directory_fd_ = -1;
+    other.lock_fd_ = -1;
+}
+
+SerialEndpointLease& SerialEndpointLease::operator=(SerialEndpointLease&& other) noexcept
+{
+    if (this != &other) {
+        close();
+        directory_fd_ = other.directory_fd_;
+        lock_fd_ = other.lock_fd_;
+        filename_ = other.filename_;
+        other.directory_fd_ = -1;
+        other.lock_fd_ = -1;
+    }
+    return *this;
+}
+
+Result<SerialEndpointLease> SerialEndpointLease::acquire(
+    const EndpointConfig& endpoint, std::string_view observed_serial) noexcept
+{
+    if ((observed_serial.size() != 14U && observed_serial.size() != 15U) ||
+        !std::all_of(observed_serial.begin(), observed_serial.end(),
+                     [](char character) { return character >= '0' && character <= '9'; })) {
+        return Result<SerialEndpointLease>::failure(Error::INVALID_ARGUMENT);
+    }
+    const auto layout_result = make_layout(endpoint);
+    if (!layout_result) return Result<SerialEndpointLease>::failure(layout_result.error());
+    const Layout& layout = layout_result.value();
+    const auto runtime = validate_directory(layout.runtime_directory.data(),
+                                            layout.directory_mode);
+    if (!runtime) return Result<SerialEndpointLease>::failure(runtime.error());
+
+    SerialEndpointLease lease;
+    const int length = std::snprintf(lease.filename_.data(), lease.filename_.size(),
+                                     ".px4-userland-%.*s.lock",
+                                     static_cast<int>(observed_serial.size()),
+                                     observed_serial.data());
+    if (length <= 0 || static_cast<std::size_t>(length) >= lease.filename_.size())
+        return Result<SerialEndpointLease>::failure(Error::INVALID_ARGUMENT);
+    lease.directory_fd_ = ::open(layout.runtime_directory.data(),
+                                 O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (lease.directory_fd_ < 0)
+        return Result<SerialEndpointLease>::failure(map_errno(errno));
+    struct stat directory_status {};
+    if (::fstat(lease.directory_fd_, &directory_status) != 0 ||
+        !same_identity(directory_status, runtime.value()))
+        return Result<SerialEndpointLease>::failure(Error::BUSY);
+
+    const bool serial_instance =
+        std::string_view(endpoint.instance) == observed_serial;
+    const int operation = (serial_instance ? LOCK_EX : LOCK_SH) | LOCK_NB;
+    constexpr std::size_t kMaxStaleInodeRetries = 8U;
+    for (std::size_t attempt = 0U; attempt < kMaxStaleInodeRetries; ++attempt) {
+        int fd = ::openat(lease.directory_fd_, lease.filename_.data(),
+                          O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
+        if (fd >= 0) {
+            if (::fchmod(fd, 0600) != 0) {
+                close_fd(fd);
+                return Result<SerialEndpointLease>::failure(map_errno(errno));
+            }
+        } else if (errno == EEXIST) {
+            fd = ::openat(lease.directory_fd_, lease.filename_.data(),
+                          O_RDWR | O_NOFOLLOW | O_CLOEXEC);
+            if (fd < 0 && errno == ENOENT) continue;
+        }
+        if (fd < 0) return Result<SerialEndpointLease>::failure(map_errno(errno));
+
+        struct stat lock_status {};
+        if (::fstat(fd, &lock_status) != 0 || !S_ISREG(lock_status.st_mode) ||
+            lock_status.st_uid != ::geteuid() ||
+            (lock_status.st_mode & 07777) != 0600 || lock_status.st_nlink != 1) {
+            close_fd(fd);
+            return Result<SerialEndpointLease>::failure(Error::INVALID_ARGUMENT);
+        }
+        if (::flock(fd, operation) != 0) {
+            const int lock_error = errno;
+            struct stat named_status {};
+            const bool stale = ::fstatat(lease.directory_fd_, lease.filename_.data(),
+                                          &named_status, AT_SYMLINK_NOFOLLOW) != 0 ||
+                               !same_identity(named_status, identity_of(lock_status));
+            close_fd(fd);
+            if (stale) continue;
+            return Result<SerialEndpointLease>::failure(
+                lock_error == EWOULDBLOCK || lock_error == EAGAIN ?
+                    Error::BUSY : map_errno(lock_error));
+        }
+        struct stat named_status {};
+        if (::fstatat(lease.directory_fd_, lease.filename_.data(), &named_status,
+                      AT_SYMLINK_NOFOLLOW) == 0 &&
+            S_ISREG(named_status.st_mode) &&
+            same_identity(named_status, identity_of(lock_status))) {
+            lease.lock_fd_ = fd;
+            return Result<SerialEndpointLease>::success(std::move(lease));
+        }
+        close_fd(fd);
+    }
+    return Result<SerialEndpointLease>::failure(Error::BUSY);
+}
+
+void SerialEndpointLease::close() noexcept
+{
+    if (lock_fd_ >= 0) {
+        // Only the last holder can upgrade to exclusive. Never unlink a lock
+        // inode while another custom-instance daemon still holds it shared.
+        if (::flock(lock_fd_, LOCK_EX | LOCK_NB) == 0) {
+            struct stat held_status {};
+            struct stat named_status {};
+            if (::fstat(lock_fd_, &held_status) == 0 &&
+                ::fstatat(directory_fd_, filename_.data(), &named_status,
+                          AT_SYMLINK_NOFOLLOW) == 0 &&
+                S_ISREG(named_status.st_mode) &&
+                same_identity(named_status, identity_of(held_status))) {
+                (void)::unlinkat(directory_fd_, filename_.data(), 0);
+            }
+        }
+        close_fd(lock_fd_);
+        lock_fd_ = -1;
+    }
+    close_fd(directory_fd_);
+    directory_fd_ = -1;
+}
 
 SocketStream::~SocketStream() noexcept
 {

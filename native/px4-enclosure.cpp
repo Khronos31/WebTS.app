@@ -83,9 +83,12 @@ public:
     Result<void> open(const FirmwareImage& firmware, bool allow_15v,
                       Px4OpenProgress progress, void* context) noexcept {
         report(progress, context, Px4OpenStep::initialize);
-        const auto initialized1 = dev1_.initialize_q3u4(firmware);
+        // 機種を渡す（上流 px4d と同じ）。GPIO 11 を触るかは機種の表で決まる。
+        const auto initialized1 = dev1_.initialize_q3u4(
+            firmware, InitializationPolicy::accept_cold_or_warm, runtime_.model());
         if (!initialized1) return Result<void>::failure(initialized1.error());
-        const auto initialized2 = dev2_.initialize_q3u4(firmware);
+        const auto initialized2 = dev2_.initialize_q3u4(
+            firmware, InitializationPolicy::accept_cold_or_warm, runtime_.model());
         if (!initialized2) return Result<void>::failure(initialized2.error());
 
         dev1_i2c_.emplace(dev1_);
@@ -234,7 +237,8 @@ public:
                       Px4OpenProgress progress, void* context) noexcept {
         report(progress, context, Px4OpenStep::initialize);
         // ファームウェアも初期化も PX-Q3U4 と同じ（2,169 バイト）。
-        const auto initialized = device_.initialize_q3u4(firmware);
+        const auto initialized = device_.initialize_q3u4(
+            firmware, InitializationPolicy::accept_cold_or_warm, runtime_.model());
         if (!initialized) return Result<void>::failure(initialized.error());
 
         // 2つ目のブリッジの口には、同じ I2C と「無い」電源を渡す（px4d と同じ）。

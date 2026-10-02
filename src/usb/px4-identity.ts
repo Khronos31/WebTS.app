@@ -38,6 +38,11 @@ export interface Px4Model {
   readonly usbDevices: number;
   readonly receivers: number;
   /**
+   * LNB へ 15V を出せる機種か。上流の機種の表が答える。出せない機種では、
+   * 給電を許していても 0V で受ける（PX-M1UR など）。
+   */
+  readonly lnb15v: boolean;
+  /**
    * WebTS で実機を動かして確かめた機種か。**上流の対応とは別。**上流が
    * 対応していても、WebTS で動かしていなければ false。画面で「未確認
    * （報告募集）」を出すのに使う。
@@ -50,11 +55,15 @@ export interface Px4Model {
  * 載っていない機種（上流が今後足す機種を含む）は未確認として扱う。
  *
  *   0x084a PX-Q3U4 … Windows・Linux・macOS・Android（docs/COMPATIBILITY.md）
+ *   0x0854 PX-M1UR … Windows（上流 v0.1.9。地上波・BS の視聴、15V 非対応で
+ *                     給電オンでも 0V で BS が映る、2026-10-02〜03。走査は 0.3.2 で）
+ *   0x0855 PX-S1UR … Windows（上流 v0.1.9。地上波の視聴、2026-10-02〜03）
+ *   M1UR と S1UR は serial が重なる個体があり、両方挿して選び分けて視聴できた。
  */
-const VERIFIED_IN_WEBTS: ReadonlySet<number> = new Set([0x084a]);
+const VERIFIED_IN_WEBTS: ReadonlySet<number> = new Set([0x084a, 0x0854, 0x0855]);
 
 const DEFAULT_MODULE_URL = '/build/px4-identity/px4-identity.mjs';
-const MODEL_WORDS = 4;
+const MODEL_WORDS = 5;
 
 let cached: Promise<readonly Px4Model[]> | null = null;
 
@@ -76,14 +85,15 @@ export function loadPx4Models(moduleUrl = DEFAULT_MODULE_URL): Promise<readonly 
         const error = module.ccall('webts_px4_model', 'number',
           ['number', 'number', 'number'], [index, pointer, MODEL_WORDS]);
         const words = module.HEAP32.subarray(pointer / 4, pointer / 4 + MODEL_WORDS);
-        const [vendorId = 0, productId = 0, usbDevices = 0, receivers = 0] = words;
+        const [vendorId = 0, productId = 0, usbDevices = 0, receivers = 0, lnb = -1] = words;
         const name = module.ccall('webts_px4_model_name', 'string', ['number'], [index]);
         if (error !== 0 || !isUsbId(vendorId) || !isUsbId(productId)
-          || usbDevices < 1 || receivers < 1 || name === '') {
+          || usbDevices < 1 || receivers < 1 || (lnb !== 0 && lnb !== 1) || name === '') {
           throw new Error('px4-identity module returned an out-of-range model');
         }
         models.push(Object.freeze({
           name, vendorId, productId, usbDevices, receivers,
+          lnb15v: lnb === 1,
           verified: VERIFIED_IN_WEBTS.has(productId),
         }));
       }
@@ -143,6 +153,19 @@ export interface ConnectedTuner {
   readonly ready: boolean;
   /** 視聴と走査がこの1台を使うか。ready のものから1つだけ。 */
   readonly selected: boolean;
+  /**
+   * いまつながっているあいだだけの、この1台の呼び名（USB 機器のアドレスを
+   * 並べたもの）。serial が同じ筐体を見分けるのに使う。**抜き差しで変わる。**
+   * アドレスが読めない機器を含むなら空文字。
+   */
+  readonly id: string;
+  /**
+   * C 側へ渡す USB 機器の位置（上流の書式 "1:<アドレス>"）。**serial が同じ
+   * 筐体がほかにつながっているときだけ**入る。それ以外は空で、serial で開く。
+   */
+  readonly usbPaths: readonly string[];
+  /** この1台の USB 機器のアドレス（読めたものだけ）。 */
+  readonly addresses: readonly number[];
 }
 
 /** まとめる対象の USB 機器と、その筐体の識別子。 */
@@ -150,21 +173,85 @@ export interface KeyedDevice {
   readonly vendorId: number;
   readonly productId: number;
   readonly key: string | null;
+  /** 同梱 libusb がこの機器に振るアドレス（usbAddressOf）。読めなければ null。 */
+  readonly address: number | null;
+}
+
+// ---- serial が重なる筐体 ---------------------------------------------------
+//
+// PX-M1UR と PX-S1UR などは、別の筐体でも serial が同じことがある（上流
+// v0.1.9）。上流は serial だけでは開かず、USB の位置で名指させる。ブラウザ
+// には USB の位置が無いので、**同梱 libusb の WebUSB 実装が USBDevice ごとに
+// 振る番号を使う。**libusb はそれをバス 1 のアドレス（とポート番号）にする。
+// 番号はつながっているあいだ変わらない（下の「握っておく」が前提）が、
+// 抜き差しで振り直される。抜き差しを
+// またいで同じ筐体を見分けることはしない（上流と同じ判断）。
+//
+// 番号は USBDevice に Symbol.for() の鍵で付いている。libusb がまだ見ていない
+// 機器には、libusb と同じ数え方（同じ鍵の数え役）でここが振る。どちらが先に
+// 振っても同じ番号になる。この取り決めは vendor/PATCHES/libusb.diff。
+//
+// **番号を振った USBDevice は、抜かれるまでここで握っておく。**Chrome は
+// getDevices() が返すオブジェクトを弱くしか持たない。誰も参照していないと
+// 回収され、次の getDevices() は別のオブジェクト（番号なし）を返す。すると
+// 番号が振り直され、選んだ1台を見失い、C 側へ渡した位置も libusb の番号と
+// ずれる（PX-M1UR と PX-S1UR を挿して、開いていない側の番号が呼ぶたびに
+// 変わった。実機、2026-10-02）。
+
+const SESSION_ID = Symbol.for('libusb.session_id');
+const NEXT_SESSION_ID = Symbol.for('libusb.next_session_id');
+
+const retainedDevices = new Set<USBDevice>();
+let retainListenerInstalled = false;
+
+function retainDevice(device: USBDevice): void {
+  retainedDevices.add(device);
+  if (retainListenerInstalled || typeof navigator === 'undefined' || !('usb' in navigator)) return;
+  retainListenerInstalled = true;
+  navigator.usb.addEventListener('disconnect', (event) => {
+    retainedDevices.delete((event as USBConnectionEvent).device);
+  });
+}
+
+/** USBDevice に libusb が振る（振った）アドレス。USB のアドレスの範囲外なら null。 */
+export function usbAddressOf(device: USBDevice): number | null {
+  retainDevice(device);
+  const tagged = device as unknown as Record<symbol, unknown>;
+  let id = tagged[SESSION_ID];
+  if (typeof id !== 'number') {
+    const counter = globalThis as unknown as Record<symbol, unknown>;
+    const next = counter[NEXT_SESSION_ID];
+    id = typeof next === 'number' ? next : 1;
+    counter[NEXT_SESSION_ID] = (id as number) + 1;
+    tagged[SESSION_ID] = id;
+  }
+  // libusb はアドレスを 8 ビットに詰める。255 を超えたら名指せない
+  // （ページを読み直せば 1 から数え直す）。
+  return Number.isInteger(id) && (id as number) >= 1 && (id as number) <= 255 ? id as number : null;
 }
 
 /**
  * USB 機器を筐体ごとにまとめ、使う1台を決める。
  *
- * 使うのは、保存された選択が開ける状態ならそれ、そうでなければ開ける
- * もののうち一覧の先頭。並びは上流の機種の表の順、同じ機種の中は識別子の順
- * （抜き差ししても変わらない）。
+ * 使うのは、このページで選んだ1台（chosenId）が開ける状態ならそれ、次に
+ * 保存された選択（serial）が開ける状態ならそれ、どちらでもなければ開ける
+ * もののうち一覧の先頭。serial が同じ筐体が複数あると、保存された選択では
+ * 見分けられず、その中の先頭になる。並びは上流の機種の表の順、同じ機種の
+ * 中は識別子の順、識別子も同じならアドレスの順。
+ *
+ * **serial が同じ筐体は1行ずつにする。**USB 機器1つの機種は、機器ごとに
+ * 1行。USB 機器2つの機種（PX-Q3U4 など）で serial が重なると、どの2つが
+ * 同じ筐体か分からないので開けない（未対応）。
  */
 export function groupTuners(
   models: readonly Px4Model[],
   devices: readonly KeyedDevice[],
   storedKey: string | null,
+  chosenId: string | null = null,
 ): ConnectedTuner[] {
-  interface Draft { key: string | null; model: Px4Model; modelIndex: number; granted: number }
+  interface Draft {
+    key: string | null; model: Px4Model; modelIndex: number; addresses: (number | null)[];
+  }
   const drafts: Draft[] = [];
   for (const device of devices) {
     const modelIndex = models.findIndex((model) => model.vendorId === device.vendorId
@@ -172,17 +259,30 @@ export function groupTuners(
     const model = models[modelIndex];
     if (model === undefined) continue;
     // 識別子が読めない機器は、ほかとまとめずに1行ずつにする（開けない）。
+    // 1台ぶんそろった筐体には足さない（serial が同じ別の筐体）。
     const existing = device.key === null ? undefined
-      : drafts.find((draft) => draft.key === device.key && draft.model === model);
-    if (existing !== undefined) existing.granted += 1;
-    else drafts.push({ key: device.key, model, modelIndex, granted: 1 });
+      : drafts.find((draft) => draft.key === device.key && draft.model === model
+        && draft.addresses.length < model.usbDevices);
+    if (existing !== undefined) existing.addresses.push(device.address);
+    else drafts.push({ key: device.key, model, modelIndex, addresses: [device.address] });
   }
   const order = (key: string | null) => key ?? '￿';
+  const firstAddress = (draft: Draft) => Math.min(...draft.addresses.map((a) => a ?? 256));
   drafts.sort((left, right) => left.modelIndex - right.modelIndex
-    || order(left.key).localeCompare(order(right.key)));
+    || order(left.key).localeCompare(order(right.key))
+    || firstAddress(left) - firstAddress(right));
 
-  const ready = (draft: Draft) => draft.key !== null && draft.granted >= draft.model.usbDevices;
-  const chosen = drafts.find((draft) => ready(draft) && draft.key === storedKey)
+  const known = (draft: Draft) => draft.addresses.filter((a): a is number => a !== null);
+  const idOf = (draft: Draft) => known(draft).length === draft.addresses.length
+    ? known(draft).map((a) => `1:${a}`).join(',') : '';
+  // serial が同じ筐体がほかにある（機種は問わない。上流は serial で探す）。
+  const shared = (draft: Draft) => draft.key !== null
+    && drafts.some((other) => other !== draft && other.key === draft.key);
+  const ready = (draft: Draft) => draft.key !== null
+    && draft.addresses.length >= draft.model.usbDevices
+    && (!shared(draft) || (draft.model.usbDevices === 1 && idOf(draft) !== ''));
+  const chosen = drafts.find((draft) => ready(draft) && chosenId !== null && idOf(draft) === chosenId)
+    ?? drafts.find((draft) => ready(draft) && draft.key === storedKey)
     ?? drafts.find(ready);
 
   return drafts.map((draft) => {
@@ -190,20 +290,26 @@ export function groupTuners(
     const label = siblings.length > 1
       ? `${draft.model.name}（${siblings.indexOf(draft) + 1}台目）`
       : draft.model.name;
+    const id = idOf(draft);
     return Object.freeze({
       key: draft.key,
       model: draft.model,
       label,
-      granted: draft.granted,
+      granted: draft.addresses.length,
       required: draft.model.usbDevices,
       ready: ready(draft),
       selected: draft === chosen,
+      id,
+      usbPaths: Object.freeze(shared(draft) && id !== '' ? id.split(',') : []),
+      addresses: Object.freeze(known(draft)),
     });
   });
 }
 
 const SELECTED_TUNER_KEY = 'webts-selected-tuner';
 const KEY_CAPACITY = 64;
+/** このページで選んだ1台（ConnectedTuner.id）。保存しない。 */
+let chosenTunerId: string | null = null;
 
 type TunerListener = () => void;
 const tunerListeners = new Set<TunerListener>();
@@ -245,9 +351,20 @@ async function tunerKeyOf(device: USBDevice): Promise<string | null> {
   }
 }
 
-async function keyedDevices(): Promise<{ device: USBDevice; key: string | null }[]> {
+async function keyedDevices(): Promise<{ device: USBDevice; key: string | null; address: number | null }[]> {
   const devices = await navigator.usb.getDevices();
-  return Promise.all(devices.map(async (device) => ({ device, key: await tunerKeyOf(device) })));
+  return Promise.all(devices.map(async (device) => ({
+    device, key: await tunerKeyOf(device), address: usbAddressOf(device),
+  })));
+}
+
+/** その USB 機器がこの1台のものか。アドレスで見る。読めなければ機種と serial で。 */
+function belongsTo(tuner: ConnectedTuner, { device, key, address }:
+  { device: USBDevice; key: string | null; address: number | null }): boolean {
+  if (device.vendorId !== tuner.model.vendorId || device.productId !== tuner.model.productId) {
+    return false;
+  }
+  return tuner.id !== '' && address !== null ? tuner.addresses.includes(address) : key === tuner.key;
 }
 
 /** diagnoseTunerOpen の結果。 */
@@ -281,8 +398,7 @@ export function diagnoseTunerOpen(): Promise<TunerOpenDiagnosis> {
 async function runTunerOpenDiagnosis(): Promise<TunerOpenDiagnosis> {
   const [tuner, devices] = await Promise.all([selectedTunerOrFirst(), keyedDevices()]);
   if (tuner === null) return 'unseen';
-  const mine = devices.filter(({ device, key }) => key === tuner.key
-    && device.vendorId === tuner.model.vendorId && device.productId === tuner.model.productId);
+  const mine = devices.filter((entry) => belongsTo(tuner, entry));
   if (mine.length === 0) return 'unseen';
   for (const { device } of mine) {
     if (device.configuration === null) return 'unconfigured';
@@ -323,8 +439,9 @@ async function selectedTunerOrFirst(): Promise<ConnectedTuner | null> {
 export async function listConnectedTuners(): Promise<ConnectedTuner[]> {
   const [models, devices] = await Promise.all([loadPx4Models(), keyedDevices()]);
   return groupTuners(models,
-    devices.map(({ device, key }) => ({ vendorId: device.vendorId, productId: device.productId, key })),
-    storedTunerKey());
+    devices.map(({ device, key, address }) =>
+      ({ vendorId: device.vendorId, productId: device.productId, key, address })),
+    storedTunerKey(), chosenTunerId);
 }
 
 /** 視聴と走査が使う1台。開けるものが無ければ null。 */
@@ -338,6 +455,9 @@ export async function selectedTuner(): Promise<ConnectedTuner | null> {
  */
 export function selectTuner(tuner: ConnectedTuner): void {
   if (tuner.key === null || !tuner.ready) return;
+  // serial が同じ筐体を見分けるのは、このページのあいだだけ（アドレス）。
+  // 次に開いたときは serial で選び、重なっていればその中の先頭になる。
+  chosenTunerId = tuner.id === '' ? null : tuner.id;
   try {
     localStorage.setItem(SELECTED_TUNER_KEY, tuner.key);
   } catch {
@@ -352,11 +472,12 @@ export function selectTuner(tuner: ConnectedTuner): void {
  * ために使う。
  */
 export async function forgetTuner(tuner: ConnectedTuner): Promise<void> {
-  for (const { device, key } of await keyedDevices()) {
-    const sameModel = device.vendorId === tuner.model.vendorId
-      && device.productId === tuner.model.productId;
-    if (sameModel && key === tuner.key) await device.forget();
+  for (const entry of await keyedDevices()) {
+    if (!belongsTo(tuner, entry)) continue;
+    await entry.device.forget();
+    retainedDevices.delete(entry.device);
   }
+  if (tuner.id !== '' && tuner.id === chosenTunerId) chosenTunerId = null;
   if (tuner.key !== null && tuner.key === storedTunerKey()) {
     try {
       localStorage.removeItem(SELECTED_TUNER_KEY);

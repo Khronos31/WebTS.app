@@ -22,13 +22,17 @@ struct Px4dArguments final {
     bool help = false;
     // `px4d --list`: enumerate supported enclosures and exit (SPEC 4.6).
     bool list = false;
+    bool list_json = false;
     bool group = false;
     bool allow_lnb_power = false;
     std::string device;
+    std::string instance;
     std::string firmware;
     std::string runtime_directory;
     std::array<int, 2U> file_descriptors{{-1, -1}};
     std::size_t file_descriptor_count = 0U;
+    std::array<std::string, 2U> usb_paths{};
+    std::size_t usb_path_count = 0U;
     std::string_view error;
 };
 

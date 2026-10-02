@@ -19,6 +19,8 @@ public:
     static Result<GroupingResult> enumerate_native() noexcept;
     static Result<std::unique_ptr<Q3U4Runtime>> open_native(
         std::string_view base_serial = {}) noexcept;
+    static Result<std::unique_ptr<Q3U4Runtime>> open_native(
+        std::string_view base_serial, const std::vector<std::string>& usb_paths) noexcept;
     // Each supplied descriptor remains caller-owned.  open_fds duplicates it
     // during acquisition; the runtime closes only its private duplicates and
     // never closes the originals supplied by termux-usb or Android UsbManager.

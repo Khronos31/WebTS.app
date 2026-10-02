@@ -60,6 +60,7 @@ struct DeviceProfile final {
     std::uint8_t bridge_count;
     std::uint8_t receiver_count;
     bool dual_system;
+    bool supports_lnb_15v;
 };
 
 const DeviceProfile* device_profile_for_usb_id(std::uint16_t vendor_id,
@@ -68,6 +69,7 @@ const DeviceProfile& device_profile(DeviceModel model) noexcept;
 // Accepts the instance identifier of any supported model: a 14-digit Q3U4
 // base serial, or a 15-digit W3U4 or MLT5-family USB serial.
 bool valid_device_instance(std::string_view value) noexcept;
+bool valid_runtime_instance(std::string_view value) noexcept;
 
 enum class UsbSpeed : std::uint8_t {
     unknown = 0,
@@ -150,11 +152,21 @@ struct RejectedObservation final {
     DeviceObservation observation;
 };
 
-// One physical enclosure of any supported model.  base_serial is the model's
-// instance identifier; a single-bridge model uses devices[0] only.
+// One single-bridge enclosure, or one paired-bridge model/serial grouping.
+// A duplicate paired-bridge group may contain candidates from several physical
+// enclosures, so it cannot be opened without two explicit USB paths.
 struct Q3U4Group final {
     std::string base_serial;
     std::array<std::optional<DeviceObservation>, 2U> devices;
+    // Indices into the original observation vector, never inferred from serial.
+    std::array<std::optional<std::size_t>, 2U> candidate_indices;
+    struct Candidate final {
+        std::size_t observation_index = 0U;
+        std::uint8_t device = 0U;
+        DeviceObservation observation;
+    };
+    // All observed USB candidates, including ambiguous paired bridge slots.
+    std::vector<Candidate> candidates;
     GroupStatus status = GroupStatus::incomplete;
     DeviceModel model = DeviceModel::px_q3u4;
 };
@@ -167,6 +179,13 @@ struct GroupingResult final {
 Result<GroupingResult> group_q3u4_devices(const std::vector<DeviceObservation>& observations) noexcept;
 Result<std::size_t> select_ready_q3u4_group(const GroupingResult& grouping,
                                             std::string_view base_serial) noexcept;
+struct SelectedQ3U4Group final {
+    std::size_t group_index = 0U;
+    std::array<std::size_t, 2U> candidate_indices{{0U, 0U}};
+};
+Result<SelectedQ3U4Group> select_q3u4_group_by_usb_paths(
+    const GroupingResult& grouping, std::string_view base_serial,
+    const std::vector<std::string>& usb_paths) noexcept;
 const char* observation_status_string(ObservationStatus status) noexcept;
 const char* group_status_string(GroupStatus status) noexcept;
 

@@ -7,6 +7,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <string_view>
 
 namespace px4::userland::ipc::posix {
 
@@ -29,6 +30,29 @@ struct EndpointConfig final {
     const char* instance;
     const char* endpoint_name;
     EndpointAccess access = EndpointAccess::private_user;
+};
+
+// Holds the serial endpoint namespace while a daemon publishes its sockets.
+// A serial-named endpoint is exclusive; custom instances of that observed
+// serial share the lease. Close the sockets before releasing this lease.
+class SerialEndpointLease final {
+public:
+    SerialEndpointLease() noexcept = default;
+    ~SerialEndpointLease() noexcept;
+    SerialEndpointLease(SerialEndpointLease&& other) noexcept;
+    SerialEndpointLease& operator=(SerialEndpointLease&& other) noexcept;
+    SerialEndpointLease(const SerialEndpointLease&) = delete;
+    SerialEndpointLease& operator=(const SerialEndpointLease&) = delete;
+
+    static Result<SerialEndpointLease> acquire(
+        const EndpointConfig& endpoint, std::string_view observed_serial) noexcept;
+    bool valid() const noexcept { return lock_fd_ >= 0; }
+    void close() noexcept;
+
+private:
+    int directory_fd_ = -1;
+    int lock_fd_ = -1;
+    std::array<char, 64U> filename_{};
 };
 
 class SocketListener;

@@ -17,14 +17,14 @@ SingleReceiverFrontend::SingleReceiverFrontend(
     BridgeI2cMaster& bridge, It930xController& controller, Q3U4BackendPower& power,
     Q3U4FrontendDelay& delay, DeviceModel model, bool allow_lnb_power) noexcept
     : controller_(controller), power_(power), delay_(delay), model_(model),
-      allow_lnb_power_(allow_lnb_power),
       tc_t_(bridge, mapping(model == DeviceModel::dtv03a_1tu ? 0x18U : 0x10U,
-                           false, Tc90522System::isdb_t)),
+                            false, Tc90522System::isdb_t)),
       tc_s_(bridge, mapping(model == DeviceModel::dtv02a_1t1s_u ? 0x13U : 0x11U,
-                           model == DeviceModel::dtv02a_1t1s_u, Tc90522System::isdb_s)),
+                            model == DeviceModel::dtv02a_1t1s_u, Tc90522System::isdb_s)),
       tc_s0_(bridge, mapping(0x11U, false, Tc90522System::isdb_s)),
       r850_(tc_t_, delay, false), rt710_(tc_s_, delay)
 {
+    (void)allow_lnb_power;
 }
 
 SingleReceiverFrontend::~SingleReceiverFrontend() noexcept { (void)shutdown(); }
@@ -147,12 +147,11 @@ Result<void> SingleReceiverFrontend::start_capture(std::uint8_t r,ipc::System s)
 Result<void> SingleReceiverFrontend::stop_capture(std::uint8_t r,ipc::System s) noexcept
 { if(r)return Result<void>::failure(Error::INVALID_ARGUMENT); auto x=s==ipc::System::ISDB_T?tc_t_.enable_ts_pins_t(false):tc_s_.enable_ts_pins_s(false); if(x)capturing_=false; return x; }
 Result<void> SingleReceiverFrontend::close_receiver(std::uint8_t r) noexcept
-{ if(r)return Result<void>::failure(Error::INVALID_ARGUMENT); if(capturing_){(void)stop_capture(0U,satellite_?ipc::System::ISDB_S:ipc::System::ISDB_T);} if(lnb_on_){(void)controller_.set_q3u4_lnb_power(false);lnb_on_=false;} if(opened_){(void)r850_.terminate();if(receiver_supports(0U,ipc::System::ISDB_S))(void)rt710_.terminate();opened_=false;} return release_power(); }
+{ if(r)return Result<void>::failure(Error::INVALID_ARGUMENT); if(capturing_){(void)stop_capture(0U,satellite_?ipc::System::ISDB_S:ipc::System::ISDB_T);} if(opened_){(void)r850_.terminate();if(receiver_supports(0U,ipc::System::ISDB_S))(void)rt710_.terminate();opened_=false;} return release_power(); }
 Result<void> SingleReceiverFrontend::begin_tune_power(std::uint8_t r,ipc::System s,std::uint8_t v) noexcept
-{ if(r||!receiver_supports(r,s))return Result<void>::failure(Error::UNSUPPORTED); if(s==ipc::System::ISDB_T&&v!=0U)return Result<void>::failure(Error::INVALID_ARGUMENT); if(s==ipc::System::ISDB_S&&v!=0U&&v!=15U)return Result<void>::failure(Error::INVALID_ARGUMENT); if(v==15U&&!allow_lnb_power_)return Result<void>::failure(Error::UNSUPPORTED); prior_lnb_on_=lnb_on_; pending_lnb_=true; const bool requested=s==ipc::System::ISDB_S&&v==15U; if(requested!=lnb_on_){const auto x=controller_.set_q3u4_lnb_power(requested);if(!x){pending_lnb_=false;return x;}lnb_on_=requested;}return Result<void>::success(); }
-Result<void> SingleReceiverFrontend::commit_tune_power(std::uint8_t) noexcept{pending_lnb_=false;return Result<void>::success();}
-Result<void> SingleReceiverFrontend::rollback_tune_power(std::uint8_t) noexcept
-{ if(!pending_lnb_||lnb_on_==prior_lnb_on_){pending_lnb_=false;return Result<void>::success();}const auto x=controller_.set_q3u4_lnb_power(prior_lnb_on_);if(x){lnb_on_=prior_lnb_on_;pending_lnb_=false;}return x; }
+{ if(r||!receiver_supports(r,s))return Result<void>::failure(Error::UNSUPPORTED); if(s==ipc::System::ISDB_T&&v!=0U)return Result<void>::failure(Error::INVALID_ARGUMENT); if(s==ipc::System::ISDB_S&&v!=0U&&v!=15U)return Result<void>::failure(Error::INVALID_ARGUMENT); if(s==ipc::System::ISDB_S&&v==15U)return Result<void>::failure(Error::UNSUPPORTED); return Result<void>::success(); }
+Result<void> SingleReceiverFrontend::commit_tune_power(std::uint8_t) noexcept{return Result<void>::success();}
+Result<void> SingleReceiverFrontend::rollback_tune_power(std::uint8_t) noexcept{return Result<void>::success();}
 void SingleReceiverFrontend::mark_receiver_disconnected(std::uint8_t) noexcept {disconnected_=true;}
 Result<void> SingleReceiverFrontend::shutdown() noexcept{return close_receiver(0U);}
 Result<void> SingleReceiverFrontend::set_power(bool on) noexcept

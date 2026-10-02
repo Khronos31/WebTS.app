@@ -22,6 +22,7 @@ import {
   loadPx4Models,
   readTunerPermission,
   selectTuner,
+  selectedTuner,
   subscribeTuners,
   tunersChanged,
   usbFilters,
@@ -46,6 +47,7 @@ export class SettingsView {
   private onStateChanged: () => void;
   private unsubscribeScan: (() => void) | null = null;
   private unsubscribeTuners: (() => void) | null = null;
+  private unsubscribeLnb: (() => void) | null = null;
   private scanTimer: number | null = null;
 
   constructor(options: SettingsViewOptions) {
@@ -60,6 +62,10 @@ export class SettingsView {
     if (this.unsubscribeTuners) {
       this.unsubscribeTuners();
       this.unsubscribeTuners = null;
+    }
+    if (this.unsubscribeLnb) {
+      this.unsubscribeLnb();
+      this.unsubscribeLnb = null;
     }
     this.element.replaceChildren();
 
@@ -673,6 +679,7 @@ export class SettingsView {
 
       const tbody = table.querySelector('tbody')!;
 
+      let tunerIdx = 0;
       for (const tuner of tuners) {
         const tr = document.createElement('tr');
 
@@ -680,9 +687,11 @@ export class SettingsView {
         const tdRadio = document.createElement('td');
         tdRadio.style.textAlign = 'center';
 
+        const radioId = `tuner-choice-${renderSeq}-${tunerIdx++}`;
         const radio = document.createElement('input');
         radio.type = 'radio';
         radio.name = 'selected-tuner';
+        radio.id = radioId;
         radio.checked = tuner.selected;
         radio.disabled = !tuner.ready;
         radio.style.cursor = tuner.ready ? 'pointer' : 'not-allowed';
@@ -696,19 +705,16 @@ export class SettingsView {
 
         // 2. チューナー名（ラベル + 未確認バッジ）
         const tdName = document.createElement('td');
+        const nameLabel = document.createElement('label');
+        nameLabel.htmlFor = radioId;
+        nameLabel.style.display = 'inline-flex';
+        nameLabel.style.alignItems = 'center';
+        nameLabel.style.width = '100%';
+
         const nameSpan = document.createElement('span');
         nameSpan.textContent = tuner.label;
         nameSpan.style.fontWeight = tuner.selected ? '600' : '400';
-        if (tuner.ready) {
-          nameSpan.style.cursor = 'pointer';
-          nameSpan.addEventListener('click', () => {
-            if (!radio.checked) {
-              radio.checked = true;
-              selectTuner(tuner);
-            }
-          });
-        }
-        tdName.append(nameSpan);
+        nameLabel.append(nameSpan);
 
         if (!tuner.model.verified) {
           const unverifiedBadge = document.createElement('span');
@@ -716,7 +722,25 @@ export class SettingsView {
           unverifiedBadge.style.fontSize = '0.6875rem';
           unverifiedBadge.style.marginLeft = '8px';
           unverifiedBadge.textContent = '未確認（報告募集）';
-          tdName.append(unverifiedBadge);
+          nameLabel.append(unverifiedBadge);
+        }
+        tdName.append(nameLabel);
+
+        if (tuner.ready) {
+          tdRadio.style.cursor = 'pointer';
+          tdRadio.addEventListener('click', (e) => {
+            if (e.target !== radio) {
+              radio.click();
+            }
+          });
+
+          tdName.style.cursor = 'pointer';
+          nameLabel.style.cursor = 'pointer';
+          tdName.addEventListener('click', (e) => {
+            if (!nameLabel.contains(e.target as Node)) {
+              radio.click();
+            }
+          });
         }
 
         // 3. 状態
@@ -828,6 +852,8 @@ export class SettingsView {
             集合住宅の共同受信設備やブースター等ですでに給電されている回線では、機器の故障や競合を防ぐため必ずオフ（デフォルト）のままにしてください。
             チューナーから単独のパラボラアンテナへ直接給電が必要な環境のみオンにします。
           </p>
+          <p class="settings-card-desc" id="lnb-notice" style="margin-top: 8px; margin-bottom: 0; color: var(--text-secondary); display: none;">
+          </p>
         </div>
         <label class="toggle-switch">
           <input type="checkbox" id="lnb-power-toggle" ${isAllowed ? 'checked' : ''} />
@@ -838,12 +864,43 @@ export class SettingsView {
 
     const toggle = card.querySelector<HTMLInputElement>('#lnb-power-toggle')!;
     const badge = card.querySelector<HTMLElement>('#lnb-status-badge')!;
+    const notice = card.querySelector<HTMLElement>('#lnb-notice')!;
+
+    let lnbSeq = 0;
+    const updateLnbUI = async () => {
+      const seq = ++lnbSeq;
+      let tuner: ConnectedTuner | null = null;
+      try {
+        tuner = await selectedTuner();
+      } catch {
+        // ignore
+      }
+      if (seq !== lnbSeq) return;
+
+      const allowed = toggle.checked;
+      if (tuner !== null && !tuner.model.lnb15v) {
+        badge.textContent = allowed ? '給電非対応 (0V)' : '給電オフ';
+        badge.className = 'status-badge';
+        notice.textContent = `※ 現在選択されているチューナー（${tuner.label}）は LNB への 15V 給電に対応していません。設定をオンにしていても 0V（給電しない）で受信します。アンテナがほかから給電されていれば BS・CS は映りますが、チューナーからアンテナへ給電することはできません。`;
+        notice.style.display = 'block';
+      } else {
+        badge.textContent = allowed ? '給電中 (15V)' : '給電オフ';
+        badge.className = `status-badge ${allowed ? 'ok' : ''}`;
+        notice.textContent = '';
+        notice.style.display = 'none';
+      }
+    };
+
+    void updateLnbUI();
+
+    this.unsubscribeLnb = subscribeTuners(() => {
+      void updateLnbUI();
+    });
 
     toggle.addEventListener('change', () => {
       const allowed = toggle.checked;
       setAllowLnb15v(allowed);
-      badge.textContent = allowed ? '給電中 (15V)' : '給電オフ';
-      badge.className = `status-badge ${allowed ? 'ok' : ''}`;
+      void updateLnbUI();
       this.onStateChanged();
     });
 
@@ -1004,6 +1061,10 @@ export class SettingsView {
     if (this.unsubscribeTuners) {
       this.unsubscribeTuners();
       this.unsubscribeTuners = null;
+    }
+    if (this.unsubscribeLnb) {
+      this.unsubscribeLnb();
+      this.unsubscribeLnb = null;
     }
   }
 }

@@ -20,14 +20,26 @@ using namespace ipc::posix;
 constexpr std::uint32_t kRequestTimeoutMs = 4000U;
 constexpr std::string_view kDevicePrefix = "px4-userland:";
 
-// The px4d instance: a 14-digit PX-Q3U4 base serial or a 15-digit
-// PX-MLT5PE/DTV02A-5TS-P serial (identity.h valid_device_instance).  The IFD
-// stays free of the device core, so the rule is restated here.
+// The IFD stays free of the device core, so endpoint validation is restated here.
 bool valid_serial(std::string_view value) noexcept
 {
     if (value.size() != 14U && value.size() != 15U) return false;
     for (const char character : value) {
         if (character < '0' || character > '9') return false;
+    }
+    return true;
+}
+
+bool valid_instance(std::string_view value) noexcept
+{
+    if (value.empty() || value.size() > 80U || value == "." || value == ".." ||
+        valid_serial(value))
+        return false;
+    for (const char c : value) {
+        if ((c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') ||
+            (c >= 'a' && c <= 'z') || c == '_' || c == '-' || c == '.')
+            continue;
+        return false;
     }
     return true;
 }
@@ -251,6 +263,7 @@ Result<IfdEndpoint> parse_ifd_device_name(const char* device_name) noexcept
     IfdEndpoint endpoint{};
     bool have_runtime = false;
     bool have_device = false;
+    bool have_instance = false;
     bool have_access = false;
     std::size_t offset = kDevicePrefix.size();
     while (offset < input.size()) {
@@ -280,6 +293,12 @@ Result<IfdEndpoint> parse_ifd_device_name(const char* device_name) noexcept
             }
             have_device = true;
             endpoint.device_instance.assign(value.data(), value.size());
+        } else if (key == "instance") {
+            if (have_instance || !valid_instance(value)) {
+                return Result<IfdEndpoint>::failure(Error::INVALID_ARGUMENT);
+            }
+            have_instance = true;
+            endpoint.device_instance.assign(value.data(), value.size());
         } else if (key == "access") {
             if (have_access || (value != "user" && value != "group")) {
                 return Result<IfdEndpoint>::failure(Error::INVALID_ARGUMENT);
@@ -295,7 +314,7 @@ Result<IfdEndpoint> parse_ifd_device_name(const char* device_name) noexcept
             return Result<IfdEndpoint>::failure(Error::INVALID_ARGUMENT);
         }
     }
-    if (!have_device) {
+    if (have_device == have_instance) {
         return Result<IfdEndpoint>::failure(Error::INVALID_ARGUMENT);
     }
     return Result<IfdEndpoint>::success(std::move(endpoint));
