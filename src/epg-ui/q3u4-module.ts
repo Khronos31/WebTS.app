@@ -65,11 +65,27 @@ const CARD_ERRORS: Readonly<Record<number, string>> = {
  * 3回まで試し直し、最後の失敗を残す（webts_q3u4_card_failure）。
  */
 export function cardDetail(module: Q3U4Module): ReportDetail {
+  return cardFailureWord(module) ?? 'card-init';
+}
+
+/**
+ * 視聴中に復号（B25）が失敗したとき、その直前にカードとのやりとりが失敗して
+ * いればその語。**視聴の途中でカードを抜くと、初期化は済んでいるので「カード」
+ * の段ではなく復号で止まる**（PROTOCOL_ERROR と B25 の番号だけになった。
+ * 実機、2026-10-04）。C 側は復号が止まったときにも同じ値を残す。無ければ null。
+ *
+ * 走査はカードを使わないので、走査の失敗には使わない（前の視聴の値が残っている）。
+ */
+export function cardFailureDuringViewing(module: Q3U4Module): ReportDetail | null {
+  return cardFailureWord(module);
+}
+
+function cardFailureWord(module: Q3U4Module): ReportDetail | null {
   const packed = Number(module.ccall('webts_q3u4_card_failure', 'number', [], []));
-  if (packed === 0) return 'card-init';
+  if (packed === 0) return null;
   const phase = (packed >> 8) === 2 ? 'transmit' : 'connect';
   const word = `card-${phase}-${CARD_ERRORS[packed & 0xff] ?? 'other'}`;
-  return (REPORT_DETAILS as readonly string[]).includes(word) ? word as ReportDetail : 'card-init';
+  return (REPORT_DETAILS as readonly string[]).includes(word) ? word as ReportDetail : null;
 }
 
 /**
@@ -121,6 +137,24 @@ const SCAN_STEPS = [
 export function scanStepDetail(module: Q3U4Module, wave: number): ReportDetail {
   const step = Number(module.ccall('webts_q3u4_scan_failed_step', 'number', ['number'], [wave]));
   return SCAN_STEPS[step - 1] ?? 'none';
+}
+
+/**
+ * カードが挿さっていない・抜かれたときに、利用者へ出す案内。**文面は Antigravity の担当。**
+ *
+ * WebTS はチューナー本体のカードスロットだけを使う。px4_drv が長く本体の
+ * カードリーダに対応していなかったため、外付けのカードリーダを使うものだと
+ * 思って挿さずに試す人がいた（Android の PX-Q3U4、2026-10-03 の報告と写真）。
+ * そのとき画面には PROTOCOL_ERROR と B25 の番号しか出ず、何をすればいいか
+ * 伝わらなかった。
+ */
+export const CARD_MISSING_GUIDANCE =
+  'B-CAS カードが見つかりません（挿されていないか、抜かれました）。カードはチューナー本体のカードスロットに挿してください。'
+  + '外付けのカードリーダーは非対応です。';
+
+/** カードが無い（挿さっていない・抜かれた）ことを表す語か。 */
+export function isCardMissing(detail: ReportDetail): boolean {
+  return /^card-(connect|transmit)-(no-card|removed)$/.test(detail);
 }
 
 /** エラーの文言へ添える理由。語は動作報告と同じ（問い合わせのときに突き合わせられるように）。 */

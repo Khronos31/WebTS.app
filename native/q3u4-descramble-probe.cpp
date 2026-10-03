@@ -874,12 +874,26 @@ void* worker_main(void* argument) noexcept {
             // セッションごと終わっていた。契約の無い局で「一瞬映って止まる」
             // のはこれである。一時的な section の壊れ (WARN 2, 3) でも同じ
             // ことが起きるので、契約に関係なく直す必要がある。
+            //
+            // **復号で止まったときも、カードの最後の失敗を残す。**視聴の途中で
+            // カードを抜くと、初期化は済んでいるので復号（ECM のやりとり）で
+            // 止まる（実機、2026-10-04）。JS はそれで「カードが無い」と案内する。
             const int put = b25->put(b25, &input);
-            if (put < 0) { job.b25_error.store(put); result = Error::PROTOCOL_ERROR; break; }
+            if (put < 0) {
+                job.b25_error.store(put);
+                g_card_failure.store(webts_winscard_last_failure());
+                result = Error::PROTOCOL_ERROR;
+                break;
+            }
             if (put > 0) job.b25_error.store(put);
             ARIB_STD_B25_BUFFER output{nullptr, 0};
             const int got = b25->get(b25, &output);
-            if (got < 0) { job.b25_error.store(got); result = Error::PROTOCOL_ERROR; break; }
+            if (got < 0) {
+                job.b25_error.store(got);
+                g_card_failure.store(webts_winscard_last_failure());
+                result = Error::PROTOCOL_ERROR;
+                break;
+            }
             if (got > 0) job.b25_error.store(got);
             if (output.data != nullptr && output.size > 0) {
                 count_packets(output.data, static_cast<std::size_t>(output.size),
