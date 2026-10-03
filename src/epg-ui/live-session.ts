@@ -19,8 +19,9 @@ import { AudioPlayer } from '../video/audio';
 import type { PlayerMessage, PlayerRequest } from '../video/player-worker';
 import { loadFirmware } from '../usb/firmware';
 import {
-  applyTunerSelection, describeOpenDetail, ensureTunerAvailable, loadQ3U4Module,
-  resolveOpenDetail, type Q3U4Module,
+  applyTunerSelection, CARD_MISSING_GUIDANCE, cardFailureDuringViewing, describeOpenDetail,
+  ensureTunerAvailable,
+  isCardMissing, loadQ3U4Module, resolveOpenDetail, type Q3U4Module,
 } from './q3u4-module';
 import { CaptionCanvas } from './caption-canvas';
 import type { Tuning } from './tuning';
@@ -589,10 +590,18 @@ export class LiveSession {
         // ECM の状況を持っているのに、ここで読まずに捨てていた。
         const b25 = describeB25(words[3] ?? 0, words[14] ?? -1, words[15] ?? -1);
         // 開けなかった理由を確かめてから出す（WebUSB を開いてみることがある）。
-        void resolveOpenDetail(this.#module, stage).then((detail) => {
+        // 復号（B25）が負を返して止まったなら、その前のカードの失敗を見る
+        // （視聴中にカードを抜いた場合）。
+        const b25Failed = (words[3] ?? 0) < 0;
+        void resolveOpenDetail(this.#module, stage).then((opened) => {
+          const detail = opened === 'none' && b25Failed
+            ? cardFailureDuringViewing(this.#module) ?? opened : opened;
           this.#report('failed', stage, error, detail);
-          this.#options.onEnded?.(`受信が止まりました: ${name} (${error})`
-            + describeOpenDetail(detail) + b25);
+          // カードが無いときは、何をすればいいかを先に言う。番号は問い合わせで
+          // 報告と突き合わせるために後ろへ残す（B25 の番号はカードが無い結果なので出さない）。
+          this.#options.onEnded?.(isCardMissing(detail)
+            ? `${CARD_MISSING_GUIDANCE}（${name} (${error})、${detail}）`
+            : `受信が止まりました: ${name} (${error})` + describeOpenDetail(detail) + b25);
         });
       }
     }
