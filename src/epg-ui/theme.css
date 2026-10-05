@@ -1981,6 +1981,15 @@ body {
   cursor: pointer;
 }
 
+@media (max-width: 600px) {
+  .recorded-playback .video-controls-bar { padding: 0 4px; }
+  .recorded-playback .video-controls-group { gap: 2px; }
+  .recorded-playback .player-btn { padding: 6px; flex-shrink: 0; }
+  .recorded-playback .player-btn .btn-text { display: none; }
+  .recorded-playback .player-live-badge { white-space: nowrap; margin-right: 0; }
+  .recorded-playback .player-volume-slider { width: 40px; }
+}
+
 /* ==========================================================
    Watch View Tabs & Panels
    ========================================================== */
@@ -3155,4 +3164,115 @@ body.guide-dragging-active {
     min-width: 170px;
     flex: 0 0 170px;
   }
+}
+
+/* 30秒録画デモ。常時見えるトップバーに置き、BMLの操作と分ける。 */
+.recording-control {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-width: 0;
+  max-width: 100%;
+  font-size: 0.8125rem;
+}
+.recording-control [hidden], .recorded-playback[hidden] { display: none; }
+.recording-button, .recording-stop {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 36px;
+  padding: 6px 12px;
+  background: var(--surface-color);
+  color: var(--text-primary);
+  border: 1px solid var(--surface-border);
+  border-radius: 4px;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.recording-button::before {
+  content: '';
+  display: block;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--error);
+}
+.recording-button:disabled { opacity: 0.5; cursor: default; }
+.is-recording .recording-button { opacity: 1; border-color: var(--error); }
+.is-recording .recording-status { color: var(--error); font-variant-numeric: tabular-nums; }
+.recording-control a { color: var(--primary-light); text-decoration: underline; }
+.recording-status { color: var(--text-secondary); overflow-wrap: anywhere; }
+.recording-dialog.dialog-box {
+  display: none;
+  margin: auto;
+  padding: 0;
+  width: calc(100% - 32px);
+  max-width: 480px;
+  border: 1px solid var(--surface-border);
+  transform: none;
+}
+.recording-dialog[open].dialog-box { display: flex; }
+.recording-dialog::backdrop { background: rgba(0, 0, 0, 0.65); }
+.recording-dialog .dialog-title { margin: 0; }
+.recording-dialog .dialog-body { font-size: 0.875rem; line-height: 1.6; }
+.recording-dialog p { margin: 0 0 12px; }
+.recording-dialog .recording-storage-note {
+  margin-bottom: 0;
+  padding: 12px;
+  background: var(--surface-color-variant);
+  border-left: 3px solid var(--warning);
+}
+.recording-storage-note { color: var(--text-secondary); font-size: 0.8125rem; line-height: 1.6; }
+.recorded-view { max-width: 1200px; margin: 0 auto; }
+.recorded-heading { font-size: 1.25rem; margin: 0 0 8px; }
+.recorded-notice { color: var(--text-secondary); font-size: 0.875rem; margin: 16px 0; }
+.recorded-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 320px), 1fr)); gap: 16px; }
+.recorded-card, .recorded-empty {
+  background: var(--surface-color);
+  border: 1px solid var(--surface-border);
+  border-radius: 8px;
+  padding: 16px;
+  box-shadow: var(--card-shadow);
+  min-width: 0;
+}
+.recorded-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; }
+.recorded-title { margin: 0; font-size: 0.9375rem; font-weight: 700; line-height: 1.5; overflow-wrap: anywhere; }
+.recorded-badge {
+  flex-shrink: 0;
+  padding: 3px 7px;
+  border-radius: 4px;
+  font-size: 0.6875rem;
+  color: var(--success);
+  background: var(--surface-color-variant);
+}
+.recorded-badge.is-incomplete { color: var(--warning); }
+.recorded-meta-row, .recorded-reason {
+  color: var(--text-secondary);
+  font-size: 0.8125rem;
+  line-height: 1.6;
+  margin: 10px 0;
+  overflow-wrap: anywhere;
+  font-variant-numeric: tabular-nums;
+}
+.recorded-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; margin-top: 12px; padding-top: 12px; border-top: 1px dashed var(--divider); }
+.recorded-actions .btn { min-height: 40px; }
+.recorded-empty { grid-column: 1 / -1; text-align: center; padding: 36px 20px; }
+.recorded-empty h2 { font-size: 1rem; }
+.recorded-empty p { color: var(--text-secondary); font-size: 0.875rem; line-height: 1.6; }
+.recorded-empty a { display: inline-flex; margin-top: 16px; }
+.recorded-playback { margin-bottom: 24px; scroll-margin-top: 72px; }
+.recorded-playback > h2 { margin-bottom: 12px; }
+.recording-control button:focus-visible, .recorded-view button:focus-visible, .recording-dialog button:focus-visible {
+  outline: 2px solid var(--primary-light);
+  outline-offset: 3px;
+}
+:root[data-theme="light"] .is-recording .recording-status { color: #d32f2f; }
+:root[data-theme="light"] .recorded-badge { color: #2e7d32; }
+:root[data-theme="light"] .recorded-badge.is-incomplete { color: #a84300; }
+@media (max-width: 600px) {
+  .recording-button, .recording-stop { min-height: 40px; }
+  .recorded-header { flex-wrap: wrap; }
+  .recorded-actions .btn { flex: 1; }
+  .watch-channel-badge-row { flex-wrap: wrap; }
 }

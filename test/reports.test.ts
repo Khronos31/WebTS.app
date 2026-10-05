@@ -53,6 +53,23 @@ describe('report schema', () => {
     expect(parseReport({ ...ok, wave: 'BS/CS' })).toBeNull();
   });
 
+  it('carries how a recording ended or failed, and how playback stopped', () => {
+    const record = { ...ok, kind: 'record' };
+    expect(parseReport(record)).not.toBeNull();
+    expect(parseReport({ ...record, result: 'incomplete', detail: 'record-gap' })?.detail)
+      .toBe('record-gap');
+    expect(parseReport({ ...record, result: 'failed', stage: 0, detail: 'record-quota' })?.detail)
+      .toBe('record-quota');
+    // 途中終了は録画だけ。理由は決まった語だけ。
+    expect(parseReport({ ...ok, result: 'incomplete', detail: 'record-gap' })).toBeNull();
+    expect(parseReport({ ...record, result: 'incomplete', detail: 'record gap at 12:00' })).toBeNull();
+    // 再生はチューナーを使わないので、機種は none。
+    expect(parseReport({ ...ok, kind: 'playback', model: 'none', result: 'failed', stage: 0,
+      detail: 'playback-no-video' })).not.toBeNull();
+    // 途中終了の理由は stage と code を持たない。
+    expect(parseReport({ ...record, result: 'incomplete', stage: 3, detail: 'record-gap' })).toBeNull();
+  });
+
   it('keeps stage and code consistent with the result', () => {
     expect(parseReport({ ...ok, stage: 3 })).toBeNull();
     expect(parseReport({ ...ok, code: 6 })).toBeNull();
@@ -85,9 +102,9 @@ function post(host: string, body: string, type = 'application/json'): Request {
 }
 
 describe('report endpoint', () => {
-  it('stores a valid report from beta, with the day and nothing about the sender', async () => {
+  it('stores a valid report, with the day and nothing about the sender', async () => {
     const { env, rows } = fakeDatabase();
-    const response = await handleReport(post('beta.webts.app', JSON.stringify(ok)), env);
+    const response = await handleReport(post('webts.app', JSON.stringify(ok)), env);
     expect(response.status).toBe(204);
     expect(rows).toHaveLength(1);
     const [day, ...rest] = rows[0]!;
@@ -96,7 +113,7 @@ describe('report endpoint', () => {
       'view', 'GR', 'ok', -1, 0, 'none']);
   });
 
-  it('accepts reports from production too (opt-in there)', async () => {
+  it('accepts reports from both production hosts', async () => {
     const { env, rows } = fakeDatabase();
     for (const host of ['webts.app', 'webts-app.pages.dev']) {
       expect((await handleReport(post(host, JSON.stringify(ok)), env)).status).toBe(204);
@@ -106,24 +123,26 @@ describe('report endpoint', () => {
 
   it('does not accept reports on other hosts', async () => {
     const { env, rows } = fakeDatabase();
-    for (const host of ['evil.example', 'webts.app.evil.example', '87acda07.webts-app.pages.dev']) {
+    // beta は 0.4.0 でやめた。古い beta のページから届いても受け取らない。
+    for (const host of ['evil.example', 'webts.app.evil.example', '87acda07.webts-app.pages.dev',
+      'beta.webts.app', 'beta.webts-app.pages.dev']) {
       expect((await handleReport(post(host, JSON.stringify(ok)), env)).status).toBe(404);
     }
     expect(rows).toHaveLength(0);
   });
 
   it('does nothing without the database binding', async () => {
-    const response = await handleReport(post('beta.webts.app', JSON.stringify(ok)), {});
+    const response = await handleReport(post('webts.app', JSON.stringify(ok)), {});
     expect(response.status).toBe(404);
   });
 
   it('rejects malformed, oversized or extra-field bodies', async () => {
     const { env, rows } = fakeDatabase();
-    expect((await handleReport(post('beta.webts.app', '{'), env)).status).toBe(400);
-    expect((await handleReport(post('beta.webts.app', JSON.stringify({ ...ok, ip: '1.2.3.4' })), env))
+    expect((await handleReport(post('webts.app', '{'), env)).status).toBe(400);
+    expect((await handleReport(post('webts.app', JSON.stringify({ ...ok, ip: '1.2.3.4' })), env))
       .status).toBe(400);
-    expect((await handleReport(post('beta.webts.app', 'x'.repeat(2000)), env)).status).toBe(413);
-    expect((await handleReport(post('beta.webts.app', JSON.stringify(ok), 'text/plain'), env))
+    expect((await handleReport(post('webts.app', 'x'.repeat(2000)), env)).status).toBe(413);
+    expect((await handleReport(post('webts.app', JSON.stringify(ok), 'text/plain'), env))
       .status).toBe(415);
     expect(rows).toHaveLength(0);
   });

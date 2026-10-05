@@ -8,6 +8,7 @@
 // 見た目と文言はそのまま。
 
 export interface VideoPlayerOptions {
+  filePlayback?: boolean;
   videoSrc?: string | undefined;
   autoplay?: boolean | undefined;
   programTitle?: string | undefined;
@@ -107,7 +108,7 @@ export class VideoPlayer {
 
     const liveBadge = document.createElement('div');
     liveBadge.className = 'player-live-badge';
-    liveBadge.innerHTML = `<span class="live-dot"></span>LIVE`;
+    liveBadge.innerHTML = options.filePlayback ? '録画' : `<span class="live-dot"></span>LIVE`;
 
     this.volumeBtn = document.createElement('button');
     this.volumeBtn.type = 'button';
@@ -196,8 +197,7 @@ export class VideoPlayer {
   private bindEvents(options: VideoPlayerOptions): void {
     // 再生/一時停止クリック
     const togglePlay = () => {
-      this.isPlaying = !this.isPlaying;
-      this.updatePlayIcon(this.isPlaying);
+      this.setPlaying(!this.isPlaying);
       options.onPlayPause?.(this.isPlaying);
     };
 
@@ -349,6 +349,16 @@ export class VideoPlayer {
   /** いまの音量とミュート。受信を開き直したときに鳴らし直す側へ渡す。 */
   public get audioState(): { volume: number; muted: boolean } {
     return { volume: this.volume, muted: this.muted };
+  }
+
+  public setPlaying(playing: boolean): void {
+    this.isPlaying = playing;
+    this.updatePlayIcon(playing);
+    if (!playing) {
+      if (this.hideControlsTimer !== null) clearTimeout(this.hideControlsTimer);
+      this.hideControlsTimer = null;
+      this.controlsBar.classList.remove('hidden');
+    }
   }
 
   /** 受信の状況とエラーを出す。空文字で消える。 */

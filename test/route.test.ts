@@ -12,6 +12,7 @@ describe('routeFromHash', () => {
     expect(routeFromHash('#/guide')).toBe('guide');
     expect(routeFromHash('#/guide?wave=BS')).toBe('guide');
     expect(routeFromHash('#/about')).toBe('about');
+    expect(routeFromHash('#/recorded')).toBe('recorded');
     expect(routeFromHash('#/watch?channel=1040')).toBe('watch');
   });
 

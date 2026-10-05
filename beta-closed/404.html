@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex">
+  <title>WebTS.app</title>
+  <style>
+    :root {
+      --primary: #007F89;
+      --primary-hover: #006870;
+      --primary-light: #4db6ac;
+      --bg-color: #121212;
+      --surface-color: #1e1e1e;
+      --surface-border: #333333;
+      --text-primary: rgba(255, 255, 255, 0.87);
+      --text-secondary: rgba(255, 255, 255, 0.60);
+      --card-shadow: 0 3px 1px -2px rgba(0,0,0,0.2), 0 2px 2px 0 rgba(0,0,0,0.14), 0 1px 5px 0 rgba(0,0,0,0.12);
+      --appbar-shadow: 0 2px 4px -1px rgba(0,0,0,0.2), 0 4px 5px 0 rgba(0,0,0,0.14), 0 1px 10px 0 rgba(0,0,0,0.12);
+    }
+
+    @media (prefers-color-scheme: light) {
+      :root {
+        --bg-color: #f5f5f5;
+        --surface-color: #ffffff;
+        --surface-border: #e0e0e0;
+        --text-primary: rgba(0, 0, 0, 0.87);
+        --text-secondary: rgba(0, 0, 0, 0.60);
+        --card-shadow: 0 2px 4px rgba(0, 0, 0, 0.06), 0 1px 2px rgba(0, 0, 0, 0.04);
+      }
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      background-color: var(--bg-color);
+      color: var(--text-primary);
+      font-family: Roboto, -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Hiragino Sans', 'Meiryo', sans-serif;
+      -webkit-font-smoothing: antialiased;
+      -moz-osx-font-smoothing: grayscale;
+      line-height: 1.6;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+
+    header.app-bar {
+      height: 56px;
+      background-color: var(--primary);
+      color: #ffffff;
+      display: flex;
+      align-items: center;
+      padding: 0 16px;
+      box-shadow: var(--appbar-shadow);
+      user-select: none;
+    }
+
+    @media (min-width: 600px) {
+      header.app-bar {
+        height: 64px;
+        padding: 0 24px;
+      }
+    }
+
+    .app-title {
+      font-size: 1.25rem;
+      font-weight: 500;
+      letter-spacing: 0.0125em;
+    }
+
+    main.container {
+      flex: 1;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 24px 16px;
+    }
+
+    .notice-card {
+      background-color: var(--surface-color);
+      border: 1px solid var(--surface-border);
+      border-radius: 8px;
+      box-shadow: var(--card-shadow);
+      padding: 28px 24px;
+      max-width: 580px;
+      width: 100%;
+    }
+
+    .notice-title {
+      font-size: 1.25rem;
+      font-weight: 600;
+      margin-bottom: 16px;
+      color: var(--text-primary);
+    }
+
+    .notice-body p {
+      margin-bottom: 14px;
+      font-size: 0.9375rem;
+      color: var(--text-primary);
+    }
+
+    .notice-note {
+      font-size: 0.8125rem;
+      color: var(--text-secondary);
+      background-color: rgba(0, 0, 0, 0.05);
+      border-left: 3px solid var(--primary);
+      padding: 10px 12px;
+      border-radius: 0 4px 4px 0;
+      margin-top: 16px;
+      margin-bottom: 20px;
+    }
+
+    @media (prefers-color-scheme: dark) {
+      .notice-note {
+        background-color: rgba(255, 255, 255, 0.05);
+      }
+    }
+
+    .action-row {
+      margin-top: 24px;
+      display: flex;
+      justify-content: flex-start;
+    }
+
+    .btn-primary {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      background-color: var(--primary);
+      color: #ffffff;
+      padding: 10px 20px;
+      border-radius: 4px;
+      font-size: 0.9375rem;
+      font-weight: 500;
+      text-decoration: none;
+      transition: background-color 0.2s ease;
+    }
+
+    .btn-primary:hover {
+      background-color: var(--primary-hover);
+    }
+  </style>
+</head>
+<body>
+  <header class="app-bar">
+    <div class="app-title">WebTS.app</div>
+  </header>
+  <main class="container">
+    <article class="notice-card">
+      <h1 class="notice-title">現在beta機能の提供はありません</h1>
+      <div class="notice-body">
+        <p>
+          互換性向上にご協力いただける方は、WebTS.app の設定タブで動作報告の送信を有効化してご利用ください。
+        </p>
+        <div class="notice-note">
+          ※ ブラウザの仕様上、beta で使っていた設定・走査結果・チューナーの許可・録画データは webts.app に引き継がれません。webts.app にてチューナーの許可とチャンネル走査を再度行ってください。
+        </div>
+      </div>
+      <div class="action-row">
+        <a href="https://webts.app/" class="btn-primary">WebTS.app を開く</a>
+      </div>
+    </article>
+  </main>
+</body>
+</html>

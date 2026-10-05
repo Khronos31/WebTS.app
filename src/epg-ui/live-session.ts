@@ -97,6 +97,8 @@ export interface LiveStats {
 }
 
 export interface LiveSessionOptions {
+  /** 復号済み TS の読み取り。buffer は直後に transfer されるため保持するならコピーする。 */
+  readonly onTs?: ((bytes: Uint8Array) => void) | undefined;
   /** 描画先。制御は Worker へ移るので、呼び出し側でこの canvas へ描かないこと。 */
   readonly canvas: OffscreenCanvas;
   /** どこへ合わせるか。地上波は周波数だけ、衛星は TSID も要る。 */
@@ -201,7 +203,7 @@ export class LiveSession {
   #frames = 0;
   /** 「映像が出ません」を出したか。映像が出たら消すために覚えておく。 */
   #silentWarned = false;
-  /** beta の動作報告を済ませたか。1回の視聴で1回だけ送る。 */
+  /** 動作報告を済ませたか。1回の視聴で1回だけ送る。 */
   #reported = false;
   /** 始めた時点の機種名（動作報告に使う）。 */
   #model: string | undefined = undefined;
@@ -536,6 +538,7 @@ export class LiveSession {
       ['number', 'number'], [this.#drainPointer, DRAIN_BYTES]) as number;
     if (size <= 0) return false;
     const copy = this.#module.HEAPU8.slice(this.#drainPointer, this.#drainPointer + size);
+    this.#options.onTs?.(copy);
     // 取り出したあとの残りを添える。Worker はこれを見て刻みを伸縮させる。
     const backlogBytes = Number(
       this.#module.ccall('webts_q3u4_descramble_pending', 'number', [], []));

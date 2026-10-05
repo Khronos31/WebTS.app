@@ -10,6 +10,7 @@ export function routeFromHash(hash: string): RouteType {
   if (clean === 'api' || clean.startsWith('api/') || clean.startsWith('api?')) return 'api';
   if (clean === 'guide' || clean.startsWith('guide?')) return 'guide';
   if (clean === 'settings') return 'settings';
+  if (clean === 'recorded') return 'recorded';
   if (clean === 'about') return 'about';
   if (clean === 'watch' || clean.startsWith('watch?') || clean.startsWith('watch/')) return 'watch';
   return 'onair';

@@ -1,4 +1,4 @@
--- beta 版の動作報告（functions/api/report.ts が書く）。Cloudflare D1。
+-- 動作報告（functions/api/report.ts が書く）。Cloudflare D1。名前は beta のころのまま（webts-beta-reports）。
 -- 項目は src/reports/report-schema.ts と同じ。IP も User-Agent も持たない。
 CREATE TABLE IF NOT EXISTS reports (
   id INTEGER PRIMARY KEY,
@@ -8,12 +8,12 @@ CREATE TABLE IF NOT EXISTS reports (
   os TEXT NOT NULL,
   browser TEXT NOT NULL,
   browser_major INTEGER NOT NULL,
-  kind TEXT NOT NULL,           -- view | scan
+  kind TEXT NOT NULL,           -- view | scan | record | playback
   wave TEXT NOT NULL,           -- GR | BS | CS
-  result TEXT NOT NULL,         -- ok | no-signal | failed
+  result TEXT NOT NULL,         -- ok | no-signal | failed | incomplete（録画だけ）
   stage INTEGER NOT NULL,
   code INTEGER NOT NULL,
-  detail TEXT NOT NULL DEFAULT 'none'  -- 「デバイスを開く」で止まった理由（report-schema.ts の REPORT_DETAILS）
+  detail TEXT NOT NULL DEFAULT 'none'  -- 止まった・途中で終わった理由（report-schema.ts の REPORT_DETAILS）
 );
 
 -- 0.3.0 までのテーブルに detail を足す（2026-09-27 に実施）
