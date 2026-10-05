@@ -8,15 +8,20 @@
 // 送らないもの：シリアル番号、USB のインスタンス ID、カードの情報、局・サービス
 // （地域が分かる）、郵便番号、細かい時刻、端末を見分ける ID。
 
-export const REPORT_KINDS = ['view', 'scan'] as const;
+/** record は30秒録画（デモ）、playback は録画済みの再生（チューナーを使わない）。 */
+export const REPORT_KINDS = ['view', 'scan', 'record', 'playback'] as const;
 export const REPORT_WAVES = ['GR', 'BS', 'CS'] as const;
-/** ok は映った（視聴）／どれかがロックした（走査）。no-signal は走査が最後まで回って1つもロックしなかった。 */
-export const REPORT_RESULTS = ['ok', 'no-signal', 'failed'] as const;
+/**
+ * ok は映った（視聴・再生）／どれかがロックした（走査）／30秒録れた（録画）。
+ * no-signal は走査が最後まで回って1つもロックしなかった。incomplete は録画が
+ * 途中で終わったが保存はできたもの（理由は detail）。
+ */
+export const REPORT_RESULTS = ['ok', 'no-signal', 'failed', 'incomplete'] as const;
 export const REPORT_OSES = ['Windows', 'macOS', 'Linux', 'Android', 'ChromeOS', 'other'] as const;
 export const REPORT_BROWSERS = ['Chrome', 'Edge', 'Opera', 'Brave', 'Chromium', 'other'] as const;
 /**
  * 止まった理由。「デバイスを開く」と「カード」の段で止まったとき、走査が上流に
- * 断られたときに入る。
+ * 断られたとき、録画が途中で終わった・残せなかったとき、再生が止まったときに入る。
  * それ以外の段で止まったとき、止まらなかったときは none。**決まった語だけ**で、
  * 識別子もカードの応答も入らない。
  *
@@ -43,6 +48,13 @@ export const REPORT_DETAILS = [
   // 走査の作業者が上流に断られた手順（C 側の ScanStep と同じ並び）。
   'scan-open-receiver', 'scan-start-capture', 'scan-attach', 'scan-stop-capture',
   'scan-close-receiver',
+  // 録画が途中で終わった理由（result が incomplete。recording-capture.ts の RecordingIssue）。
+  'record-late-start', 'record-gap', 'record-resync', 'record-loss', 'record-slow-storage',
+  'record-limit', 'record-stopped', 'record-hidden', 'record-left', 'record-reception-ended',
+  // 録画として残せなかった理由（result が failed。RecordingFailure）。
+  'record-no-data', 'record-write', 'record-commit', 'record-quota', 'record-open', 'record-error',
+  // 録画の再生で止まった理由（result が failed）。
+  'playback-no-video', 'playback-error', 'playback-open',
 ] as const;
 
 export interface Report {
@@ -99,7 +111,9 @@ export function parseReport(input: unknown): Report | null {
   if (!integerIn(stage, -1, 63) || !integerIn(code, -1, 65535)) return null;
   if (result === 'failed' ? stage < 0 : stage !== -1 || code !== 0) return null;
   if (!oneOf(REPORT_DETAILS, detail)) return null;
-  if (result !== 'failed' && detail !== 'none') return null;
+  // 途中終了は録画だけ。理由の語は failed と incomplete のときだけ入る。
+  if (result === 'incomplete' && kind !== 'record') return null;
+  if (result !== 'failed' && result !== 'incomplete' && detail !== 'none') return null;
 
   return { v, model, os, browser, browserMajor, kind, wave, result, stage, code, detail };
 }

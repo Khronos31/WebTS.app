@@ -32,7 +32,6 @@ import { getTheme, setTheme, type ThemeMode } from '../theme-manager';
 import { allowLnb15v, setAllowLnb15v } from '../lnb-setting';
 import { getZipcode, normalizeZipcode, setZipcode } from '../bml-receiver-info';
 import {
-  IS_BETA_BUILD,
   lastSentReport,
   reportsEnabled,
   setReportsEnabled,
@@ -89,7 +88,7 @@ export class SettingsView {
     // 6. 受信状態 (Signal Monitor) カード
     this.element.append(this.createSignalCard());
 
-    // 7. 動作報告 カード（本番は既定で送らない、beta は既定で送る。reports.ts）
+    // 7. 動作報告 カード（既定で無効・オプトイン）
     this.element.append(this.createBetaReportsCard());
   }
 
@@ -966,13 +965,9 @@ export class SettingsView {
 
     const enabled = reportsEnabled();
 
-    const title = IS_BETA_BUILD ? '動作報告（beta版）' : '動作報告';
-    const desc = IS_BETA_BUILD
-      ? 'beta 版（beta.webts.app）限定で、「その機種で動いたか」を確認するために最小限の動作ログを配布サーバへ送信します。本機能は既定で有効ですが、オプトアウト（停止）できます。'
-      : '「その機種で動いたか」を確認するために、最小限の動作ログを配布サーバへ送信します。本機能は既定で無効（オプトイン）ですが、動作改善へのご協力のためオンにすることができます。';
-    const toggleLabel = IS_BETA_BUILD
-      ? '動作報告の送信を許可する（既定で有効）'
-      : '動作報告の送信を許可する（既定で無効）';
+    const title = '動作報告';
+    const desc = '「その機種で動いたか」を確認するために、最小限の動作ログを配布サーバへ送信します。本機能は既定で無効（オプトイン）ですが、動作改善へのご協力のためオンにすることができます。';
+    const toggleLabel = '動作報告の送信を許可する（既定で無効）';
     const footerNote = '※ 同じ内容の報告は1回しか送信されません。';
 
     card.innerHTML = `
@@ -1002,16 +997,17 @@ export class SettingsView {
       <div style="font-size: 0.875rem; line-height: 1.6; margin-bottom: 16px;">
         <div style="font-weight: 600; margin-bottom: 4px;">送信される情報:</div>
         <ul style="margin: 0 0 12px 20px; padding: 0; color: var(--text-secondary); font-size: 0.8125rem;">
-          <li>アプリのバージョン、チューナーの機種名（例: PX-Q3U4）</li>
+          <li>アプリのバージョン、チューナーの機種名（例: PX-Q3U4。再生時はチューナーを使わないため none）</li>
           <li>OSの種類（Windows / macOS / Linux / Android / ChromeOS）、ブラウザの種類とメジャーバージョン（例: Chrome 140）</li>
-          <li>視聴か走査か、受信波（地上波・BS・CS）</li>
-          <li>動作結果（映った・ロックした／信号なし／停止した段階とエラー番号）</li>
-          <li>止まったときの理由（デバイスを開く・カード・走査のどこで何に失敗したか。決まった語のみ。識別子は含みません）</li>
+          <li>動作の種類（視聴・走査・録画・録画の再生）、受信波（地上波・BS・CS）</li>
+          <li>動作結果（映った・ロックした・30秒録れた／途中で終了／残せなかった／信号なし／停止した段階とエラー番号）</li>
+          <li>止まったときの理由（デバイスを開く・カード・走査・録画・再生のどこで何に失敗したか。決まった語のみ。識別子は含みません）</li>
         </ul>
         <div style="font-weight: 600; margin-bottom: 4px;">送信されない情報:</div>
         <ul style="margin: 0 0 12px 20px; padding: 0; color: var(--text-secondary); font-size: 0.8125rem;">
           <li>シリアル番号、USB識別子、B-CASカード情報</li>
-          <li>視聴した局や番組、地域設定・郵便番号、端末固有の識別ID</li>
+          <li>番組名・局名（サービス）、録画の日時・長さ・容量・録画の中身（TS）</li>
+          <li>地域設定・郵便番号、端末固有の識別ID</li>
           <li>詳細な時刻（サーバ側の保存は日付単位のみ）。受け側はIPアドレスも保存しません</li>
         </ul>
         <div style="font-size: 0.75rem; color: var(--text-secondary);">

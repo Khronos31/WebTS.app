@@ -3,8 +3,8 @@
 // 受け取るのは src/reports/report-schema.ts が決めた項目だけで、1つでも
 // 違えば捨てる。**IP アドレスも User-Agent も保存しない。**日付は日単位にする。
 //
-// 受け付けるのは WebTS のホストだけ。本番は利用者がオンにしたとき（オプトイン）、
-// beta は既定で送る（src/reports/reports.ts）。どちらも同じ D1 に入る。
+// 受け付けるのは WebTS のホストだけ。利用者がオンにしたときだけ届く（オプトイン、
+// src/reports/reports.ts）。beta（beta.webts.app）は 0.4.0 でやめたので受け付けない。
 
 import { parseReport } from '../../src/reports/report-schema';
 
@@ -21,10 +21,7 @@ export interface ReportEnv {
   readonly REPORTS_DB?: D1Database;
 }
 
-const HOSTS = new Set([
-  'webts.app', 'webts-app.pages.dev',
-  'beta.webts.app', 'beta.webts-app.pages.dev',
-]);
+const HOSTS = new Set(['webts.app', 'webts-app.pages.dev']);
 const MAX_BODY_BYTES = 1024;
 
 export async function handleReport(request: Request, env: ReportEnv): Promise<Response> {

@@ -32,11 +32,11 @@ export function showReportsInviteDialog(model: { name: string; productId: number
         <div style="font-size: 0.8125rem; line-height: 1.5; margin-bottom: 12px; background: var(--surface-color-variant); padding: 10px 12px; border-radius: 6px;">
           <div style="font-weight: 600; margin-bottom: 4px; color: var(--text-primary);">送る中身:</div>
           <div style="color: var(--text-secondary); margin-bottom: 8px;">
-            アプリのバージョン、チューナー機種名、OS/ブラウザの種類とメジャー版、視聴か走査か、受信波（地上波・BS・CS）、動作結果（映った・ロックした／信号なし／エラー番号）、止まったときの理由（デバイスを開く・カード・走査のどこで何に失敗したか。決まった語のみ）。※同じ内容は1回しか送りません。
+            アプリのバージョン、チューナー機種名（再生時は none）、OS/ブラウザの種類とメジャー版、動作の種類（視聴・走査・録画・録画の再生）、受信波（地上波・BS・CS）、動作結果（映った・ロックした・30秒録れた／途中で終了／残せなかった／信号なし／エラー番号）、止まったときの理由（デバイスを開く・カード・走査・録画・再生のどこで何に失敗したか。決まった語のみ）。※同じ内容は1回しか送りません。
           </div>
           <div style="font-weight: 600; margin-bottom: 4px; color: var(--text-primary);">送らない中身:</div>
           <div style="color: var(--text-secondary);">
-            シリアル番号、USB識別子、B-CASカード情報、見た局・番組、地域・郵便番号、時刻（日付のみ保存）、端末識別ID。受け側はIPアドレスも保存しません。
+            シリアル番号、USB識別子、B-CASカード情報、番組名・局名（サービス）、録画の日時・長さ・容量・録画の中身（TS）、地域・郵便番号、時刻（日付のみ保存）、端末識別ID。受け側はIPアドレスも保存しません。
           </div>
         </div>
         <p style="margin: 0; font-size: 0.75rem; color: var(--text-secondary);">

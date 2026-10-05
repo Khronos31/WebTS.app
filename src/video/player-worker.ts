@@ -95,6 +95,7 @@ export type PlayerRequest =
       readonly kind: 'init';
       readonly canvas: OffscreenCanvas;
       readonly programNumber?: number;
+      readonly filePlayback?: boolean;
     }
   /** backlogBytes は送り手側にまだ残っている TS。live の遅延の一部である。 */
   | { readonly kind: 'chunk'; readonly bytes: ArrayBuffer; readonly backlogBytes?: number }
@@ -170,7 +171,7 @@ class Player {
   /** 一時停止。描画だけを止める。受信と復号は続ける。 */
   #paused = false;
 
-  constructor(canvas: OffscreenCanvas, wantedProgram: number | null) {
+  constructor(canvas: OffscreenCanvas, wantedProgram: number | null, readonly filePlayback = false) {
     this.#canvas = canvas;
     this.#wantedProgram = wantedProgram;
     const context = canvas.getContext('2d');
@@ -271,6 +272,7 @@ class Player {
     let flushed = false;
     try {
       for (;;) {
+        while (this.filePlayback && this.#paused) await this.#waitForData();
         const started = performance.now();
         const step = decoder.step();
         this.#decodeMs += performance.now() - started;
@@ -350,7 +352,8 @@ class Player {
     }
 
     const wait = this.#schedule(frame);
-    if (wait > 1 && this.#esBytes < HIGH_WATER_BYTES) await sleep(wait);
+    if (wait > 1 && (this.filePlayback || this.#esBytes < HIGH_WATER_BYTES)) await sleep(wait);
+    while (this.filePlayback && this.#paused) await this.#waitForData();
 
     if (planes !== null) {
       const picture = new VideoFrame(planes, {
@@ -404,6 +407,11 @@ class Player {
 
   setPaused(paused: boolean): void {
     this.#paused = paused;
+    if (this.filePlayback && !paused) {
+      this.#clockPts = null;
+      this.#nextDue = 0;
+      this.#wake?.();
+    }
   }
 
   /**
@@ -451,6 +459,7 @@ class Player {
    * 正なら速く、負なら遅く。±MAX_RATE_TRIM に収める。
    */
   #rateTrim(): number {
+    if (this.filePlayback) return 0;
     const backlog = this.#esBytes + this.#upstreamBacklog;
     const deviation = (backlog - TARGET_BACKLOG_BYTES) / (2 * TARGET_BACKLOG_BYTES);
     this.#trim = Math.max(-MAX_RATE_TRIM, Math.min(MAX_RATE_TRIM, deviation));
@@ -550,7 +559,7 @@ self.addEventListener('message', (event: MessageEvent<PlayerRequest>) => {
     }
     if (request.kind === 'init') {
       wantedProgram = request.programNumber ?? null;
-      player = new Player(request.canvas, request.programNumber ?? null);
+      player = new Player(request.canvas, request.programNumber ?? null, request.filePlayback ?? false);
       player.run().catch((error: unknown) => {
         post({ kind: 'failed', message: error instanceof Error ? error.message : String(error) });
       });

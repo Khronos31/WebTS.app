@@ -3,7 +3,7 @@
 import type { Tuning } from './tuning';
 
 // 'api' は画面ではなく、`#/api/...` で叩く操作口。ドロワーには出さない。
-export type RouteType = 'onair' | 'guide' | 'watch' | 'settings' | 'about' | 'api';
+export type RouteType = 'onair' | 'guide' | 'watch' | 'recorded' | 'settings' | 'about' | 'api';
 
 export type BroadcastType = 'ALL' | 'GR' | 'BS' | 'CS';
 

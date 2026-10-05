@@ -380,7 +380,7 @@ export class ChannelScan {
     /** C 側のジョブを選ぶ番号。系統ごとに1つある。 */
     const wave = satellite ? WAVE_SATELLITE : WAVE_TERRESTRIAL;
     let completed = 0;
-    /** beta の動作報告のため。波ごとに、1つでもロックしたか。 */
+    /** 動作報告のため。波ごとに、1つでもロックしたか。 */
     const lockedWaves = new Set<Tuning['wave']>();
     const report = (result: 'ok' | 'no-signal' | 'failed', stage = -1, code = 0,
       detail: Report['detail'] = 'none'): void => {

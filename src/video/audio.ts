@@ -99,6 +99,8 @@ function concat(left: Uint8Array, right: Uint8Array): Uint8Array {
 }
 
 export class AudioPlayer {
+  constructor(readonly filePlayback = false) {}
+
   #context: AudioContext | null = null;
   /**
    * 音量は GainNode で効かせる。`<video>` を使わないので `video.volume` が
@@ -148,7 +150,7 @@ export class AudioPlayer {
     // ブラウザは音を止めたままにする。音が出ず、映像も止まった時計に
     // 合わせてカクついた。一覧から選局し直すと直った（実機、2026-09-25）。
     // この修正の後、再読み込みしても映像は滑らかで、クリックで音が出た。
-    if (context.state !== 'running') {
+    if (context.state !== 'running' && !this.filePlayback) {
       for (const type of UNLOCK_EVENTS) {
         globalThis.addEventListener(type, this.#unlock, { capture: true, passive: true });
       }
@@ -283,6 +285,13 @@ export class AudioPlayer {
     this.#applyLevel();
   }
 
+  /** 録画再生では無音にするだけでなく、予約済み音声の時計ごと停止する。 */
+  async setFilePaused(paused: boolean): Promise<void> {
+    if (this.#closed || this.#context === null) return;
+    if (paused) await this.#context.suspend();
+    else await this.#context.resume();
+  }
+
   #level(): number {
     return this.#muted || this.#paused ? 0 : this.#volume;
   }
@@ -345,7 +354,7 @@ export class AudioPlayer {
       // 置くべき位置。PTS から引くので、入力が飛んでも追随する。
       let at = this.#anchorTime + (pts - this.#anchorPts) / 90_000;
       if (at < context.currentTime - LATE_LIMIT_SECONDS
-        || at > context.currentTime + AHEAD_LIMIT_SECONDS) {
+        || (!this.filePlayback && at > context.currentTime + AHEAD_LIMIT_SECONDS)) {
         this.#anchor(context.currentTime + LEAD_SECONDS, pts);
         this.#reanchors += 1;
         at = this.#anchorTime;

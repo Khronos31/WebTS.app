@@ -10,6 +10,7 @@ import { StreamDialog } from './components/stream-dialog';
 import { OnAirView } from './views/onair-view';
 import { GuideView } from './views/guide-view';
 import { WatchView } from './views/watch-view';
+import { RecordedView } from './views/recorded-view';
 import { SettingsView } from './views/settings-view';
 import { AboutView } from './views/about-view';
 import { ApiView } from './views/api-view';
@@ -21,11 +22,7 @@ import {
 } from './epg-refresh';
 import { requestPersistentStorage } from './persist-storage';
 import { installDataBroadcastConsole } from './data-broadcast';
-import {
-  markReportsNoticeShown,
-  reportsInviteModel,
-  reportsNoticeNeeded,
-} from '../reports/reports';
+import { reportsInviteModel } from '../reports/reports';
 import { subscribeTuners } from '../usb/px4-identity';
 import { showReportsInviteDialog } from './components/reports-invite-dialog';
 
@@ -57,7 +54,8 @@ export class EpgApp {
   private streamDialog: StreamDialog;
   private mainContent: HTMLElement;
   private currentView:
-    OnAirView | GuideView | WatchView | SettingsView | AboutView | ApiView | null = null;
+    OnAirView | GuideView | WatchView | RecordedView | SettingsView | AboutView | ApiView | null = null;
+  private routeGeneration = 0;
 
   constructor(container: HTMLElement) {
     this.container = container;
@@ -118,12 +116,7 @@ export class EpgApp {
     // 初期レンダリング
     void this.renderCurrentRoute();
 
-    // beta 版初回起動時の注意書き（1度だけ表示）
-    if (reportsNoticeNeeded()) {
-      this.showBetaNotice();
-    }
-
-    // 本番で未確認の機種がつながったときの案内ダイアログ
+    // 未確認の機種がつながったときの案内ダイアログ
     let inviteShowing = false;
     const checkReportsInvite = async () => {
       if (inviteShowing) return;
@@ -142,58 +135,6 @@ export class EpgApp {
     });
   }
 
-  private showBetaNotice(): void {
-    const overlay = document.createElement('div');
-    overlay.className = 'dialog-overlay open';
-    overlay.style.zIndex = '400';
-
-    const box = document.createElement('div');
-    box.className = 'dialog-box';
-    box.style.maxWidth = '460px';
-
-    box.innerHTML = `
-      <div class="dialog-header">
-        <div class="dialog-title">WebTS.app beta</div>
-        <button type="button" class="dialog-close-btn" id="beta-notice-close-btn" aria-label="閉じる">
-          <svg viewBox="0 0 24 24" style="width:20px;height:20px;fill:currentColor">
-            <path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/>
-          </svg>
-        </button>
-      </div>
-      <div class="dialog-body" style="font-size: 0.875rem; line-height: 1.6;">
-        <p style="margin: 0 0 12px 0;">
-          これは beta 版です。動作実績の確認のため、個人情報を含まないログを収集します。
-        </p>
-        <p style="margin: 0; font-size: 0.8125rem; color: var(--text-secondary);">
-          収集する項目（チューナー機種名、OS/ブラウザ、視聴や走査の結果など）の確認や収集の停止は、設定ページから行えます。
-        </p>
-      </div>
-    `;
-
-    const close = () => {
-      window.removeEventListener('keydown', onKeyDown);
-      markReportsNoticeShown();
-      overlay.classList.remove('open');
-      setTimeout(() => overlay.remove(), 200);
-    };
-
-    const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') close();
-    };
-    window.addEventListener('keydown', onKeyDown);
-
-    box.querySelector('#beta-notice-close-btn')?.addEventListener('click', () => {
-      close();
-    });
-
-    overlay.addEventListener('click', (e) => {
-      if (e.target === overlay) close();
-    });
-
-    overlay.append(box);
-    document.body.append(overlay);
-  }
-
   private getTitleForRoute(route: RouteType): string {
     switch (route) {
       case 'onair':
@@ -202,6 +143,8 @@ export class EpgApp {
         return '番組表';
       case 'watch':
         return '視聴';
+      case 'recorded':
+        return '録画済み';
       case 'settings':
         return '設定';
       case 'about':
@@ -212,6 +155,7 @@ export class EpgApp {
   }
 
   private async renderCurrentRoute(): Promise<void> {
+    const generation = ++this.routeGeneration;
     const route = routeFromHash(location.hash);
     const title = this.getTitleForRoute(route);
 
@@ -254,6 +198,10 @@ export class EpgApp {
       // ignore
     }
 
+    if (generation !== this.routeGeneration) return;
+    if (this.currentView instanceof WatchView) await this.currentView.beforeLeave();
+    if (generation !== this.routeGeneration) return;
+
     // 既存ビューの破棄
     if (this.currentView && 'destroy' in this.currentView && typeof this.currentView.destroy === 'function') {
       this.currentView.destroy();
@@ -263,6 +211,10 @@ export class EpgApp {
 
     // 新規ビューの生成
     switch (route) {
+      case 'recorded': {
+        this.currentView = new RecordedView();
+        break;
+      }
       case 'api': {
         this.currentView = new ApiView(location.hash);
         break;

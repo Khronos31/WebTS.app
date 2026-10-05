@@ -8,6 +8,8 @@ import { LiveSession, type LiveStats } from '../live-session';
 import { tuningForChannel } from '../tuning';
 import { isDataBroadcastVisible, sendDataBroadcastKey } from '../data-broadcast';
 import { confirmLiveBlocksGuideIfNeeded } from '../components/live-guide-notice-dialog';
+import { RecordingControl } from '../components/recording-control';
+import { ScreenWakeLock } from '../screen-wake-lock';
 
 export interface WatchViewOptions {
   channelId: number;
@@ -19,6 +21,10 @@ export class WatchView {
   public readonly element: HTMLElement;
   private player: VideoPlayer;
   private session: LiveSession | null = null;
+  private readonly recording: RecordingControl;
+  /** 視聴中は画面を点けたままにする（screen-wake-lock.ts）。 */
+  private readonly wakeLock = new ScreenWakeLock();
+  private destroyed = false;
   private progressTimer: number | null = null;
   private channel: ChannelItem;
   private currentProgram: ProgramItem | null = null;
@@ -40,6 +46,11 @@ export class WatchView {
     this.channel = foundChannel;
     this.currentProgram = currentProgramFor(this.channel);
     this.nextProgram = nextProgramFor(this.channel);
+    this.recording = new RecordingControl(() => ({
+      title: currentProgramFor(this.channel)?.name ?? '番組名なし',
+      channelName: this.channel.name, serviceId: this.channel.serviceId,
+      wave: this.channel.channelType,
+    }));
 
     // 1. トップナビゲーション（戻るボタン ＆ チャンネル情報）
     const topBar = document.createElement('div');
@@ -99,7 +110,7 @@ export class WatchView {
       ${this.channel.remoteControlKeyId ? `<span class="channel-key-badge">${this.channel.remoteControlKeyId}ch</span>` : ''}
     `;
 
-    topBar.append(backBtn, bmlBar, channelBadgeRow);
+    topBar.append(backBtn, this.recording.element, bmlBar, channelBadgeRow);
     this.element.append(topBar);
 
     // 2. 動画プレイヤーコンポーネント
@@ -428,6 +439,7 @@ export class WatchView {
       this.showStatus('視聴はキャンセルされました。');
       return;
     }
+    if (this.destroyed) return;
     // 走査は止めない。各系統の1本目は視聴のために空けてある（channel-scan.ts）。
     const tuning = tuningForChannel(this.channel);
     if (tuning === null) {
@@ -436,19 +448,28 @@ export class WatchView {
     }
     try {
       const canvas = this.player.takeOffscreen();
-      this.session = await LiveSession.start({
+      const session = await LiveSession.start({
         canvas,
         tuning,
         serviceId: this.channel.serviceId,
         onStatus: (text) => { this.showStatus(text); },
         onStats: (stats) => { this.showStats(stats); },
+        onTs: (bytes) => { this.recording.push(bytes); },
         captionHost: this.player.captionHost,
-        onEnded: (reason) => { if (reason !== '') this.showStatus(reason); },
+        onEnded: (reason) => {
+          this.recording.setReady(false);
+          this.wakeLock.release();
+          void this.recording.finish(reason || '受信が終了しました', 'record-reception-ended');
+          if (reason !== '') this.showStatus(reason);
+        },
         dataBroadcast: {
           container: this.player.element,
           setVideoRect: (rect) => { this.player.setVideoRect(rect); },
         },
       });
+      if (this.destroyed) { session.stop(); return; }
+      this.session = session;
+      this.wakeLock.acquire();
       // 開き直したときは音量が既定へ戻る。つまみの位置と鳴り方がずれるので、
       // いま表示されている値をそのまま入れ直す。
       const audio = this.player.audioState;
@@ -460,6 +481,8 @@ export class WatchView {
   }
 
   private stopLive(): void {
+    this.recording.setReady(false);
+    this.wakeLock.release();
     this.session?.stop();
     this.session = null;
     this.player.setStatusText('');
@@ -472,6 +495,8 @@ export class WatchView {
    * 上流の API を通していない。出せない数字を埋めると嘘になるので「—」のままにする。
    */
   private showStats(stats: LiveStats): void {
+    this.recording.setReady(stats.frames > 0 && !this.destroyed);
+    this.recording.observeLoss(stats.droppedTsBytes, stats.demux['continuityErrors'] ?? 0);
     // 受け入れ条件（A/V ずれ、滞留、音声の落ち）は画面に出していない項目まで
     // 含む。長時間の測定でそれらを読めるよう、最新の値を要素に添えておく。
     // 表示には影響しない。
@@ -528,11 +553,13 @@ export class WatchView {
   }
 
   private handleKeyDown = (e: KeyboardEvent): void => {
+    if (document.querySelector('dialog[open]') !== null) return;
     const active = document.activeElement;
     if (active && (
       active.tagName === 'INPUT' ||
       active.tagName === 'TEXTAREA' ||
       active.tagName === 'SELECT' ||
+      active.closest('button, a, [role="button"]') !== null ||
       (active as HTMLElement).isContentEditable
     )) {
       return;
@@ -610,7 +637,14 @@ export class WatchView {
     }
   };
 
+  public beforeLeave(): Promise<void> {
+    return this.recording.finish('視聴画面を離れたため終了しました', 'record-left');
+  }
+
   public destroy(): void {
+    this.destroyed = true;
+    this.recording.destroy();
+    this.wakeLock.destroy();
     window.removeEventListener('keydown', this.handleKeyDown);
     window.removeEventListener('webts-bml-visibility', this.handleBmlVisibility);
     if (this.progressTimer !== null) {
