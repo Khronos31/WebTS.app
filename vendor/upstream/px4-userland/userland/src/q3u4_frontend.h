@@ -213,6 +213,12 @@ public:
     Result<bool> is_satellite_locked(std::uint8_t local_receiver) noexcept;
     Result<void> close_receiver(std::uint8_t local_receiver) noexcept;
 
+    // Metadata-only transport-loss notification for this bank. It performs no
+    // I/O and releases every logical receiver. It is idempotent, and every
+    // later frontend operation fails with DISCONNECTED without touching the
+    // bus.
+    void mark_disconnected() noexcept;
+
     Q3U4ReceiverState receiver_state(std::uint8_t local_receiver) const noexcept;
     bool capture_active(std::uint8_t local_receiver) const noexcept;
     std::uint16_t selected_tsid(std::uint8_t local_receiver) const noexcept;
@@ -272,6 +278,7 @@ private:
     DiagnosticStage current_stage_ = DiagnosticStage::none;
     DiagnosticStage failure_stage_ = DiagnosticStage::none;
     bool operation_failed_ = false;
+    bool disconnected_ = false;
     mutable std::mutex mutex_;
 };
 
@@ -334,6 +341,11 @@ public:
     Result<void> acquire_card() noexcept;
     Result<void> release_card() noexcept;
     Result<void> reconcile_power() noexcept;
+
+    // Metadata-only transport-loss notification. It makes the coordinator
+    // terminal for the bridge and marks the owning bank disconnected; neither
+    // step performs a bus operation. Repeated notification is safe.
+    Result<void> mark_bridge_disconnected(Q3U4Bridge bridge) noexcept;
 
     Q3U4ReceiverState receiver_state(std::uint8_t global_receiver) const noexcept;
     Q3U4PowerSnapshot power_snapshot() const noexcept;

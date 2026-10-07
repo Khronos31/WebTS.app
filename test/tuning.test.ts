@@ -12,7 +12,9 @@ describe('tuning', () => {
     expect(grTuning(13).frequencyKhz).toBe(473_143);
     expect(grTuning(27).frequencyKhz).toBe(473_143 + 14 * 6_000);
     expect(grTuning(21).label).toBe('21');
-    expect(grTunings()).toHaveLength(50);
+    // 走査は ch13〜52 の 40 件。ch53〜62 は国内で地デジが出ていない。
+    expect(grTunings()).toHaveLength(40);
+    expect(grTunings().at(-1)?.label).toBe('52');
   });
 
   it('BS は奇数の中継器のみ', () => {

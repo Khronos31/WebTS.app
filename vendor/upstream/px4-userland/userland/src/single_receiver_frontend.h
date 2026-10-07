@@ -27,6 +27,8 @@ public:
     Result<void> tune_satellite(std::uint8_t receiver, std::uint32_t frequency_khz,
                                 std::uint32_t timeout_ms) noexcept override;
     Result<bool> is_locked(std::uint8_t receiver, ipc::System system) noexcept override;
+    // px4_drv enables PTX_CHRDEV_WAIT_AFTER_LOCK_TC_T for every one-receiver model.
+    bool requires_terrestrial_lock_settle() const noexcept override { return true; }
     Result<void> select_satellite_slot(std::uint8_t receiver, std::uint8_t slot,
                                        std::uint32_t timeout_ms) noexcept override;
     Result<void> select_satellite_tsid(std::uint8_t receiver, std::uint16_t tsid,
@@ -44,6 +46,8 @@ public:
     Result<void> initialize_uart() noexcept override;
     Result<bool> detect_card() noexcept override;
 private:
+    Result<void> select_satellite_tsid_locked(std::uint16_t tsid,
+                                               std::uint32_t timeout_ms) noexcept;
     Result<void> acquire_power() noexcept;
     Result<void> release_power() noexcept;
     Result<void> initialize_frontend() noexcept;

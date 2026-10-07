@@ -106,7 +106,15 @@ Result<void> Q3U4CoordinatorReceiverPowerAuthority::release_receiver(
 {
     if (global_receiver < global_base_ || global_receiver >= global_base_ + 4U)
         return Result<void>::failure(Error::INVALID_ARGUMENT);
-    return coordinator_.release_receiver(global_receiver);
+    const auto result = coordinator_.release_receiver(global_receiver);
+    // A transport loss already cleared every coordinator reference. The bank
+    // still performs its own logical cleanup, so a release whose reference was
+    // removed by the disconnect is success without another bus operation.
+    if (!result && result.error() == Error::INVALID_ARGUMENT &&
+        coordinator_.enclosure_disconnected()) {
+        return Result<void>::success();
+    }
+    return result;
 }
 
 Q3U4FrontendBank::Q3U4FrontendBank(BridgeI2cMaster& bridge,
@@ -385,6 +393,7 @@ Result<void> Q3U4FrontendBank::open_receiver(std::uint8_t local_receiver,
 {
     std::lock_guard<std::mutex> lock(mutex_);
     begin_operation();
+    if (disconnected_) return Result<void>::failure(Error::DISCONNECTED);
     if (!valid_local_receiver(local_receiver))
         return Result<void>::failure(Error::INVALID_ARGUMENT);
     const auto expected_system = local_receiver < 2U ? Tc90522System::isdb_s
@@ -463,6 +472,7 @@ Result<void> Q3U4FrontendBank::tune_receiver(std::uint8_t local_receiver,
 {
     std::lock_guard<std::mutex> lock(mutex_);
     begin_operation();
+    if (disconnected_) return Result<void>::failure(Error::DISCONNECTED);
     if (!valid_local_receiver(local_receiver))
         return Result<void>::failure(Error::INVALID_ARGUMENT);
     if (local_receiver < 2U ? system != Tc90522System::isdb_s
@@ -658,6 +668,7 @@ Result<void> Q3U4FrontendBank::select_satellite_slot_with_timeout(
 {
     std::lock_guard<std::mutex> lock(mutex_);
     begin_operation();
+    if (disconnected_) return Result<void>::failure(Error::DISCONNECTED);
     if (!valid_local_receiver(local_receiver) || local_receiver >= 2U)
         return Result<void>::failure(Error::UNSUPPORTED);
     if (slot >= 12U) return Result<void>::failure(Error::INVALID_ARGUMENT);
@@ -687,13 +698,12 @@ Result<void> Q3U4FrontendBank::select_satellite_slot_with_timeout(
         remember_failure(failed);
         return failed;
     }
-    if (elapsed_ms >= timeout_ms) {
-        const auto failed = Result<void>::failure(Error::TIMEOUT);
-        remember_failure(failed);
-        return failed;
-    }
-    return select_satellite_tsid_locked(local_receiver, tsid,
-                                         timeout_ms - elapsed_ms);
+    // A TSID read within the budget is written even when the waits have used
+    // all of it, as px4_drv does; the read-back then gets one check.
+    // Clamp rather than rely on the loop never waiting past the budget.
+    const std::uint32_t remaining_ms =
+        elapsed_ms < timeout_ms ? timeout_ms - elapsed_ms : 0U;
+    return select_satellite_tsid_locked(local_receiver, tsid, remaining_ms);
 }
 
 Result<void> Q3U4FrontendBank::select_satellite_tsid(
@@ -708,6 +718,7 @@ Result<void> Q3U4FrontendBank::select_satellite_tsid_with_timeout(
 {
     std::lock_guard<std::mutex> lock(mutex_);
     begin_operation();
+    if (disconnected_) return Result<void>::failure(Error::DISCONNECTED);
     if (!valid_local_receiver(local_receiver) || local_receiver >= 2U)
         return Result<void>::failure(Error::INVALID_ARGUMENT);
     if (receiver_state_[local_receiver] != Q3U4ReceiverState::tuned)
@@ -720,6 +731,7 @@ Result<void> Q3U4FrontendBank::start_capture(std::uint8_t local_receiver,
 {
     std::lock_guard<std::mutex> lock(mutex_);
     begin_operation();
+    if (disconnected_) return Result<void>::failure(Error::DISCONNECTED);
     if (!valid_local_receiver(local_receiver))
         return Result<void>::failure(Error::INVALID_ARGUMENT);
     if (local_receiver < 2U ? system != Tc90522System::isdb_s
@@ -781,6 +793,7 @@ Result<void> Q3U4FrontendBank::stop_capture(std::uint8_t local_receiver,
 {
     std::lock_guard<std::mutex> lock(mutex_);
     begin_operation();
+    if (disconnected_) return Result<void>::failure(Error::DISCONNECTED);
     if (!valid_local_receiver(local_receiver))
         return Result<void>::failure(Error::INVALID_ARGUMENT);
     if (local_receiver < 2U ? system != Tc90522System::isdb_s
@@ -807,6 +820,7 @@ Result<bool> Q3U4FrontendBank::is_locked(std::uint8_t local_receiver,
                                           Tc90522System system) noexcept
 {
     std::lock_guard<std::mutex> lock(mutex_);
+    if (disconnected_) return Result<bool>::failure(Error::DISCONNECTED);
     if (!valid_local_receiver(local_receiver))
         return Result<bool>::failure(Error::INVALID_ARGUMENT);
     if (local_receiver < 2U ? system != Tc90522System::isdb_s
@@ -838,6 +852,14 @@ Result<void> Q3U4FrontendBank::close_receiver(
 {
     std::lock_guard<std::mutex> lock(mutex_);
     begin_operation();
+    if (disconnected_) {
+        if (valid_local_receiver(local_receiver)) {
+            receiver_state_[local_receiver] = Q3U4ReceiverState::closed;
+            satellite_selected_[local_receiver] = false;
+            selected_tsid_[local_receiver] = 0U;
+        }
+        return Result<void>::failure(Error::DISCONNECTED);
+    }
     if (!valid_local_receiver(local_receiver))
         return Result<void>::failure(Error::INVALID_ARGUMENT);
     if (receiver_state_[local_receiver] == Q3U4ReceiverState::closed)
@@ -871,6 +893,16 @@ Result<void> Q3U4FrontendBank::close_receiver(
                               : Result<void>::failure(first);
 }
 
+void Q3U4FrontendBank::mark_disconnected() noexcept
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    disconnected_ = true;
+    receiver_state_.fill(Q3U4ReceiverState::closed);
+    satellite_selected_.fill(false);
+    selected_tsid_.fill(0U);
+    current_stage_ = DiagnosticStage::closed;
+}
+
 Result<void> Q3U4FrontendBank::cleanup() noexcept
 {
     Error first = Error::OK;
@@ -888,6 +920,7 @@ Q3U4ReceiverState Q3U4FrontendBank::receiver_state(
 {
     if (!valid_local_receiver(local_receiver)) return Q3U4ReceiverState::closed;
     std::lock_guard<std::mutex> lock(mutex_);
+    if (disconnected_) return Q3U4ReceiverState::closed;
     return receiver_state_[local_receiver];
 }
 
@@ -901,6 +934,7 @@ std::uint16_t Q3U4FrontendBank::selected_tsid(
 {
     if (!valid_local_receiver(local_receiver)) return 0U;
     std::lock_guard<std::mutex> lock(mutex_);
+    if (disconnected_) return 0U;
     return selected_tsid_[local_receiver];
 }
 
@@ -910,6 +944,7 @@ Result<bool> Q3U4FrontendBank::terrestrial_loop_through(
     if (!valid_local_receiver(local_receiver) || local_receiver < 2U)
         return Result<bool>::failure(Error::INVALID_ARGUMENT);
     std::lock_guard<std::mutex> lock(mutex_);
+    if (disconnected_) return Result<bool>::failure(Error::DISCONNECTED);
     return Result<bool>::success(r850_[local_receiver - 2U].loop_through());
 }
 
@@ -1054,7 +1089,23 @@ Result<void> Q3U4FrontendEnclosure::acquire_card() noexcept
 
 Result<void> Q3U4FrontendEnclosure::release_card() noexcept
 {
-    return coordinator_.release_card();
+    const auto result = coordinator_.release_card();
+    // The disconnect path already cleared the shared card reference. A later
+    // release is then success without a bus operation.
+    if (!result && result.error() == Error::INVALID_ARGUMENT &&
+        coordinator_.enclosure_disconnected()) {
+        return Result<void>::success();
+    }
+    return result;
+}
+
+Result<void> Q3U4FrontendEnclosure::mark_bridge_disconnected(
+    Q3U4Bridge bridge) noexcept
+{
+    const auto result = coordinator_.disconnect(bridge);
+    if (!result) return result;
+    bank(bridge).mark_disconnected();
+    return Result<void>::success();
 }
 
 Result<void> Q3U4FrontendEnclosure::reconcile_power() noexcept

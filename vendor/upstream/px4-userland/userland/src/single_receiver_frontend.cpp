@@ -140,8 +140,72 @@ Result<void> SingleReceiverFrontend::tune_satellite(std::uint8_t r,std::uint32_t
 
 Result<bool> SingleReceiverFrontend::is_locked(std::uint8_t r,ipc::System s) noexcept
 { if(r)return Result<bool>::failure(Error::INVALID_ARGUMENT); return s==ipc::System::ISDB_T?tc_t_.is_signal_locked_t():tc_s_.is_signal_locked_s(); }
-Result<void> SingleReceiverFrontend::select_satellite_slot(std::uint8_t,std::uint8_t,std::uint32_t) noexcept { return Result<void>::success(); }
-Result<void> SingleReceiverFrontend::select_satellite_tsid(std::uint8_t,std::uint16_t,std::uint32_t) noexcept { return Result<void>::success(); }
+Result<void> SingleReceiverFrontend::select_satellite_tsid_locked(
+    std::uint16_t tsid, std::uint32_t timeout_ms) noexcept
+{
+    auto result = tc_s_.set_tsid_s(tsid);
+    if (!result) return result;
+    bool verified = false;
+    Error last_error = Error::OK;
+    const std::size_t max_polls =
+        static_cast<std::size_t>(timeout_ms / 10U) + 1U;
+    for (std::size_t count = 0U; count < max_polls; ++count) {
+        const auto value = tc_s_.get_tsid_s();
+        if (value && value.value() == tsid) { verified = true; break; }
+        last_error = value ? Error::OK : value.error();
+        if ((count + 1U) * 10U <= timeout_ms) delay_.sleep_ms(10U);
+    }
+    if (!verified)
+        return Result<void>::failure(last_error == Error::OK ? Error::TIMEOUT : last_error);
+    return Result<void>::success();
+}
+
+Result<void> SingleReceiverFrontend::select_satellite_slot(
+    std::uint8_t receiver, std::uint8_t slot, std::uint32_t timeout_ms) noexcept
+{
+    if (receiver != 0U) return Result<void>::failure(Error::INVALID_ARGUMENT);
+    if (slot >= 12U) return Result<void>::failure(Error::INVALID_ARGUMENT);
+    if (!receiver_supports(receiver, ipc::System::ISDB_S))
+        return Result<void>::failure(Error::UNSUPPORTED);
+    if (!opened_ || !satellite_) return Result<void>::failure(Error::NOT_READY);
+    if (disconnected_) return Result<void>::failure(Error::DISCONNECTED);
+
+    std::uint16_t tsid = 0U;
+    Error last_error = Error::OK;
+    bool found = false;
+    std::uint32_t elapsed_ms = 0U;
+    const std::size_t max_polls =
+        static_cast<std::size_t>(timeout_ms / 10U) + 1U;
+    for (std::size_t count = 0U; count < max_polls; ++count) {
+        const auto value = tc_s_.tmcc_get_tsid_s(slot);
+        if (value && value.value() != 0U) {
+            tsid = value.value();
+            found = true;
+            break;
+        }
+        last_error = value ? Error::OK : value.error();
+        if ((count + 1U) * 10U <= timeout_ms) {
+            delay_.sleep_ms(10U);
+            elapsed_ms += 10U;
+        }
+    }
+    if (!found)
+        return Result<void>::failure(last_error == Error::OK ? Error::TIMEOUT : last_error);
+    const std::uint32_t remaining_ms =
+        elapsed_ms < timeout_ms ? timeout_ms - elapsed_ms : 0U;
+    return select_satellite_tsid_locked(tsid, remaining_ms);
+}
+
+Result<void> SingleReceiverFrontend::select_satellite_tsid(
+    std::uint8_t receiver, std::uint16_t tsid, std::uint32_t timeout_ms) noexcept
+{
+    if (receiver != 0U) return Result<void>::failure(Error::INVALID_ARGUMENT);
+    if (!receiver_supports(receiver, ipc::System::ISDB_S))
+        return Result<void>::failure(Error::UNSUPPORTED);
+    if (!opened_ || !satellite_) return Result<void>::failure(Error::NOT_READY);
+    if (disconnected_) return Result<void>::failure(Error::DISCONNECTED);
+    return select_satellite_tsid_locked(tsid, timeout_ms);
+}
 Result<void> SingleReceiverFrontend::start_capture(std::uint8_t r,ipc::System s) noexcept
 { if(r||!opened_)return Result<void>::failure(Error::INVALID_ARGUMENT); auto x=s==ipc::System::ISDB_T?tc_t_.enable_ts_pins_t(true):tc_s_.enable_ts_pins_s(true); if(x)capturing_=true; return x; }
 Result<void> SingleReceiverFrontend::stop_capture(std::uint8_t r,ipc::System s) noexcept

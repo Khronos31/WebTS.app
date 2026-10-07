@@ -115,8 +115,10 @@ void Q3U4FrontendTunerBackend::mark_receiver_disconnected(
     std::uint8_t receiver) noexcept
 {
     if (!valid_receiver(receiver)) return;
-    (void)lnb_power_.disconnect(receiver < 4U ? Q3U4Bridge::dev1
-                                             : Q3U4Bridge::dev2);
+    const Q3U4Bridge bridge = receiver < 4U ? Q3U4Bridge::dev1
+                                            : Q3U4Bridge::dev2;
+    (void)lnb_power_.disconnect(bridge);
+    (void)enclosure_.mark_bridge_disconnected(bridge);
 }
 
 Result<void> Q3U4FrontendTunerBackend::shutdown() noexcept

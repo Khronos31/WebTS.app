@@ -47,9 +47,10 @@ public:
                                         std::uint32_t timeout_ms) noexcept = 0;
     virtual Result<bool> is_locked(std::uint8_t receiver,
                                    ipc::System system) noexcept = 0;
-    // The post-lock settle is a Q3U4/px4_drv device policy, not a generic
-    // tuner-service requirement. Production Q3U4 enables it explicitly;
-    // compatibility/test backends retain their existing timing contract.
+    // The post-lock settle is a px4_drv device policy, not a generic
+    // tuner-service requirement. Production Q3U4, MLT, and one-receiver
+    // backends enable it explicitly; compatibility/test backends retain
+    // their existing timing contract.
     virtual bool requires_terrestrial_lock_settle() const noexcept
     {
         return false;
