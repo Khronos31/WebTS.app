@@ -48,8 +48,8 @@
     {
       "name": "px4-userland",
       "origin": "https://github.com/Khronos31/px4-userland.git",
-      "ref": "v0.1.9",
-      "commit": "cf38742618bb02db41a95def619fbff50e9eb0f3",
+      "ref": "v0.1.10",
+      "commit": "7ad5f6691f77a9aa58c4097f8b6dfea77f6d9b6a",
       "license": "GPL-2.0-only",
       "purpose": "PX-Q3U4 core: IT930x bridge, identity grouping, tagged TS demux, stream data plane, internal card backend.",
       "selectionNote": [

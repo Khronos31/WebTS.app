@@ -148,8 +148,10 @@ public:
         std::mutex lifecycle;
         std::unique_ptr<std::thread> thread;
         bool stop_requested = false;
+        bool join_in_progress = false;
         State state = State::stopped;
         bool cleanup_done = false;
+        Error cleanup_error = Error::OK;
         std::size_t attached_count = 0U;
         TaggedTsDemux demux;
         TaggedTsDemux::Counters demux_counters{};
@@ -296,8 +298,11 @@ public:
     {
         if (bridge.state != Bridge::State::stopped)
             return Result<void>::failure(Error::BUSY);
+        if (bridge.thread != nullptr)
+            return Result<void>::failure(Error::BUSY);
         bridge.state = Bridge::State::starting;
         bridge.cleanup_done = false;
+        bridge.cleanup_error = Error::OK;
         const auto started = bridge.transport.start_stream(
             StreamConfig{kTsInEndpoint, 188U * 816U, 6U});
         if (!started) {
@@ -325,6 +330,8 @@ public:
             bridge.state = (!cancelled || !stopped) ? Bridge::State::fatal
                                                     : Bridge::State::stopped;
             bridge.cleanup_done = true;
+            if (!cancelled) bridge.cleanup_error = cancelled.error();
+            else if (!stopped) bridge.cleanup_error = stopped.error();
             bridge.state_changed.notify_all();
             if (!cancelled || !stopped) {
                 enclosure_fatal_.store(true);
@@ -346,18 +353,26 @@ public:
         std::unique_lock<std::mutex> lifecycle(bridge.lifecycle);
         if (!owns_stopping) {
             while (bridge.state == Bridge::State::starting ||
-                   bridge.state == Bridge::State::stopping)
+                   bridge.state == Bridge::State::stopping ||
+                   bridge.join_in_progress)
+                bridge.state_changed.wait(lifecycle);
+        } else {
+            while (bridge.join_in_progress)
                 bridge.state_changed.wait(lifecycle);
         }
         const bool join_needed = bridge.thread != nullptr;
         cleanup_needed = !bridge.cleanup_done &&
                          (bridge.state == Bridge::State::running ||
                           (owns_stopping && bridge.state == Bridge::State::stopping));
-        if (!join_needed && !cleanup_needed) return Result<void>::success();
+        if (!join_needed && !cleanup_needed)
+            return bridge.cleanup_error == Error::OK
+                       ? Result<void>::success()
+                       : Result<void>::failure(bridge.cleanup_error);
         // Claim the join object while holding the lifecycle lock.  A second
         // cleanup caller waits for this epoch and then observes cleanup_done;
         // it must never inspect or reset the same std::thread concurrently.
         thread = std::move(bridge.thread);
+        bridge.join_in_progress = thread != nullptr;
         bridge.stop_requested = true;
         if (cleanup_needed) bridge.state = Bridge::State::stopping;
         lifecycle.unlock();
@@ -376,8 +391,11 @@ public:
         }
 
         lifecycle.lock();
+        if (first == Error::OK) first = bridge.cleanup_error;
         bridge.cleanup_done = true;
+        bridge.cleanup_error = first;
         bridge.state = first == Error::OK ? Bridge::State::stopped : Bridge::State::fatal;
+        bridge.join_in_progress = false;
         bridge.state_changed.notify_all();
         lifecycle.unlock();
         if (first != Error::OK) {
@@ -405,24 +423,18 @@ public:
 
         lifecycle.lock();
         bridge.cleanup_done = true;
+        bridge.cleanup_error = first;
         // A bulk/demux failure ends this pump's epoch.  It is not an
         // enclosure-fatal condition unless finite cancel/stop cleanup fails.
         bridge.state = Bridge::State::fatal;
-        // finish_pump runs on the pump thread itself.  Release the thread
-        // object here so a later detach/shutdown cannot attempt to join
-        // itself or destroy a still-joinable std::thread.  The finite
-        // transport cleanup above is the only cleanup for this epoch.
-        if (bridge.thread != nullptr && bridge.thread->joinable() &&
-            bridge.thread->get_id() == std::this_thread::get_id()) {
-            bridge.thread->detach();
-            bridge.thread.reset();
-        }
-        bridge.state_changed.notify_all();
-        lifecycle.unlock();
         if (first != Error::OK) {
             enclosure_fatal_.store(true);
             mark_all_terminal(StreamTerminal::bridge_fatal);
         }
+        // The owner claims and joins this thread after cleanup is complete.
+        // Nothing may access owner or bridge state after waking waiters.
+        bridge.state_changed.notify_all();
+        lifecycle.unlock();
     }
 
     Result<void> attach(const TunerAttachment& attachment) noexcept

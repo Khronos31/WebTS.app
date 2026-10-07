@@ -28,11 +28,19 @@ export interface Tuning {
   readonly label: string;
 }
 
-// 地上デジタル: ch13 = 473143 kHz、以降 6 MHz 間隔。UHF は ch13〜ch62。
+// 地上デジタル: ch13 = 473143 kHz、以降 6 MHz 間隔。
+//
+// **地デジの割り当ては ch13〜ch52**（470〜710 MHz）。ch53〜ch62 はアナログと
+// 並行していた時期に一部が使っていただけで、2012年7月（岩手・宮城・福島は
+// 2013年3月）までのリパックで ch52 以下へ移り、空いた帯域は移動通信に回った。
+// 選局できる範囲（MAX_PHYSICAL_CHANNEL）は上流のドライバと同じ ch62 まで残し、
+// 走査だけを ch52 で止める（開発リポ Issue #3）。
 const GR_BASE_KHZ = 473_143;
 const GR_STEP_KHZ = 6_000;
 export const MIN_PHYSICAL_CHANNEL = 13;
 export const MAX_PHYSICAL_CHANNEL = 62;
+/** 走査で回る最後の物理チャンネル。ch53〜62 は国内で地デジが出ていない。 */
+export const GR_SCAN_MAX_CHANNEL = 52;
 
 // BS の第1中継器 (BS-1) の IF 周波数と間隔。中継器番号は奇数 1〜23。
 const BS_BASE_KHZ = 1_049_480;
@@ -115,10 +123,10 @@ export function satelliteScanTunings(transponders: readonly Tuning[]): Tuning[] 
   return list;
 }
 
-/** 地上デジタルの全物理チャンネル。 */
+/** 地上デジタルの走査で回る物理チャンネル（ch13〜52）。 */
 export function grTunings(): Tuning[] {
   const list: Tuning[] = [];
-  for (let channel = MIN_PHYSICAL_CHANNEL; channel <= MAX_PHYSICAL_CHANNEL; channel += 1) {
+  for (let channel = MIN_PHYSICAL_CHANNEL; channel <= GR_SCAN_MAX_CHANNEL; channel += 1) {
     list.push(grTuning(channel));
   }
   return list;

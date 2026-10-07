@@ -66,6 +66,11 @@ public:
     // changes coordinator state; it never calls a backend.
     Result<void> disconnect(Q3U4Bridge bridge) noexcept;
 
+    // True once any bridge has been terminally disconnected. The enclosure
+    // remains terminal for every later acquire; callers use this to treat a
+    // release whose logical reference was already cleared as a no-op.
+    bool enclosure_disconnected() const noexcept;
+
     Q3U4PowerSnapshot snapshot() const noexcept;
 
 private:

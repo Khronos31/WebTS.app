@@ -208,6 +208,12 @@ Result<void> Q3U4PowerCoordinator::disconnect(Q3U4Bridge bridge) noexcept
     return Result<void>::success();
 }
 
+bool Q3U4PowerCoordinator::enclosure_disconnected() const noexcept
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    return enclosure_disconnected_locked();
+}
+
 Q3U4PowerSnapshot Q3U4PowerCoordinator::snapshot() const noexcept
 {
     std::lock_guard<std::mutex> lock(mutex_);
